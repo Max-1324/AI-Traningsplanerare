@@ -1537,8 +1537,10 @@ def main():
     prompt = build_prompt(activities, wellness, fitness, races, weather, morning, args.horizon,
                           manual_workouts, athlete, hrv, budgets, tsb_bgt, vetos, phase,
                           existing_plan_summary)
-    raw    = call_ai(args.provider, prompt)
-
+    raw            = call_ai(args.provider, prompt)
+    plan           = parse_plan(raw)
+    plan, changes  = post_process(plan, hrv, budgets, locked_dates, tsb_bgt, activities, weather, athlete, morning.get('injury_today', ''))
+    print_plan(plan, changes)
 
     if args.dry_run:
         print("\nDRY-RUN - ingenting sparades.")
