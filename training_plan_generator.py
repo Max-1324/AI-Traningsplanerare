@@ -991,13 +991,21 @@ Inkludera EJ datumen {locked_str} i "days".
 
 def call_ai(provider, prompt):
     if provider == "gemini":
-        import google.generativeai as genai
-        key = os.getenv("GEMINI_API_KEY","")
+        from google import genai
+        from google.genai import types
+        key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
-        mn = os.getenv("GEMINI_MODEL","gemini-1.5-pro")
+        mn = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         log.info(f"Skickar till Gemini ({mn})...")
-        genai.configure(api_key=key)
-        return genai.GenerativeModel(mn, generation_config={"response_mime_type":"application/json"}).generate_content(prompt).text
+        client = genai.Client(api_key=key)
+        response = client.models.generate_content(
+            model=mn,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+        return response.text
     elif provider == "anthropic":
         import anthropic
         key = os.getenv("ANTHROPIC_API_KEY","")
