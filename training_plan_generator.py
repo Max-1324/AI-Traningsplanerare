@@ -995,7 +995,7 @@ def call_ai(provider, prompt):
         from google.genai import types
         key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
-        mn = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        mn = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         log.info(f"Skickar till Gemini ({mn})...")
         client = genai.Client(api_key=key)
         response = client.models.generate_content(
