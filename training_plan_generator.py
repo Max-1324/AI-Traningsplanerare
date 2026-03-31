@@ -56,6 +56,10 @@ LOCATION      = os.getenv("ATHLETE_LOCATION",   "Karlstad")
 RISK          = os.getenv("RISK_TOLERANCE",      "NORMAL").upper()
 AI_TAG        = "ai-generated"
 NUTRITION_TAG = "Nutritionsrad (AI):"
+
+def get_used_model() -> str:
+    """Returnerar vilken AI-modell som faktiskt användes i senaste körningen."""
+    return os.environ.get("_USED_MODEL", os.getenv("GEMINI_MODEL", "gemini"))
 CACHE_FILE    = Path(".weather_cache.json")
 
 if not ATHLETE_ID or not INTERVALS_KEY:
