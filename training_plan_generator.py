@@ -845,8 +845,25 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
     zone_info = parse_zones(athlete)
 
     def fz(zt):
-        if not zt or not isinstance(zt,list): return ""
-        return " ".join(f"Z{i+1}:{round(s/60)}m" for i,s in enumerate(zt) if s and s>30)
+        """
+        Formaterar zontider till t.ex. "Z1:12m Z2:34m".
+        intervals.icu kan returnera antingen en lista med tal (sekunder)
+        eller en lista med dicts som {"id":1,"secs":720,...}.
+        """
+        if not zt or not isinstance(zt, list):
+            return ""
+        result = []
+        for i, s in enumerate(zt):
+            # Hantera dict-format: {"id":1,"secs":720}
+            if isinstance(s, dict):
+                secs = s.get("secs") or s.get("seconds") or s.get("time") or 0
+            elif isinstance(s, (int, float)):
+                secs = s
+            else:
+                continue
+            if secs and secs > 30:
+                result.append(f"Z{i+1}:{round(secs/60)}m")
+        return " ".join(result)
 
     act_lines = []
     for a in activities[-20:]:
