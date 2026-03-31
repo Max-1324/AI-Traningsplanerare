@@ -789,41 +789,109 @@ def estimate_tss_coggan(day, athlete: dict) -> float:
     return round(tss, 1)
 
 
-def enforce_tss(days, budget, athlete):
+def enforce_tss(days, budget, athlete, floor_pct=0.80, ceil_pct=1.00):
     """
-    Beräknar planens totala TSS med Coggans formel.
-    Om budgeten spricker: ta bort det/de sista och tyngsta passen
-    tills vi ligger under budget. Konverterar dem till vila.
+    Tvingande TSS-golv och tak:
+      - Om total TSS < 80% av budget → förlänger Z2-pass tills golvet nås
+      - Om total TSS > 100% av budget → konverterar tyngsta pass till vila
+    Målet är att alltid landa på 80-100% av budgeten.
     """
-    total   = sum(estimate_tss_coggan(d, athlete) for d in days)
+    floor   = round(budget * floor_pct)
     changes = []
 
-    if total <= budget:
-        changes.append(f"TSS-AUDIT ✅: {round(total)} TSS ≤ budget {budget}")
-        return days, changes
+    def tss_total():
+        return sum(estimate_tss_coggan(d, athlete) for d in days)
 
-    surplus = total - budget
-    changes.append(f"TSS-AUDIT ⚠️: {round(total)} TSS överstiger budget {budget} "
-                   f"(överskott {round(surplus)}). Konverterar tyngsta pass.")
+    total = tss_total()
 
-    # Sortera fallande på estimerad TSS, konvertera tills vi är under budget
-    indexed = sorted(enumerate(days), key=lambda x: estimate_tss_coggan(x[1], athlete), reverse=True)
-    result  = list(days)
-    for idx, day in indexed:
-        if surplus <= 0:
-            break
-        est = estimate_tss_coggan(day, athlete)
-        if est > 0 and day.intervals_type != "Rest":
-            surplus -= est
+    # ── TAK: för hög TSS → behåll tyngsta pass, gör dagarna RUNT dem lättare ──
+    if total > budget:
+        surplus = total - budget
+        changes.append(f"TSS-AUDIT ⚠️ TAK: {round(total)} TSS > budget {budget}. Tunnar ut pass runt tunga nyckelpass.")
+
+        # Identifiera de tyngsta passen (nyckelpass – ska bevaras)
+        indexed_desc = sorted(enumerate(days), key=lambda x: estimate_tss_coggan(x[1], athlete), reverse=True)
+        heavy_indices = {idx for idx, _ in indexed_desc[:2]}  # skydda de 2 tyngsta
+
+        # Korta ner lättare pass runt de tunga (de med lägst TSS utom Rest)
+        light_indexed = sorted(
+            [(i, d) for i, d in enumerate(days)
+             if i not in heavy_indices and d.intervals_type not in ("Rest", "WeightTraining") and d.duration_min > 30],
+            key=lambda x: estimate_tss_coggan(x[1], athlete)
+        )
+
+        result = list(days)
+        for idx, day in light_indexed:
+            if surplus <= 0:
+                break
+            # Minska durationen med max 30 min, inte under 30 min
+            reduction = min(30, day.duration_min - 30, round(surplus / ((0.65**2 * 100) / 60)))
+            if reduction < 10:
+                continue
+            new_dur   = day.duration_min - reduction
+            # Korta ner sista steget i workout_steps
+            new_steps = list(day.workout_steps)
+            if new_steps:
+                last = new_steps[-1]
+                reduced = max(5, last.duration_min - reduction)
+                new_steps[-1] = last.model_copy(update={"duration_min": reduced})
+            old_tss = estimate_tss_coggan(day, athlete)
             result[idx] = day.model_copy(update={
-                "title":          day.title + " [→ Vila, TSS-budget]",
-                "intervals_type": "Rest",
-                "duration_min":   0,
-                "workout_steps":  [],
-                "description":    day.description + "\n\n⚠️ Konverterad till vila – TSS-budget nådd.",
+                "duration_min":  new_dur,
+                "workout_steps": new_steps,
+                "title":         day.title + f" (-{reduction}min)",
             })
-            changes.append(f"  Konverterade {day.date} {day.title} ({round(est)} TSS) → Vila")
-    return result, changes
+            new_tss  = estimate_tss_coggan(result[idx], athlete)
+            surplus -= (old_tss - new_tss)
+            changes.append(f"  {day.date}: -{reduction}min → -{round(old_tss-new_tss)} TSS (nyckelpass skyddade)")
+        days = result
+        total = tss_total()
+
+    # ── GOLV: för låg TSS → förlänger Z2-cykelpass ───────────────────────────
+    if total < floor:
+        deficit = floor - total
+        changes.append(f"TSS-AUDIT ⚠️ GOLV: {round(total)} TSS < {floor} (80% av {budget}). Lägger till volym.")
+
+        # Hitta Zwift/cykelpass att förlänga, sorterat på kortast first
+        extendable = [
+            (i, d) for i, d in enumerate(days)
+            if d.intervals_type in ("VirtualRide", "Ride")
+            and d.duration_min > 0
+        ]
+        extendable.sort(key=lambda x: x[1].duration_min)
+
+        for idx, day in extendable:
+            if deficit <= 0:
+                break
+            ftp = ftp_for_sport(day.intervals_type, athlete)
+            # Hur många minuter Z2 behövs för att täcka deficit?
+            # TSS per minut Z2 ≈ (0.70^2 * 100) / 60 ≈ 0.817
+            tss_per_min = (0.70 ** 2 * 100) / 60
+            extra_min   = min(round(deficit / tss_per_min), 60)  # max 60 min extra
+            if extra_min < 10:
+                break
+            new_dur = day.duration_min + extra_min
+            # Lägg till extra Z2-block i workout_steps
+            new_steps = list(day.workout_steps) + [WorkoutStep(
+                duration_min=extra_min,
+                zone="Z2",
+                description=f"Extra Z2-block tillagt för att nå TSS-golv @ {round(0.70*ftp)}W"
+            )]
+            days[idx] = day.model_copy(update={
+                "duration_min":  new_dur,
+                "workout_steps": new_steps,
+                "title":         day.title + f" (+{extra_min}min Z2)",
+            })
+            extra_tss = estimate_tss_coggan(days[idx], athlete) - estimate_tss_coggan(day, athlete)
+            deficit  -= extra_tss
+            changes.append(f"  {day.date}: +{extra_min}min Z2 → +{round(extra_tss)} TSS")
+
+        total = tss_total()
+
+    pct = round(total / budget * 100)
+    status = "✅" if floor <= total <= budget else "⚠️"
+    changes.append(f"TSS-AUDIT {status}: {round(total)} TSS ({pct}% av budget {budget}). Mål: {floor}-{budget}.")
+    return days, changes
 
 def add_env_nutrition(days, weather):
     wmap = {w["date"]: w for w in weather}
