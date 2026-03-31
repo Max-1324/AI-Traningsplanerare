@@ -62,17 +62,20 @@ if not ATHLETE_ID or not INTERVALS_KEY:
     sys.exit("Satt INTERVALS_ATHLETE_ID och INTERVALS_API_KEY i din .env.")
 
 SPORTS = [
-    # Längdskidåkning är borttagen – ingen snö. Aktivera igen till vintern.
-    {"namn": "Rullskidor",        "intervals_type": "RollerSki",     "skaderisk": "medel",
-     "kommentar": "Skidspecifik sommarträning. Hög skaderisk vid trötthet – undvik vid låg HRV."},
+    # PRIO 1 – Cykling är huvudsporten. Målet är Vätternrundan.
     {"namn": "Cykling (utomhus)", "intervals_type": "Ride",          "skaderisk": "lag",
-     "kommentar": "Låg skaderisk. Bra för lång aerob volym och återhämtning."},
+     "kommentar": "PRIO 1. Huvudsport – Vätternrundan är målet. Prioritera långa utomhuspass vid bra väder."},
     {"namn": "Inomhuscykling (Zwift)", "intervals_type": "VirtualRide", "skaderisk": "lag",
-     "kommentar": "Perfekt för kontrollerade intervaller oavsett väder."},
+     "kommentar": "PRIO 1 (dåligt väder). Perfekt för kontrollerade intervaller och tempopas inomhus."},
+    # PRIO 2 – Rullskidor för att hålla igång skidmuskulaturen under sommaren
+    {"namn": "Rullskidor",        "intervals_type": "RollerSki",     "skaderisk": "medel",
+     "kommentar": "PRIO 2. Komplement för att bibehålla skidspecifik muskulatur. Max 1 pass/vecka. Undvik vid trötthet/låg HRV."},
+    # PRIO 3 – Löpning och styrka som komplement
     {"namn": "Löpning",           "intervals_type": "Run",           "skaderisk": "hog",
-     "kommentar": "Hög skaderisk – begränsa volymökning till max 10%/vecka."},
+     "kommentar": "PRIO 3. Komplement. Begränsa volym – max 10% ökning/vecka."},
     {"namn": "Styrketräning",     "intervals_type": "WeightTraining","skaderisk": "lag",
-     "kommentar": "Kroppsvikt ENDAST. Bra komplement och aktiv återhämtning."},
+     "kommentar": "PRIO 3. Kroppsvikt ENDAST. Max 2 pass/10 dagar. Aldrig två dagar i rad."},
+    # Längdskidåkning är borttagen – ingen snö. Aktivera igen till vintern.
 ]
 VALID_TYPES = {s["intervals_type"] for s in SPORTS} | {"Rest"}
 
@@ -833,6 +836,90 @@ def add_env_nutrition(days, weather):
             days[i] = day.model_copy(update={"nutrition": (day.nutrition + "\n" + " ".join(extra)).strip()})
     return days
 
+def enforce_strength_limit(days, max_strength=2, min_gap=2):
+    """
+    Begränsar styrkepass till max 2 per period OCH kräver minst
+    min_gap dagars mellanrum mellan dem (t.ex. Zwift, Styrka, Zwift, Styrka).
+    Överskjutande eller för tätt liggande styrkepass → Zwift Z1.
+    """
+    changes = []
+    strength_count = 0
+    last_strength_idx = -99  # index för senaste godkända styrkepass
+
+    for i, day in enumerate(days):
+        if day.intervals_type != "WeightTraining":
+            continue
+
+        too_close  = (i - last_strength_idx) < min_gap
+        too_many   = strength_count >= max_strength
+
+        if too_many or too_close:
+            reason = "styrkegräns (max 2)" if too_many else f"för tätt (< {min_gap} dagar sedan förra)"
+            days[i] = day.model_copy(update={
+                "title":          day.title + f" → Zwift Z1 ({reason})",
+                "intervals_type": "VirtualRide",
+                "duration_min":   45,
+                "workout_steps":  [WorkoutStep(
+                    duration_min=45, zone="Z1",
+                    description="Lätt återhämtningscykling @ <120W"
+                )],
+                "strength_steps": [],
+                "description":    day.description + f"\n\n⚠️ Konverterad till Zwift – {reason}.",
+            })
+            changes.append(f"STYRKEGRÄNS: {day.date} '{day.title}' → Zwift Z1 ({reason})")
+        else:
+            strength_count  += 1
+            last_strength_idx = i
+
+    return days, changes
+
+
+def enforce_rollski_limit(days, max_per_week=1):
+    """
+    Max 1 rullskidspass per 7-dagarsfönster.
+    Överskjutande pass konverteras till Ride.
+    """
+    from datetime import datetime
+    changes = []
+    # Bygg en lista med (index, datum) för rullskidspass
+    rollski_days = [(i, day) for i, day in enumerate(days) if day.intervals_type == "RollerSki"]
+
+    # Kolla per 7-dagarsfönster
+    to_convert = set()
+    for j, (i, day) in enumerate(rollski_days):
+        d1 = datetime.strptime(day.date, "%Y-%m-%d")
+        count_in_window = 1
+        for k, (i2, day2) in enumerate(rollski_days):
+            if k == j: continue
+            d2 = datetime.strptime(day2.date, "%Y-%m-%d")
+            if 0 <= (d2 - d1).days < 7:
+                count_in_window += 1
+        if count_in_window > max_per_week:
+            # Behåll det första i varje fönster, konvertera resten
+            to_convert.add(i)
+
+    # Behåll ett per fönster – ta bort dubbletter smart
+    seen_weeks = set()
+    for i, day in rollski_days:
+        week = datetime.strptime(day.date, "%Y-%m-%d").isocalendar()[1]
+        if week in seen_weeks:
+            to_convert.add(i)
+        else:
+            seen_weeks.add(week)
+            to_convert.discard(i)
+
+    for i in to_convert:
+        day = days[i]
+        days[i] = day.model_copy(update={
+            "title":          day.title + " → Cykling (rullskidsgräns)",
+            "intervals_type": "Ride",
+            "description":    day.description + "\n\n⚠️ Konverterad till cykling – max 1 rullskidspass/vecka.",
+        })
+        changes.append(f"RULLSKIDSGRÄNS: {day.date} '{day.title}' → Ride (max 1/vecka)")
+
+    return days, changes
+
+
 def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlete, injury_note=""):
     days = plan.days
     all_c = []
@@ -841,6 +928,8 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
     days, c2 = apply_injury_rules(days, injury_note);  all_c += c2
     days, c = enforce_sport_budget(days, budgets);     all_c += c
     days, c = enforce_hard_easy(days);                 all_c += c
+    days, c = enforce_strength_limit(days, max_strength=2); all_c += c
+    days, c = enforce_rollski_limit(days, max_per_week=1);  all_c += c
     days, c = enforce_tss(days, budget, athlete);      all_c += c
     days     = add_env_nutrition(days, weather)
     return plan.model_copy(update={"days": days}), all_c
@@ -997,20 +1086,29 @@ Anvand EXAKTA zontarget i stegen:
 
 TAVLINGAR:
 {chr(10).join(race_lines)}
+Fast mål: Vätternrundan (300 km cykling). Alla pass ska bygga mot detta.
+Cykelspecifik träning = högst prioritet. Lång uthållighet och effektivitet i sadeln är nyckeln.
 
 VADER ({LOCATION}):
 {chr(10).join(weather_lines) or '  Ingen vaderdata'}
 
 Väderregler:
-  - Regn (>2mm) eller storm → Zwift/inomhus
-  - Temperatur > 2°C → INGEN SNÖTÄCKE, välj INTE NordicSki
-  - Temperatur 5-20°C, klart → Rullskidor eller Cykling utomhus
-  - Temperatur > 20°C → Cykling utomhus eller Zwift (undvik rullskidor i stark värme)
-  - Temperatur < 0°C och snö → Längdskidor (men NordicSki är INTE aktiv denna säsong)
-  - Blåsigt → Zwift eller löpning
+  Regn:
+    - Lätt regn (<5mm): OK för löpning och rullskidor. Cykling utomhus undviks (halt, kallt).
+    - Måttligt regn (5-15mm): Löpning OK, rullskidor undviks (halt). Cykling → Zwift.
+    - Kraftigt regn (>15mm) eller storm → Zwift/inomhus för alla sporter.
+  Temperatur:
+    - > 2°C → INGEN SNÖ, välj INTE NordicSki
+    - 5-20°C, klart → Cykling utomhus prioriteras (PRIO 1). Rullskidor max 1 gång/vecka som komplement.
+    - > 22°C → Undvik rullskidor (överhettning). Cykling eller löpning tidigt.
+    - < 0°C → Undvik cykling utomhus (halt). Löpning OK med rätt skor.
+  Blåsigt (>10 m/s) → Zwift eller löpning (undvik rullskidor)
 
 SPORTER (välj aktivt baserat på väder, form och specificitet):
-⚠️  NordicSki/Längdskidåkning är INTE tillgänglig denna säsong (ingen snö). Välj RollerSki istället för skidspecifik träning.
+⚠️  NordicSki/Längdskidåkning är INTE tillgänglig (ingen snö).
+🚴 HUVUDSPORT: Cykling (Ride/VirtualRide) – målet är Vätternrundan. De flesta pass ska vara cykling.
+🎿 KOMPLEMENT: Rullskidor max 1 gång/vecka för att bibehålla skidmuskulatur.
+🏃 KOMPLEMENT: Löpning sparsamt. Styrka max 2 ggr/10 dagar.
 {chr(10).join(f"  {s['namn']} ({s['intervals_type']}, skaderisk: {s['skaderisk']}): {s.get('kommentar','')}" for s in SPORTS)}
 
 LASTA DATUM (rör EJ dessa): {locked_str}
@@ -1030,6 +1128,8 @@ COACHREGLER:
 5. EXAKTA ZONER:
    VirtualRide → watt + puls. Ride/Run/RollerSki → ENBART puls (ingen effektmätare utomhus).
 6. STYRKA: Kroppsvikt ENDAST. Inget gym, inga vikter.
+   MAX 2 styrkepass per 10-dagarsperiod. Styrka ersätter ALDRIG konditionspass vid dåligt väder – välj Zwift istället.
+   Styrka läggs bara in som komplement, aldrig flera dagar i rad.
 
 INTENSITETSFÖRDELNING (KRITISK REGEL):
 En välplanerad vecka ska innehålla VARIATION – inte bara Z2!
