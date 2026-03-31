@@ -21,6 +21,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AI_PROVIDER: gemini
           GEMINI_MODEL: gemini-3-flash-preview
+          GEMINI_FALLBACK_MODEL: gemini-3.1-flash-lite-preview
           ATHLETE_LAT: "59.3793"
           ATHLETE_LON: "13.5036"
           ATHLETE_LOCATION: Karlstad
