@@ -1324,15 +1324,18 @@ def call_ai(provider, prompt):
         from google import genai
         from google.genai import types
         from google.genai.errors import ServerError, ClientError
+        
         key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
-        mn = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        log.info(f"Skickar till Gemini ({mn})...")
         client = genai.Client(api_key=key)
 
-        # Modell-prioritet: primär → fallback
-        fallback_mn = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite-preview")
-        model_queue = [mn, fallback_mn] if mn != fallback_mn else [mn]
+        # 1. Hämta den kommaseparerade listan från miljövariablerna (med säker fallback)
+        models_str = os.getenv("GEMINI_MODELS", "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-flash")
+        
+        # 2. Omvandla textsträngen till en riktig Python-lista och rensa eventuella mellanslag
+        model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
+        
+        log.info(f"Skickar till Gemini (Testar {len(model_queue)} modeller i kö)...")
 
         last_err = None
         for current_model in model_queue:
@@ -1359,8 +1362,10 @@ def call_ai(provider, prompt):
                     else:
                         log.warning(f"   {current_model} misslyckades ({status}) – provar nästa modell...")
                         break
-
+        
+        # 3. Om loopen körs klart och alla modeller misslyckas, kasta det sista felet
         raise last_err
+
     elif provider == "anthropic":
         import anthropic
         key = os.getenv("ANTHROPIC_API_KEY","")
