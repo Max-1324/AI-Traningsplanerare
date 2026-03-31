@@ -281,7 +281,7 @@ def save_event(day: PlanDay):
     requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
         "category": "NOTE",
         "start_date_local": day.date + "T00:00:00", "name": day.title,
-        "description": day.description + f"\n\n{AI_TAG}",
+        "description": day.description + f"\n\n{AI_TAG} ({get_used_model()})",
     }).raise_for_status()
 
 def save_workout(day: PlanDay):
@@ -300,7 +300,7 @@ def save_workout(day: PlanDay):
         "start_date_local":  day.date + "T00:00:00",
         "type":              day.intervals_type,
         "name":              day.title,
-        "description":       full_desc + f"\n\n{AI_TAG}",
+        "description":       full_desc + f"\n\n{AI_TAG} ({get_used_model()})",
         "moving_time":       day.duration_min * 60,
         "planned_distance":  day.distance_km * 1000,
     }).raise_for_status()
@@ -1262,21 +1262,47 @@ Inkludera EJ datumen {locked_str} i "days".
 
 def call_ai(provider, prompt):
     if provider == "gemini":
+        import time
         from google import genai
         from google.genai import types
+        from google.genai.errors import ServerError, ClientError
         key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
         mn = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         log.info(f"Skickar till Gemini ({mn})...")
         client = genai.Client(api_key=key)
-        response = client.models.generate_content(
-            model=mn,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
-        )
-        return response.text
+
+        # Modell-prioritet: primär → fallback
+        fallback_mn = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite-preview")
+        model_queue = [mn, fallback_mn] if mn != fallback_mn else [mn]
+
+        last_err = None
+        for current_model in model_queue:
+            # 2 försök per modell med backoff vid 503/429
+            for attempt in range(1, 3):
+                try:
+                    log.info(f"   Försöker {current_model} (försök {attempt})...")
+                    response = client.models.generate_content(
+                        model=current_model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    # Spara vilken modell som faktiskt körde så planen kan logga det
+                    os.environ["_USED_MODEL"] = current_model
+                    return response.text
+                except (ServerError, ClientError) as e:
+                    status = getattr(e, 'status_code', 0)
+                    last_err = e
+                    if status in (429, 503) and attempt < 2:
+                        log.warning(f"   {current_model} {status} – väntar 30s...")
+                        time.sleep(30)
+                    else:
+                        log.warning(f"   {current_model} misslyckades ({status}) – provar nästa modell...")
+                        break
+
+        raise last_err
     elif provider == "anthropic":
         import anthropic
         key = os.getenv("ANTHROPIC_API_KEY","")
