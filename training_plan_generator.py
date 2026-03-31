@@ -2211,8 +2211,8 @@ def format_existing_plan(ai_workouts: list) -> str:
     lines = ["  Befintlig plan (AI-genererad):"]
     for w in sorted(ai_workouts, key=lambda x: x.get("start_date_local","")):
         d    = w.get("start_date_local","")[:10]
-        name = w.get("name","?")
-        wtype = w.get("type","?")
+        name = w.get("name") or "?"
+        wtype = w.get("type") or "Note" # FIX: Gör om None till "Note"
         dur  = round((w.get("moving_time") or 0) / 60)
         lines.append(f"    {d} | {wtype:12} | {dur}min | {name}")
     return "\n".join(lines)
@@ -2343,8 +2343,9 @@ def main():
     plan           = parse_plan(raw)
     plan, changes  = post_process(
         plan, hrv, budgets, locked_dates, tsb_bgt, activities, weather, athlete,
-        morning.get('injury_today', ''), mesocycle,
+        injury_note=morning.get('injury_today', ''), mesocycle=mesocycle
     )
+    
     print_plan(plan, changes, mesocycle, trajectory)
 
     if args.dry_run:
