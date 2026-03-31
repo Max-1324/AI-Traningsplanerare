@@ -736,7 +736,7 @@ def ftp_for_sport(sport_type: str, athlete: dict) -> float:
     fallbacks = {
         "VirtualRide": ["VirtualRide", "Ride"],
         "RollerSki":   ["RollerSki", "NordicSki"],
-        "NordicSki":   ["NordicSki", "RollerSki"],
+        "NordicSki":   ["RollerSki"],  # NordicSki ej aktiv – använd RollerSki-FTP
         "Run":         ["Run"],
         "Ride":        ["Ride", "VirtualRide"],
     }
@@ -989,16 +989,28 @@ HARDA VETON (verkstalls automatiskt i kod):
 
 DINA TRANING SZONER:
 {zone_info}
-Anvand EXAKTA watt/puls i stegen (t.ex. "20 min @ 240W").
+Anvand EXAKTA zontarget i stegen:
+  - VirtualRide (Zwift): watt OCH puls (t.ex. "20 min @ 220W / 155bpm")
+  - Ride (utomhus): BARA puls, INGEN watt – atleten har ingen effektmätare (t.ex. "20 min @ 155bpm")
+  - Run, RollerSki: BARA puls (t.ex. "30 min @ 155bpm")
+  - WeightTraining: inga zontargets
 
 TAVLINGAR:
 {chr(10).join(race_lines)}
 
 VADER ({LOCATION}):
 {chr(10).join(weather_lines) or '  Ingen vaderdata'}
-Regn/storm → Zwift. Varmt och klart → prioritera utomhus (Rullskidor/Cykling). Blåsigt → Zwift.
+
+Väderregler:
+  - Regn (>2mm) eller storm → Zwift/inomhus
+  - Temperatur > 2°C → INGEN SNÖTÄCKE, välj INTE NordicSki
+  - Temperatur 5-20°C, klart → Rullskidor eller Cykling utomhus
+  - Temperatur > 20°C → Cykling utomhus eller Zwift (undvik rullskidor i stark värme)
+  - Temperatur < 0°C och snö → Längdskidor (men NordicSki är INTE aktiv denna säsong)
+  - Blåsigt → Zwift eller löpning
 
 SPORTER (välj aktivt baserat på väder, form och specificitet):
+⚠️  NordicSki/Längdskidåkning är INTE tillgänglig denna säsong (ingen snö). Välj RollerSki istället för skidspecifik träning.
 {chr(10).join(f"  {s['namn']} ({s['intervals_type']}, skaderisk: {s['skaderisk']}): {s.get('kommentar','')}" for s in SPORTS)}
 
 LASTA DATUM (rör EJ dessa): {locked_str}
@@ -1015,7 +1027,8 @@ COACHREGLER:
 2. VOLYMSPÄRR: Aldrig mer an KVAR per sport (kod verkstaller).
 3. HRV-VETO: HRV LOW -> bara Z1/vila (kod verkstaller).
 4. NUTRITION: <60min -> nutrition="". >120min -> 60-90g CHO/h, gel var 20-25min. Skriv TOTAL CHO.
-5. EXAKTA ZONER: Watt/puls fran dina zoner ovan i alla steg.
+5. EXAKTA ZONER:
+   VirtualRide → watt + puls. Ride/Run/RollerSki → ENBART puls (ingen effektmätare utomhus).
 6. STYRKA: Kroppsvikt ENDAST. Inget gym, inga vikter.
 
 INTENSITETSFÖRDELNING (KRITISK REGEL):
@@ -1029,6 +1042,30 @@ Intervallpass ska INTE vara kortare än 30 min totalt (inkl. uppvärmning).
 Undvik intervaller BARA om: HRV=LOW/UNSTABLE, TSB < -20, eller dagen efter ett hårt pass.
 Om atleten har hög fitness (CTL > 50) → prioritera hårdare intervaller (Z5).
 Om atleten bygger upp (CTL < 40) → kortare intervaller med mer vila.
+
+PASSLÄNGDER PER SPORT (KRITISK REGEL – följ dessa):
+  Cykling utomhus (Ride):
+    Kort:   75-90 min   (återhämtning eller tidsbrist)
+    Medel:  120-150 min (standardpass)
+    Långt:  180-240 min (helgpass eller volymdag)
+    → Planera ALDRIG utomhuscykling kortare än 75 min – det är inte värt att ta på sig utrustningen.
+
+  Zwift/inomhus (VirtualRide):
+    Kort:   45-60 min   (återhämtning eller intervaller)
+    Medel:  75-90 min   (standardpass)
+    Långt:  120+ min    (sällan, bara vid dåligt väder och volymdag)
+
+  Rullskidor (RollerSki):
+    Kort:   60-75 min
+    Medel:  90-120 min
+    Långt:  150+ min
+
+  Löpning (Run):
+    Kort:   30-45 min
+    Medel:  60-75 min
+    Långt:  90+ min (begränsas av volymbudget)
+
+  Styrketräning: 30-45 min alltid.
 
 Returnera ENBART JSON, inga markdown-block:
 
@@ -1211,7 +1248,7 @@ def main():
     hrv         = calculate_hrv(wellness)
     phase       = training_phase(races, date.today())
     tsb_bgt     = tss_budget(ctl, tsb_val, args.horizon, fitness)
-    budgets     = {st: sport_budget(st, activities, manual_workouts) for st in ("Run","RollerSki","NordicSki")}
+    budgets     = {st: sport_budget(st, activities, manual_workouts) for st in ("Run","RollerSki","Ride","VirtualRide")}
 
     today_wellness    = next((w for w in wellness if w.get("id","").startswith(date.today().isoformat())), None)
     yesterday_planned = next((w for w in planned if w.get("start_date_local","")[:10] == (date.today()-timedelta(days=1)).isoformat()), None)
