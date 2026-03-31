@@ -287,10 +287,14 @@ def save_workout(day: PlanDay):
         step_text = ""
     nutr_block = f"{NUTRITION_TAG} {day.nutrition}" if day.nutrition else ""
     full_desc  = "\n\n".join(filter(None, [day.description, step_text, nutr_block]))
-    requests.post(f"{BASE}/athlete/{ATHLETE_ID}/workouts", auth=AUTH, timeout=10, json={
-        "athlete_id": ATHLETE_ID, "start_date_local": day.date + "T00:00:00", "name": day.title,
-        "description": full_desc + f"\n\n{AI_TAG}", "type": day.intervals_type,
-        "moving_time": day.duration_min * 60, "planned_distance": day.distance_km * 1000,
+    requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
+        "category":          "WORKOUT",
+        "start_date_local":  day.date + "T00:00:00",
+        "type":              day.intervals_type,
+        "name":              day.title,
+        "description":       full_desc + f"\n\n{AI_TAG}",
+        "moving_time":       day.duration_min * 60,
+        "planned_distance":  day.distance_km * 1000,
     }).raise_for_status()
 
 # ══════════════════════════════════════════════════════════════════════════════
