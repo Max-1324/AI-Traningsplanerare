@@ -147,13 +147,35 @@ def fetch_wellness(days):
     })
 
 def fetch_fitness(days):
-    return icu_get(f"/athlete/{ATHLETE_ID}/fitness", {
+    """
+    intervals.icu har ingen separat /fitness-endpoint för personliga API-nycklar.
+    ATL, CTL och TSB finns i wellness-endpointen som icu_atl, icu_ctl, icu_tsb.
+    Vi hämtar wellness och mappar om till samma format som resten av koden förväntar sig.
+    """
+    wellness = icu_get(f"/athlete/{ATHLETE_ID}/wellness", {
         "oldest": (date.today() - timedelta(days=days)).isoformat(),
         "newest": date.today().isoformat(),
     })
+    # Mappa om till {atl, ctl, tsb} per dag
+    fitness = []
+    for w in wellness:
+        atl = w.get("icu_atl") or w.get("atl")
+        ctl = w.get("icu_ctl") or w.get("ctl")
+        if atl is not None and ctl is not None:
+            fitness.append({
+                "date": w.get("id", ""),
+                "atl":  atl,
+                "ctl":  ctl,
+                "tsb":  ctl - atl,
+            })
+    return fitness
 
 def fetch_planned_workouts(horizon):
-    return icu_get(f"/athlete/{ATHLETE_ID}/workouts", {
+    """
+    Planerade pass är events med category WORKOUT eller NOTE i intervals.icu.
+    Det finns ingen separat /workouts-endpoint för personliga API-nycklar.
+    """
+    return icu_get(f"/athlete/{ATHLETE_ID}/events", {
         "oldest": date.today().isoformat(),
         "newest": (date.today() + timedelta(days=horizon)).isoformat(),
     })
@@ -184,7 +206,11 @@ def delete_ai_workouts(workouts):
     for w in workouts:
         if is_ai_generated(w):
             try:
-                requests.delete(f"{BASE}/athlete/{ATHLETE_ID}/workouts/{w['id']}", auth=AUTH, timeout=10).raise_for_status()
+                requests.put(
+                    f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
+                    auth=AUTH, timeout=15,
+                    json=[{"id": w["id"]}],
+                ).raise_for_status()
                 n += 1
             except Exception as e:
                 log.warning(f"Kunde inte ta bort {w.get('id')}: {e}")
@@ -195,15 +221,15 @@ def update_manual_nutrition(workout, nutrition):
     lines = [l for l in desc.split("\n") if not l.startswith(NUTRITION_TAG)]
     new   = "\n".join(lines).strip() + f"\n\n{NUTRITION_TAG} {nutrition}"
     try:
-        requests.put(f"{BASE}/athlete/{ATHLETE_ID}/workouts/{workout['id']}",
+        requests.put(f"{BASE}/athlete/{ATHLETE_ID}/events/{workout['id']}",
                      auth=AUTH, json={"description": new.strip()}, timeout=10).raise_for_status()
     except Exception as e:
         log.warning(f"Kunde inte uppdatera nutrition: {e}")
 
 def save_event(day: PlanDay):
     requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
-        "athlete_id": ATHLETE_ID, "category": "NOTE",
-        "start_date_local": day.date, "name": day.title,
+        "category": "NOTE",
+        "start_date_local": day.date + "T00:00:00", "name": day.title,
         "description": day.description + f"\n\n{AI_TAG}",
     }).raise_for_status()
 
@@ -219,7 +245,7 @@ def save_workout(day: PlanDay):
     nutr_block = f"{NUTRITION_TAG} {day.nutrition}" if day.nutrition else ""
     full_desc  = "\n\n".join(filter(None, [day.description, step_text, nutr_block]))
     requests.post(f"{BASE}/athlete/{ATHLETE_ID}/workouts", auth=AUTH, timeout=10, json={
-        "athlete_id": ATHLETE_ID, "start_date_local": day.date, "name": day.title,
+        "athlete_id": ATHLETE_ID, "start_date_local": day.date + "T00:00:00", "name": day.title,
         "description": full_desc + f"\n\n{AI_TAG}", "type": day.intervals_type,
         "moving_time": day.duration_min * 60, "planned_distance": day.distance_km * 1000,
     }).raise_for_status()
