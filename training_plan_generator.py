@@ -113,6 +113,49 @@ class PlanDay(BaseModel):
         datetime.strptime(v, "%Y-%m-%d")
         return v
 
+    @field_validator("strength_steps", mode="before")
+    @classmethod
+    def coerce_strength_steps(cls, v):
+        """
+        AI:n skickar ibland strength_steps i fel format – antingen som
+        WorkoutStep-liknande dicts (duration_min/zone/description) eller
+        som strängar. Konvertera till rätt StrengthStep-format istället
+        för att krascha.
+        """
+        if not isinstance(v, list):
+            return []
+        result = []
+        for item in v:
+            if not isinstance(item, dict):
+                continue
+            # Redan rätt format
+            if "exercise" in item and "sets" in item and "reps" in item:
+                result.append(item)
+                continue
+            # Fel format (WorkoutStep-liknande) – extrahera info från description
+            desc = item.get("description", "") or ""
+            # Försök tolka "3 x 10-15 repetitioner" ur beskrivningen
+            import re
+            sets_match = re.search(r"(\d+)\s*[x×]\s*(\d+(?:-\d+)?)", desc)
+            if sets_match:
+                result.append({
+                    "exercise":  desc.split(".")[0][:50] or "Övning",
+                    "sets":      int(sets_match.group(1)),
+                    "reps":      sets_match.group(2),
+                    "rest_sec":  60,
+                    "notes":     desc,
+                })
+            else:
+                # Kan inte tolka – skapa ett generiskt steg
+                result.append({
+                    "exercise": desc[:50] if desc else "Övning",
+                    "sets":     3,
+                    "reps":     "10-15",
+                    "rest_sec": 60,
+                    "notes":    desc,
+                })
+        return result
+
 class AIPlan(BaseModel):
     stress_audit:             str
     summary:                  str
