@@ -1183,8 +1183,10 @@ SPORTER (välj aktivt baserat på väder, form och specificitet):
 🏃 KOMPLEMENT: Löpning sparsamt. Styrka max 2 ggr/10 dagar.
 {chr(10).join(f"  {s['namn']} ({s['intervals_type']}, skaderisk: {s['skaderisk']}): {s.get('kommentar','')}" for s in SPORTS)}
 
-LASTA DATUM (rör EJ dessa): {locked_str}
+LÅSTA DATUM (Ändra ej längd eller aktivitet): {locked_str}
 {chr(10).join(manual_lines) if manual_lines else '  Inga manuella pass'}
+
+⚠️ VIKTIGT: För samtliga låsta datum ovan SKA du beräkna och lägga till nutrition i `manual_workout_nutrition`. Använd passets beskrivning och längd för att avgöra mängden CHO enligt NUTRITION-reglerna.
 
 TRANING SHISTORIK (senaste 20 pass):
 {chr(10).join(act_lines) or '  Ingen data'}
@@ -1196,16 +1198,17 @@ COACHREGLER:
 1. HARD-EASY: Aldrig Z4+ tva dagar i rad (kod verkstaller).
 2. VOLYMSPÄRR: Aldrig mer an KVAR per sport (kod verkstaller).
 3. HRV-VETO: HRV LOW -> bara Z1/vila (kod verkstaller).
-4. NUTRITION: <60min -> nutrition="". >120min -> 60-90g CHO/h, gel var 20-25min. Skriv TOTAL CHO.
-5. EXAKTA ZONER:
-   VirtualRide → watt + puls. Ride/Run/RollerSki → ENBART puls (ingen effektmätare utomhus).
+4. NUTRITION: < 60min: nutrition="".
+    60-120min: 40-60g CHO totalt. > 120min: 60-90g CHO per timme. Beräkna och skriv ut TOTAL mängd gram för hela passet.
+    För låsta pass: Analysera deras beskrivning/tid och applicera samma logik i manual_workout_nutrition
+5. VirtualRide → watt + puls. Ride/Run/RollerSki → ENBART puls (ingen effektmätare utomhus).
 6. STYRKA: Kroppsvikt ENDAST. Inget gym, inga vikter.
    MAX 2 styrkepass per 10-dagarsperiod. Styrka ersätter ALDRIG konditionspass vid dåligt väder – välj Zwift istället.
    Styrka läggs bara in som komplement, aldrig flera dagar i rad.
 
 INTENSITETSFÖRDELNING (KRITISK REGEL):
 En välplanerad vecka ska innehålla VARIATION – inte bara Z2!
-Typisk grundträningsvecka (10 dagar):
+Typisk grundträningsvecka (7 dagar):
   - 1-2 INTERVALLPASS (Z4-Z5): t.ex. 5x5min Z5, 4x8min Z4, 8x2min Z5, 30/15s
   - 1 TEMPOPASS (Z3): 20-40 min sammanhängande i Z3
   - Resten: aerob bas Z1-Z2
@@ -1239,18 +1242,22 @@ PASSLÄNGDER PER SPORT (KRITISK REGEL – följ dessa):
 
   Styrketräning: 30-45 min alltid.
 
+OBS Du har en viss möjlighet att bryta lätta regler, Aldrig HÅRDA VETON och VOLYMSPÄRRAR
+    Används din "Coach Intuition". Ser schemat enformigt ut, lägg in ett "överraskningspass" (t.ex. kadensövningar eller en specifik fartlek) som bryter mönstret men håller sig inom TSS-budgeten.
+    Frihet under ansvar: Du har mandat att frångå den "typiska" veckofördelningen om du ser en logisk anledning (t.ex. en kommande tävling eller en period av hög livsstress). Motivera då detta kort i din summary
+
 Returnera ENBART JSON, inga markdown-block:
 
 {{
   "stress_audit": "Dag1=X TSS, Dag2=Y TSS, ... Total=Z vs budget {tsb_bgt}",
-  "summary": "3-5 meningar om planen till atleten.",
+  "summary": "4-6 meningar om planen och varför till atleten.",
   "manual_workout_nutrition": [{{"date":"YYYY-MM-DD","nutrition":"Rad"}}],
   "days": [
     {{
       "date":"YYYY-MM-DD","title":"Passnamn",
       "intervals_type":"En av: {' | '.join(sorted(VALID_TYPES))}",
       "duration_min":60,"distance_km":0,
-      "description":"2-4 meningar.",
+      "description":"4-6 meningar och varför den körs idag till atleten.",
       "nutrition":"Totalt: Xg CHO. Rad. Tom om <60min.",
       "workout_steps":[{{"duration_min":15,"zone":"Z1","description":"Uppvarmning @ 180W"}}],
       "strength_steps":[]
@@ -1438,7 +1445,7 @@ def main():
     locked_dates    = {w.get("start_date_local","")[:10] for w in manual_workouts}
     if manual_workouts: log.info(f"  {len(manual_workouts)} manuella pass lasta: {', '.join(sorted(locked_dates))}")
 
-    log.info("Hamtar vader...")
+    log.info("Hamtar väder...")
     weather = fetch_weather(args.horizon)
 
     lf  = fitness[-1] if fitness else {}
