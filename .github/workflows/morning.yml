@@ -1,25 +1,15 @@
 name: Morgon träningsplan
 
 on:
-  schedule:
-    - cron: '0 7 * * *'  # 09:00 svensk sommartid
-  workflow_dispatch:      # Gör att du kan köra manuellt
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - run: python training_plan_generator.py --auto
-        env:
-          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
-          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          AI_PROVIDER: gemini
-          ATHLETE_LAT: "59.86"
-          ATHLETE_LON: "17.64"
-          ATHLETE_LOCATION: Uppsala
+      - uses: actions/checkout@v4
+      - name: Testa API direkt
+        run: |
+          curl -s -u "API:${{ secrets.INTERVALS_API_KEY }}" \
+          "https://intervals.icu/api/v1/athlete/${{ secrets.INTERVALS_ATHLETE_ID }}" \
+          | head -c 500
