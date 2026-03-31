@@ -20,6 +20,7 @@ jobs:
           INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AI_PROVIDER: gemini
-          ATHLETE_LAT: "59.86"
-          ATHLETE_LON: "17.64"
-          ATHLETE_LOCATION: Uppsala
+          GEMINI_MODEL: gemini-2.5-pro
+          ATHLETE_LAT: "59.3793"
+          ATHLETE_LON: "13.5036"
+          ATHLETE_LOCATION: Karlstad
