@@ -1249,15 +1249,25 @@ OBS Du har en viss möjlighet att bryta lätta regler, Aldrig HÅRDA VETON och V
 Returnera ENBART JSON, inga markdown-block:
 
 {{
-  "stress_audit": "Dag1=X TSS, Dag2=Y TSS, ... Total=Z vs budget {tsb_bgt}",
+  "internal_debug": {{
+    "weather_table": "Datum | Temp | Nederbörd | Vind | Beslut",
+    "stress_audit": "Dag1=X TSS, Dag2=Y TSS... Total=Z vs budget {tsb_bgt}. Förklara tidsavdrag här.",
+    "sparrar_info": "Vilka volymspärrar eller HÅRDA VETON som tvingade fram ändringar."
+  }},
+  "projection": {{
+    "end_ctl": 0, "end_tsb": 0, "total_load": 0,
+    "time_in_zones": {{"Z1": "Xh", "Z2": "Xh", "Z3": "Xh", "Z4": "Xh", "Z5": "Xh"}}
+  }},
   "summary": "4-6 meningar om planen och varför till atleten.",
   "manual_workout_nutrition": [{{"date":"YYYY-MM-DD","nutrition":"Rad"}}],
   "days": [
     {{
-      "date":"YYYY-MM-DD","title":"Passnamn",
+      "date":"YYYY-MM-DD",
+      "title":"Passnamn (OBS: RENT NAMN! Inga tidsavdrag i titeln)",
       "intervals_type":"En av: {' | '.join(sorted(VALID_TYPES))}",
-      "duration_min":60,"distance_km":0,
-      "description":"4-6 meningar och varför den körs idag till atleten.",
+      "duration_min":60,
+      "distance_km":0,
+      "description":"4-6 meningar. Fokusera på pepp, genomförande och varför passet körs idag. Nämn INGET om TSS-budgetar eller volymspärrar här.",
       "nutrition":"Totalt: Xg CHO. Rad. Tom om <60min.",
       "workout_steps":[{{"duration_min":15,"zone":"Z1","description":"Uppvarmning @ 180W"}}],
       "strength_steps":[]
