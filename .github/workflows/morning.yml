@@ -3,6 +3,7 @@ name: Morgon träningsplan
 on:
   schedule:
     - cron: '0 7 * * *'  # 09:00 svensk sommartid
+  workflow_dispatch:      # Gör att du kan köra manuellt
 
 jobs:
   run:
