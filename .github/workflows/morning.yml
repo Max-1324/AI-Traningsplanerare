@@ -10,6 +10,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Testa API direkt
         run: |
-          curl -s -u "API:${{ secrets.INTERVALS_API_KEY }}" \
+          curl -s -u "API_KEY:${{ secrets.INTERVALS_API_KEY }}" \
           "https://intervals.icu/api/v1/athlete/${{ secrets.INTERVALS_ATHLETE_ID }}" \
           | head -c 500
