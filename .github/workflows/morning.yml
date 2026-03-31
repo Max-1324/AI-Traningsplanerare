@@ -1,6 +1,8 @@
 name: Morgon träningsplan
 
 on:
+  schedule:
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 jobs:
@@ -8,8 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Testa API direkt
-        run: |
-          curl -s -u "API_KEY:${{ secrets.INTERVALS_API_KEY }}" \
-          "https://intervals.icu/api/v1/athlete/${{ secrets.INTERVALS_ATHLETE_ID }}" \
-          | head -c 500
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python training_plan_generator.py --auto
+        env:
+          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
+          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          AI_PROVIDER: gemini
+          ATHLETE_LAT: "59.86"
+          ATHLETE_LON: "17.64"
+          ATHLETE_LOCATION: Uppsala
