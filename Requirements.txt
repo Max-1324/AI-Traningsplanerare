@@ -1,13 +1,15 @@
-#Webbservern (Render)
-
+# Webbservern (Render)
 Flask==3.0.3
 gunicorn==22.0.0
 
-#API-anrop till Intervals.icu och hantering av miljövariabler
-
+# API-anrop till Intervals.icu och miljövariabler
 requests>=2.31.0
 python-dotenv>=1.0.1
 
-#Google AI Studio (Gemini)
-
+# AI-leverantörer
 google-generativeai>=0.4.0
+anthropic>=0.25.0
+openai>=1.30.0
+
+# Schema-validering av AI-svar
+pydantic>=2.0.0
