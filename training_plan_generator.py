@@ -62,12 +62,17 @@ if not ATHLETE_ID or not INTERVALS_KEY:
     sys.exit("Satt INTERVALS_ATHLETE_ID och INTERVALS_API_KEY i din .env.")
 
 SPORTS = [
-    {"namn": "Langdskidakning",   "intervals_type": "NordicSki",     "skaderisk": "lag"},
-    {"namn": "Rullskidor",        "intervals_type": "RollerSki",     "skaderisk": "medel"},
-    {"namn": "Cykling",           "intervals_type": "Ride",          "skaderisk": "lag"},
-    {"namn": "Inomhuscykling",    "intervals_type": "VirtualRide",   "skaderisk": "lag"},
-    {"namn": "Lopning",           "intervals_type": "Run",           "skaderisk": "hog"},
-    {"namn": "Styrketraning",     "intervals_type": "WeightTraining","skaderisk": "lag"},
+    # Längdskidåkning är borttagen – ingen snö. Aktivera igen till vintern.
+    {"namn": "Rullskidor",        "intervals_type": "RollerSki",     "skaderisk": "medel",
+     "kommentar": "Skidspecifik sommarträning. Hög skaderisk vid trötthet – undvik vid låg HRV."},
+    {"namn": "Cykling (utomhus)", "intervals_type": "Ride",          "skaderisk": "lag",
+     "kommentar": "Låg skaderisk. Bra för lång aerob volym och återhämtning."},
+    {"namn": "Inomhuscykling (Zwift)", "intervals_type": "VirtualRide", "skaderisk": "lag",
+     "kommentar": "Perfekt för kontrollerade intervaller oavsett väder."},
+    {"namn": "Löpning",           "intervals_type": "Run",           "skaderisk": "hog",
+     "kommentar": "Hög skaderisk – begränsa volymökning till max 10%/vecka."},
+    {"namn": "Styrketräning",     "intervals_type": "WeightTraining","skaderisk": "lag",
+     "kommentar": "Kroppsvikt ENDAST. Bra komplement och aktiv återhämtning."},
 ]
 VALID_TYPES = {s["intervals_type"] for s in SPORTS} | {"Rest"}
 
@@ -531,14 +536,14 @@ def training_phase(races, today):
     future = sorted([r for r in races if datetime.strptime(
         r.get("start_date_local", r.get("date","2099-01-01"))[:10], "%Y-%m-%d").date() >= today],
         key=lambda r: r.get("start_date_local",""))
-    if not future: return {"phase": "Grundtraning", "rule": "80-90% Zon 2. Bygg motor."}
+    if not future: return {"phase": "Grundtraning", "rule": "Grundträning: 1-2 intervallpass/vecka (Z4-Z5), 1 tempopass (Z3), resten Z2. Undvik intervaller ENDAST om HRV=LOW eller TSB < -20."}
     nr = future[0]
     dt = (datetime.strptime(nr["start_date_local"][:10], "%Y-%m-%d").date() - today).days
     nm = nr.get("name","Tavling")
     if dt < 7:  return {"phase": "Race Week", f"rule": f"{nm} om {dt}d. Aktivering."}
     if dt < 28: return {"phase": "Taper",     "rule": f"{nm} om {dt}d. -30% volym, behall intensitet."}
     if dt < 84: return {"phase": "Build",     "rule": f"{nm} om {dt}d. Bygg intensitet."}
-    return {"phase": "Base", "rule": f"{nm} om {dt}d. 80-90% Zon 2."}
+    return {"phase": "Base", "rule": f"{nm} om {dt}d. Grundträning: 1-2 intervallpass/vecka (Z4-Z5), 1 tempopass (Z3), resten Z2."}
 
 def parse_zones(athlete):
     lines = []
@@ -971,7 +976,9 @@ TRANING:
   Fas: {phase['phase']} | {phase['rule']}
   Volym forra veckan: {' | '.join(f"{k}: {round(v)}min" for k,v in vols.items()) or 'Ingen data'}
 
-TSS-BUDGET: TOTALT {tsb_bgt} TSS pa {horizon} dagar. Redovisa per dag i stress_audit.
+TSS-BUDGET: TOTALT {tsb_bgt} TSS pa {horizon} dagar.
+Sikta pa 90-100% av budgeten ({round(tsb_bgt * 0.90)}-{tsb_bgt} TSS). Under 80% ({round(tsb_bgt * 0.80)} TSS) ar for lite – lagg till fler eller langre pass.
+Redovisa per dag i stress_audit.
 
 VOLYMSPÄRRAR (10%-regeln):
 {chr(10).join(budget_lines) or '  Inga data'}
@@ -989,10 +996,10 @@ TAVLINGAR:
 
 VADER ({LOCATION}):
 {chr(10).join(weather_lines) or '  Ingen vaderdata'}
-Regn/storm -> Zwift. Sno -> langdskidor. Varmt -> utomhus.
+Regn/storm → Zwift. Varmt och klart → prioritera utomhus (Rullskidor/Cykling). Blåsigt → Zwift.
 
-SPORTER:
-{chr(10).join(f"  {s['namn']} ({s['intervals_type']}, skaderisk: {s['skaderisk']})" for s in SPORTS)}
+SPORTER (välj aktivt baserat på väder, form och specificitet):
+{chr(10).join(f"  {s['namn']} ({s['intervals_type']}, skaderisk: {s['skaderisk']}): {s.get('kommentar','')}" for s in SPORTS)}
 
 LASTA DATUM (rör EJ dessa): {locked_str}
 {chr(10).join(manual_lines) if manual_lines else '  Inga manuella pass'}
@@ -1010,6 +1017,18 @@ COACHREGLER:
 4. NUTRITION: <60min -> nutrition="". >120min -> 60-90g CHO/h, gel var 20-25min. Skriv TOTAL CHO.
 5. EXAKTA ZONER: Watt/puls fran dina zoner ovan i alla steg.
 6. STYRKA: Kroppsvikt ENDAST. Inget gym, inga vikter.
+
+INTENSITETSFÖRDELNING (KRITISK REGEL):
+En välplanerad vecka ska innehålla VARIATION – inte bara Z2!
+Typisk grundträningsvecka (10 dagar):
+  - 1-2 INTERVALLPASS (Z4-Z5): t.ex. 5x5min Z5, 4x8min Z4, 8x2min Z5, 30/15s
+  - 1 TEMPOPASS (Z3): 20-40 min sammanhängande i Z3
+  - Resten: aerob bas Z1-Z2
+
+Intervallpass ska INTE vara kortare än 30 min totalt (inkl. uppvärmning).
+Undvik intervaller BARA om: HRV=LOW/UNSTABLE, TSB < -20, eller dagen efter ett hårt pass.
+Om atleten har hög fitness (CTL > 50) → prioritera hårdare intervaller (Z5).
+Om atleten bygger upp (CTL < 40) → kortare intervaller med mer vila.
 
 Returnera ENBART JSON, inga markdown-block:
 
