@@ -22,6 +22,7 @@ jobs:
           AI_PROVIDER: gemini
             # Skriv listan i den ordning du vill att AI:n ska testas (prio 1 först)
           GEMINI_MODELS: "gemini-3-flash-preview, gemini-3.1-flash-lite-preview, gemini-2.5-flash"
-          ATHLETE_LAT: "59.3793"
-          ATHLETE_LON: "13.5036"
-          ATHLETE_LOCATION: Karlstad
+          ATHLETE_LAT: ${{ secrets.ATHLETE_LAT }}
+          ATHLETE_LON: ${{ secrets.ATHLETE_LON }}
+          ATHLETE_LOCATION: ${{ secrets.ATHLETE_LOCATION }}
+          CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}

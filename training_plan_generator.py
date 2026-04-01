@@ -33,13 +33,18 @@ Kör:
 """
 
 import os, sys, json, re, math, logging, argparse
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 from typing import Optional, Literal
 
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, ValidationError
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -64,6 +69,7 @@ AUTH          = ("API_KEY", INTERVALS_KEY)
 LAT           = float(os.getenv("ATHLETE_LAT",  "59.3793"))
 LON           = float(os.getenv("ATHLETE_LON",  "13.5036"))
 LOCATION      = os.getenv("ATHLETE_LOCATION",   "Karlstad")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL",      "din.epost@exempel.se")
 RISK          = os.getenv("RISK_TOLERANCE",      "NORMAL").upper()
 TARGET_CTL    = int(os.getenv("TARGET_CTL", "85"))
 AI_TAG        = "ai-generated"
@@ -181,7 +187,7 @@ class AIPlan(BaseModel):
     stress_audit:             str
     summary:                  str
     yesterday_feedback:       str = ""
-    manual_workout_nutrition: list[ManualNutrition] = []
+    manual_workout_nutrition: list[ManualNutrition] = Field(default_factory=list)
     days:                     list[PlanDay]
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -256,7 +262,7 @@ STRENGTH_LIBRARY = {
 # Skriptet läser dessa automatiskt och enforcar begränsningarna.
 # ══════════════════════════════════════════════════════════════════════════════
 
-CONSTRAINT_TAG = "schema-begransning"
+
 
 
 def _parse_sport_names(text: str) -> list[str]:
@@ -312,8 +318,10 @@ def parse_constraints_from_events(events: list) -> list[dict]:
             continue
 
         # Extrahera datum
-        start_str = (e.get("start_date_local") or "")[:10]
-        end_str = (e.get("end_date_local") or "")[:10]
+        start_str_full = e.get("start_date_local") or ""
+        end_str_full = e.get("end_date_local") or ""
+        start_str = start_str_full[:10]
+        end_str = end_str_full[:10]
         if not start_str:
             continue
         if not end_str:
@@ -334,6 +342,10 @@ def parse_constraints_from_events(events: list) -> list[dict]:
         except ValueError:
             continue
             
+        # Om eventet slutar exakt vid midnatt (T00:00:00) gäller det fram till dagen innan
+        if end_str_full.endswith("T00:00:00") and end_date > start_date:
+            end_date -= timedelta(days=1)
+
         if end_date < start_date:
             end_date = start_date
             
@@ -604,7 +616,7 @@ def compliance_analysis(planned_events: list, activities: list, days: int = 28) 
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     planned = [
         e for e in planned_events
-        if is_ai_generated(e) and e.get("start_date_local", "")[:10] >= cutoff
+        if (is_ai_generated(e) or e.get("category") == "WORKOUT") and e.get("start_date_local", "")[:10] >= cutoff
            and e.get("start_date_local", "")[:10] < date.today().isoformat()
     ]
     plan_by_date = {}
@@ -850,33 +862,6 @@ WORKOUT_LIBRARY = {
 }
 
 
-def detect_workout_levels(activities: list) -> dict:
-    state = load_state()
-    saved_levels = state.get("workout_levels", {})
-    detected = {}
-    for wk_key, wk_def in WORKOUT_LIBRARY.items():
-        current = saved_levels.get(wk_key, 1)
-        for a in activities[-20:]:
-            name = (a.get("name", "") or "").lower()
-            dur  = round((a.get("moving_time", 0) or 0) / 60)
-            for lvl in wk_def["levels"]:
-                label = lvl["label"].lower()
-                key_parts = re.findall(r"(\d+)×(\d+)min", label)
-                if key_parts:
-                    reps, mins = key_parts[0]
-                    if re.search(rf"{reps}\s*[x×]\s*{mins}", name):
-                        current = max(current, lvl["level"])
-                if wk_key == "long_ride_progression":
-                    a_type = a.get("type", "")
-                    if a_type in ("Ride", "VirtualRide") and dur > 150:
-                        if abs(dur - lvl["total_min"]) < lvl["total_min"] * 0.15:
-                            current = max(current, lvl["level"])
-        detected[wk_key] = min(current, len(wk_def["levels"]))
-    state["workout_levels"] = detected
-    save_state(state)
-    return detected
-
-
 def get_next_workouts(levels: dict, phase: str) -> str:
     lines = ["PASSBIBLIOTEK – Nästa progression per typ:"]
     for wk_key, wk_def in WORKOUT_LIBRARY.items():
@@ -895,6 +880,53 @@ def get_next_workouts(levels: dict, phase: str) -> str:
             nxt = wk_def["levels"][rec_level]
             lines.append(f"    → NÄSTA NIVÅ ({rec_level+1}): {nxt['label']} ({nxt['total_min']}min)")
     return "\n".join(lines)
+
+
+def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yesterday_actuals: list, state: dict):
+    """
+    Kollar om gårdagens pass var ett lyckat bibliotekspass och avancerar i så fall nivån.
+    Ett pass är "lyckat" om det genomfördes med RPE <= 7 och Känsla >= 3.
+    """
+    if not yesterday_planned or not yesterday_actuals or not is_ai_generated(yesterday_planned):
+        return
+
+    actual = yesterday_actuals[0]
+    planned_name = (yesterday_planned.get("name") or "").lower()
+    planned_dur = round((yesterday_planned.get("moving_time", 0) or 0) / 60)
+
+    # Försök hitta vilken pass-nyckel från biblioteket som användes
+    wk_key = None
+    for key, wk_def in WORKOUT_LIBRARY.items():
+        for lvl in wk_def["levels"]:
+            label = lvl["label"].lower()
+            # Matchar på struktur som "4x8min"
+            key_parts = re.findall(r"(\d+)\s*[x×]\s*(\d+)", label)
+            if key_parts:
+                reps, mins = key_parts[0]
+                if re.search(rf"{reps}\s*[x×]\s*{mins}", planned_name):
+                    wk_key = key
+                    break
+            # Matchar på total duration för långpass
+            if key == "long_ride_progression":
+                if abs(planned_dur - lvl["total_min"]) < lvl["total_min"] * 0.10:
+                    wk_key = key
+                    break
+        if wk_key:
+            break
+
+    if not wk_key:
+        return # Inget bibliotekspass hittades
+
+    rpe = actual.get("perceived_exertion")
+    feel = actual.get("feel")
+
+    is_mastered = (rpe is None and feel is None) or (rpe is not None and rpe <= 7 and feel is not None and feel >= 3)
+
+    if is_mastered:
+        log.info(f"✅ Passet '{wk_key}' bemästrat (RPE: {rpe or 'N/A'}, Känsla: {feel or 'N/A'}).")
+        advance_workout_level(wk_key, state) # Denna funktion sparar state
+    elif rpe is not None or feel is not None:
+        log.info(f"🟡 Passet '{wk_key}' genomfört men ej bemästrat (RPE: {rpe}, Känsla: {feel}). Avancerar ej.")
 
 
 def advance_workout_level(wk_key: str, state: dict):
@@ -997,6 +1029,20 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. WEEKLY REPORT
 # ══════════════════════════════════════════════════════════════════════════════
+
+def save_daily_note_to_icu(plan, changes):
+    """
+    Saves a summary of the daily generation process as a NOTE in intervals.icu.
+    This function is a placeholder as it was called but not defined.
+    """
+    today_str = date.today().isoformat()
+    log.info(f"INFO: Placeholder function 'save_daily_note_to_icu' called for {today_str}.")
+    # A real implementation would look something like this:
+    # note_content = f"AI Plan Generation for {today_str}\n\nSummary: {plan.summary}\n\nPost-processing changes:\n" + "\n".join(changes)
+    # requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
+    #     "category": "NOTE", "start_date_local": today_str + "T05:00:00",
+    #     "name": "🤖 AI Coach Daily Log", "description": note_content
+    # }).raise_for_status()
 
 def generate_weekly_report(activities: list, wellness: list, fitness: list,
                            mesocycle: dict, trajectory: dict,
@@ -1185,6 +1231,20 @@ def fetch_races(days_ahead=180):
     except Exception:
         return []
 
+def get_taper_config(races: list, today: date) -> dict:
+    """Hittar nästa tävling och bestämmer taper-längd baserat på prioritet i namnet (A/B/C)."""
+    future_races = sorted([
+        r for r in races
+        if datetime.strptime(r.get("start_date_local", "2099-01-01")[:10], "%Y-%m-%d").date() >= today
+    ], key=lambda r: r.get("start_date_local", ""))
+    if not future_races:
+        return {"race": None, "taper_days": 14, "race_date": None}
+    next_race = future_races[0]
+    name_lower = next_race.get("name", "").lower()
+    race_date_obj = datetime.strptime(next_race["start_date_local"][:10], "%Y-%m-%d").date()
+    taper_days = 3 if "c:" in name_lower else (7 if "b:" in name_lower else 14)
+    return {"race": next_race, "taper_days": taper_days, "race_date": race_date_obj}
+
 def fetch_yesterday_actual(activities):
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     return [a for a in activities if a.get("start_date_local","")[:10] == yesterday]
@@ -1261,92 +1321,139 @@ def save_workout(day: PlanDay):
 # VÄDER (utökade WMO-koder, timdata för eftermiddag)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Komplett WMO väderkodstabell
+# Komplett Yr (Met.no) symbolkodstabell
+YR_CODES = {
+    "clearsky": "Klart", "fair": "Halvklart", "partlycloudy": "Växlande moln",
+    "cloudy": "Mulet", "lightrainshowers": "Lätta regnskurar", "rainshowers": "Regnskurar",
+    "heavyrainshowers": "Kraftiga regnskurar", "lightrainshowersandthunder": "Åskskurar",
+    "rainshowersandthunder": "Åskskurar", "heavyrainshowersandthunder": "Kraftiga åskskurar",
+    "lightrain": "Lätt regn", "rain": "Regn", "heavyrain": "Kraftigt regn",
+    "lightrainandthunder": "Lätt regn/åska", "rainandthunder": "Regn och åska",
+    "heavyrainandthunder": "Kraftigt regn/åska", "lightsleetshowers": "Lätta byar snöbl. regn",
+    "sleetshowers": "Byar snöbl. regn", "heavysleetshowers": "Kraftiga byar snöbl. regn",
+    "lightsleet": "Lätt snöblandat regn", "sleet": "Snöblandat regn", "heavysleet": "Kraft. snöbl. regn",
+    "lightsnowshowers": "Lätta snöbyar", "snowshowers": "Snöbyar", "heavysnowshowers": "Kraftiga snöbyar",
+    "lightsnow": "Lätt snöfall", "snow": "Snöfall", "heavysnow": "Kraftigt snöfall",
+    "fog": "Dimma"
+}
+# WMO-koder som används som fallback om YR-koden är okänd.
 WMO_CODES = {
-    0: "Klart", 1: "Mestadels klart", 2: "Halvklart", 3: "Mulet",
-    45: "Dimma", 48: "Rimfrost/dimma",
-    51: "Lätt duggregn", 53: "Måttligt duggregn", 55: "Kraftigt duggregn",
-    56: "Underkylt duggregn (lätt)", 57: "Underkylt duggregn (kraftigt)",
-    61: "Lätt regn", 63: "Måttligt regn", 65: "Kraftigt regn",
-    66: "Underkylt regn (lätt)", 67: "Underkylt regn (kraftigt)",
-    71: "Lätt snöfall", 73: "Måttligt snöfall", 75: "Kraftigt snöfall",
-    77: "Snökorn", 80: "Lätta regnskurar", 81: "Måttliga regnskurar",
-    82: "Kraftiga regnskurar", 85: "Lätta snöbyar", 86: "Kraftiga snöbyar",
-    95: "Åskväder", 96: "Åskväder med hagel (lätt)", 99: "Åskväder med hagel (kraftigt)",
+    0: "Klart", 1: "Mestadels klart", 2: "Halvklart", 3: "Mulet", 45: "Dimma", 48: "Rimfrost",
+    51: "Lätt duggregn", 53: "Duggregn", 55: "Tätt duggregn", 61: "Lätt regn", 63: "Regn", 65: "Kraftigt regn",
+    71: "Lätt snöfall", 73: "Snöfall", 75: "Kraftigt snöfall", 80: "Lätta regnskurar", 81: "Regnskurar", 82: "Kraftiga regnskurar",
+    85: "Lätta snöbyar", 86: "Snöbyar", 95: "Åska", 96: "Åska med hagel", 99: "Åska med kraftigt hagel"
 }
 
 
 def fetch_weather(days):
     try:
-        resp = requests.get("https://api.open-meteo.com/v1/forecast", timeout=5, params={
-            "latitude": LAT, "longitude": LON,
-            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
-            "hourly": "temperature_2m,precipitation,weathercode",
-            "timezone": "Europe/Stockholm", "forecast_days": min(days + 1, 16),
-        })
+       # Yr kräver en User-Agent för att tillåta anrop
+        headers = {"User-Agent": f"AI-Traningsplanerare ({CONTACT_EMAIL})"}
+        resp = requests.get(
+            f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={LAT}&lon={LON}",
+            headers=headers, timeout=10
+        )
         resp.raise_for_status()
         data = resp.json()
-        d = data["daily"]
-        h = data.get("hourly", {})
-        dates = d.get("time", [])
 
-        # Bygg timvis lookup: datum → eftermiddagsdata (13:00-18:00)
+        timeseries = data.get("properties", {}).get("timeseries", [])
+
         hourly_by_date = {}
-        h_times = h.get("time", [])
-        h_temps = h.get("temperature_2m", [])
-        h_precip = h.get("precipitation", [])
-        h_codes = h.get("weathercode", [])
-        for idx, ht in enumerate(h_times):
-            hdate = ht[:10]
-            hour = int(ht[11:13])
-            if 13 <= hour <= 18:
-                if hdate not in hourly_by_date:
-                    hourly_by_date[hdate] = {"temps": [], "precip": [], "codes": []}
-                if idx < len(h_temps) and h_temps[idx] is not None:
-                    hourly_by_date[hdate]["temps"].append(h_temps[idx])
-                if idx < len(h_precip) and h_precip[idx] is not None:
-                    hourly_by_date[hdate]["precip"].append(h_precip[idx])
-                if idx < len(h_codes) and h_codes[idx] is not None:
-                    hourly_by_date[hdate]["codes"].append(h_codes[idx])
+        for item in timeseries:
+            # Korrekt tidszonskonvertering från UTC till Stockholm
+            utc_dt = datetime.fromisoformat(item["time"])
+            local_dt = utc_dt.astimezone(ZoneInfo("Europe/Stockholm"))
+            d_str = local_dt.date().isoformat()
+            hour = local_dt.hour
+            if d_str not in hourly_by_date:
+                hourly_by_date[d_str] = {
+                    "all_temps": [], "all_precip": 0.0,
+                    "am_temps": [], "am_precip": [], "am_codes": [],
+                    "pm_temps": [], "pm_precip": [], "pm_codes": []
+                }
+            details = item.get("data", {}).get("instant", {}).get("details", {})
+            temp = details.get("air_temperature")
+            # Yr har 1h-intervaller de närmsta dagarna, sedan 6h-intervaller. Vi hanterar båda!
+            next_data = item.get("data", {}).get("next_1_hours") or item.get("data", {}).get("next_6_hours") or {}
+            precip = next_data.get("details", {}).get("precipitation_amount", 0.0)
+            code = next_data.get("summary", {}).get("symbol_code", "")
+            # Tvätta Yr-koden (ta bort _day, _night)
+            clean_code = code.split("_")[0] if code else ""
+
+            if temp is not None:
+                hourly_by_date[d_str]["all_temps"].append(temp)
+            if precip is not None:
+                hourly_by_date[d_str]["all_precip"] += precip
+
+            if 6 <= hour <= 11:
+                if temp is not None: hourly_by_date[d_str]["am_temps"].append(temp)
+                if precip is not None: hourly_by_date[d_str]["am_precip"].append(precip)
+                if clean_code: hourly_by_date[d_str]["am_codes"].append(clean_code)
+            elif 13 <= hour <= 18:
+                if temp is not None: hourly_by_date[d_str]["pm_temps"].append(temp)
+                if precip is not None: hourly_by_date[d_str]["pm_precip"].append(precip)
+                if clean_code: hourly_by_date[d_str]["pm_codes"].append(clean_code)
 
         result = []
-        for i in range(min(days, len(dates) - 1)):
-            dt = dates[i + 1]
-            afternoon = hourly_by_date.get(dt, {})
-            # Eftermiddagstemperatur (snitt 13-18)
-            pm_temps = afternoon.get("temps", [])
-            pm_temp = round(sum(pm_temps) / len(pm_temps), 1) if pm_temps else d["temperature_2m_max"][i + 1]
-            # Eftermiddagsnederbörd (summa 13-18)
-            pm_precip = afternoon.get("precip", [])
-            pm_rain = round(sum(pm_precip), 1) if pm_precip else d["precipitation_sum"][i + 1]
-            # Vanligaste väderkoden på eftermiddagen
-            pm_codes = afternoon.get("codes", [])
+        target_dates = [(date.today() + timedelta(days=i)).isoformat() for i in range(days)]
+        for dt in target_dates:
+            day_data = hourly_by_date.get(dt, {})
+            if not day_data or not day_data["all_temps"]:
+                continue
+            temp_max = round(max(day_data["all_temps"]), 1)
+            temp_min = round(min(day_data["all_temps"]), 1)
+            total_rain = round(day_data["all_precip"], 1)
+
+            am_temps = day_data.get("am_temps", [])
+            am_temp = round(sum(am_temps) / len(am_temps), 1) if am_temps else temp_min
+            am_precip = day_data.get("am_precip", [])
+            am_rain = round(sum(am_precip), 1) if am_precip else 0
+            am_codes = day_data.get("am_codes", [])
+            if am_codes:
+                from collections import Counter
+                am_code = Counter(am_codes).most_common(1)[0][0]
+            else:
+                am_code = "unknown"
+            am_desc = YR_CODES.get(am_code, am_code.capitalize() or "Okänt")
+            if am_temp > 3 and "snow" in am_code and "sleet" not in am_code:
+                am_desc = "Regn"
+
+            pm_temps = day_data.get("pm_temps", [])
+            pm_temp = round(sum(pm_temps) / len(pm_temps), 1) if pm_temps else temp_max
+            pm_precip = day_data.get("pm_precip", [])
+            pm_rain = round(sum(pm_precip), 1) if pm_precip else 0
+            pm_codes = day_data.get("pm_codes", [])
             if pm_codes:
                 from collections import Counter
                 pm_code = Counter(pm_codes).most_common(1)[0][0]
-            else:
-                pm_code = d["weathercode"][i + 1]
+            else: 
+                pm_code = "unknown"
+            pm_desc = YR_CODES.get(pm_code, pm_code.capitalize() or "Okänt")
+            if pm_temp > 3 and "snow" in pm_code and "sleet" not in pm_code:
+                pm_desc = "Regn"
 
-            # Snö-sanity-check: om temp > 3°C, kan det inte snöa
-            wmo_desc = WMO_CODES.get(pm_code, f"Kod {pm_code}")
-            if pm_temp > 3 and pm_code in (71, 73, 75, 77, 85, 86):
+            if pm_temp > 3 and "snow" in pm_desc.lower():
                 # Fel i prognosen – temp för hög för snö, tolka som regn istället
-                wmo_desc = "Regn" if pm_code in (73, 75, 86) else "Lätt regn"
+                pm_desc = "Regn"
 
             result.append({
                 "date": dt,
-                "temp_max": d["temperature_2m_max"][i + 1],
-                "temp_min": d["temperature_2m_min"][i + 1],
+                "temp_max": temp_max,
+                "temp_min": temp_min,
+                "temp_morning": am_temp,
+                "rain_morning_mm": am_rain,
+                "desc_morning": am_desc,
+                "weathercode_morning": am_code,
                 "temp_afternoon": pm_temp,
-                "rain_mm": d["precipitation_sum"][i + 1],
                 "rain_afternoon_mm": pm_rain,
-                "desc": wmo_desc,
+                "desc": pm_desc,
                 "weathercode": pm_code,
+                "rain_mm": total_rain,
             })
         CACHE_FILE.write_text(json.dumps({"fetched": date.today().isoformat(), "data": result}))
         return result
     except Exception as e:
-        log.warning(f"Väder-API misslyckades: {e}. Försöker cache...")
+        log.warning(f"Väder-API (Yr) misslyckades: {e}. Försöker cache...")
         if CACHE_FILE.exists():
             cached = json.loads(CACHE_FILE.read_text())
             log.info(f"Använder väder-cache från {cached.get('fetched','?')}")
@@ -1620,7 +1727,13 @@ def _safe_date(activity) -> datetime:
 def tss_budget(ctl, tsb, horizon, fitness_history, mesocycle_factor=1.0):
     hist = [f.get("tsb",0) for f in fitness_history[-60:] if f.get("tsb") is not None]
     safe_floor = sorted(hist)[max(0,len(hist)//10)] if len(hist) > 14 else -0.30*ctl
-    daily = ctl + (tsb - safe_floor) / max(horizon, 1)
+    # Beräkna budget baserat på TSB (återhämtningsförmåga)
+    daily_from_tsb = ctl + (tsb - safe_floor) / max(horizon, 1)
+    # Spärr: max hållbar CTL-ramp per vecka
+    MAX_CTL_RAMP_PER_WEEK = 6.0
+    daily_from_ramp_cap = ctl + (MAX_CTL_RAMP_PER_WEEK / 7.0)
+    # Använd den lägsta av de två för att undvika ohållbar ökning
+    daily = min(daily_from_tsb, daily_from_ramp_cap)
     base_budget = round(daily * horizon)
     return round(base_budget * mesocycle_factor)
 
@@ -1792,6 +1905,26 @@ def format_race_week_for_prompt(rw: dict) -> str:
 
     return "\n".join(lines)
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RETURN TO PLAY
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_return_to_play(activities: list, today: date) -> dict:
+    """
+    Kollar om atleten haft 3 eller fler dagar i rad helt utan träning
+    och triggar i så fall ett Return to Play-protokoll.
+    """
+    days_off = 0
+    for i in range(1, 14):
+        check_date = (today - timedelta(days=i)).isoformat()
+        daily_acts = [a for a in activities if a.get("start_date_local", "")[:10] == check_date]
+        moving_time = sum((a.get("moving_time", 0) or 0) for a in daily_acts)
+        if moving_time < 900:  # < 15 min räknas som vilodag
+            days_off += 1
+        else:
+            break
+    return {"is_active": days_off >= 3, "days_off": days_off}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAPER QUALITY SCORE
@@ -2051,6 +2184,52 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
 INTENSE = {"Z4","Z5","Zon 4","Zon 5","Z4+","Z5+","Z6","Z7"}
 HARD_THRESHOLD = 0.20
 
+def enforce_illness(days, today_wellness):
+    """Om atleten är sjuk, byt ut alla pass mot vila."""
+    if not today_wellness or not today_wellness.get("sick"):
+        return days, []
+    changes = ["Sjukdom rapporterad – alla pass konverteras till vila."]
+    new_days = []
+    for day in days:
+        if day.intervals_type != "Rest":
+            changes.append(f"  {day.date}: {day.title} → Vila (sjuk)")
+        new_days.append(PlanDay(
+            date=day.date,
+            title="Vila (Sjuk)",
+            intervals_type="Rest",
+            duration_min=0,
+            description="Automatisk vila pga sjukdomsrapport i intervals.icu. Krya på dig!",
+            vetoed=True,
+        ))
+    return new_days, changes
+
+def enforce_rtp(days, rtp_status):
+    """Tvinga igenom ett Return-to-Play-protokoll efter flera vilodagar."""
+    if not rtp_status or not rtp_status.get("is_active"):
+        return days, []
+    protocol = [
+        {"d": 1, "title": "RTP Dag 1: Test", "type": "VirtualRide", "dur": 30, "steps": [{"duration_min": 30, "zone": "Z1", "description": "Mycket lätt, testa kroppen"}]},
+        {"d": 2, "title": "RTP Dag 2: Bekräfta", "type": "VirtualRide", "dur": 45, "steps": [{"duration_min": 45, "zone": "Z2", "description": "Lätt, bekräfta pulsrespons"}]},
+        {"d": 3, "title": "RTP Dag 3: Öppna upp", "type": "VirtualRide", "dur": 60, "steps": [{"duration_min": 50, "zone": "Z2", "description": "Grundtempo"}, {"duration_min": 1, "zone": "Z3", "description": "Öppna upp"}, {"duration_min": 9, "zone": "Z2", "description": "Lugnt igen"}]},
+    ]
+    changes = [f"🚑 RETURN TO PLAY ({rtp_status['days_off']} vilodagar) – tvingande protokoll appliceras."]
+    for i, p in enumerate(protocol):
+        if i >= len(days):
+            break
+        target_date = days[i].date
+        rtp_day = PlanDay(
+            date=target_date,
+            title=p["title"],
+            intervals_type=p["type"],
+            duration_min=p["dur"],
+            description=f"Return-to-Play protokoll efter {rtp_status['days_off']} vilodagar.",
+            workout_steps=[WorkoutStep(**step) for step in p["steps"]],
+            vetoed=False,
+        )
+        days[i] = rtp_day
+        changes.append(f"  {target_date}: Ersatt med '{p['title']}'")
+    return days, changes
+
 def intensity_rating(day: PlanDay) -> float:
     if not day.workout_steps or day.duration_min == 0:
         return 0.0
@@ -2286,7 +2465,13 @@ def add_env_nutrition(days, weather):
         if day.duration_min < 60 or day.intervals_type in ("Rest","WeightTraining"): continue
         w = wmap.get(day.date, {})
         fz = day.workout_steps[0].zone if day.workout_steps else "Z2"
-        extra = env_nutrition(w.get("temp_afternoon", w.get("temp_max", 15)), day.duration_min, fz)
+        
+        if day.slot == "AM":
+            temp = w.get("temp_morning", w.get("temp_min", 10))
+        else:
+            temp = w.get("temp_afternoon", w.get("temp_max", 15))
+            
+        extra = env_nutrition(temp, day.duration_min, fz)
         if extra:
             days[i] = day.model_copy(update={"nutrition": (day.nutrition + "\n" + " ".join(extra)).strip()})
     return days
@@ -2382,15 +2567,26 @@ def enforce_deload(days, mesocycle: dict, athlete: dict):
 
 
 def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlete,
-                 injury_note="", mesocycle=None, constraints=None):
+                 injury_note="", mesocycle=None, constraints=None, today_wellness=None, rtp_status=None):
     days = plan.days
     all_c = []
+
+    # Sjukdom och RTP är de mest kritiska, kör dem först.
+    if today_wellness:
+        days, c = enforce_illness(days, today_wellness); all_c += c
+        if c: # If sick, no need to apply other rules
+            return plan.model_copy(update={"days": days}), all_c
+            
+    if rtp_status:
+        days, c = enforce_rtp(days, rtp_status); all_c += c
+        # After RTP, other rules might still apply to later days, so we continue
+
     days, c = enforce_locked(days, locked);            all_c += c
     days, c = enforce_hrv(days, hrv);                 all_c += c
     days, c2 = apply_injury_rules(days, injury_note);  all_c += c2
-    days, c = enforce_sport_budget(days, budgets);     all_c += c
     if constraints:
         days, c = enforce_schedule_constraints(days, constraints); all_c += c
+    days, c = enforce_sport_budget(days, budgets);     all_c += c
     days, c = enforce_hard_easy(days);                 all_c += c
     days, c = enforce_strength_limit(days, max_strength=2); all_c += c
     days, c = enforce_rollski_limit(days, max_per_week=1);  all_c += c
@@ -2445,7 +2641,7 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
                  mesocycle=None, trajectory=None, compliance=None,
                  workout_lib_text="", ftp_check=None,
                  yesterday_analysis="", constraints_text="",
-                 acwr_trend=None, race_week=None, taper_score=None):
+                 acwr_trend=None, race_week=None, taper_score=None, rtp_status=None):
     today = date.today()
     lf = fitness[-1] if fitness else {}
     atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb = lf.get("tsb",0.0)
@@ -2510,12 +2706,15 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
     # FIX #6: Visa eftermiddagstemperatur i väder
     weather_lines = []
     for w in weather:
+        am_temp = w.get("temp_morning", w.get("temp_min", "?"))
+        am_rain = w.get("rain_morning_mm", 0)
+        am_desc = w.get("desc_morning", "?")
         pm_temp = w.get("temp_afternoon", w.get("temp_max", "?"))
         pm_rain = w.get("rain_afternoon_mm", w.get("rain_mm", 0))
+        pm_desc = w.get("desc", "?")
         weather_lines.append(
-            f"  {w['date']} | {w.get('desc','?'):20} | "
-            f"Em-temp: {pm_temp}°C (min/max: {w['temp_min']}/{w['temp_max']}°C) | "
-            f"Regn em: {pm_rain}mm (dygn: {w['rain_mm']}mm)"
+            f"  {w['date']} | FM(06-11): {am_desc:12} {am_temp}°C {am_rain}mm | "
+            f"EM(13-18): {pm_desc:12} {pm_temp}°C {pm_rain}mm"
         )
 
     if morning.get("yesterday_completed") is True:
@@ -2593,21 +2792,27 @@ STYRKEBIBLIOTEK (kroppsvikt):
         for ex in prog["exercises"]:
             strength_text += f"    - {ex['exercise']}: {ex['sets']}x{ex['reps']}, vila {ex['rest_sec']}s – {ex['notes']}\n"
 
-    # FIX #7: Utökad dubbelpass-sektion
     double_text = """
-DUBBELPASS (AM/PM):
-  Du KAN schemalägga två pass samma dag med "slot": "AM" eller "PM".
-  Regler:
-  - AM: styrka eller lätt aerob (30-45min). PM: huvudpasset (cykling/löpning).
+DUBBELPASS & TIDSVAL (AM/PM):
+  Du kan välja när på dagen atleten ska träna ("slot": "AM", "PM" eller "MAIN").
+  - Anpassa efter VÄDRET! Regnar det på EM men sol på FM? Välj "AM" (förmiddag).
+  - Om du schemalägger ett DUBBELPASS (en AM och en PM samma dag):
+    * AM: styrka eller lätt aerob (30-45min). PM: huvudpasset.
   - ALDRIG två hårda pass samma dag (ett Z4+ AM + ett Z4+ PM = förbjudet).
-  - Dubbelpass bara om tid finns (atleten angett >1.5h tillgängligt) och TSB > -15.
-  - Default = "MAIN" (ett pass per dag). Använd AM/PM sparsamt, max 1-2 ggr/10d.
+  - Motivera alltid i description varför du valt att köra dubbelpass just nu.
+  - Använd AM/PM sparsamt, max 1-2 ggr/10d.
+"""
 
-  ⚠️ VIKTIGT: Om du schemalägger dubbelpass, MOTIVERA i description fältet:
-  - VARFÖR dubbelpass just denna dag (t.ex. "Styrka AM + tempo PM för att maximera
-    träningsresponsen innan vilodag imorgon")
-  - Vad vinsten är jämfört med ett enskilt pass
-  - Att atleten har tid (referera till tillgänglig tid)
+    rtp_text = ""
+    if rtp_status and rtp_status.get("is_active"):
+        rtp_text = f"""
+RETURN TO PLAY-PROTOKOLL AKTIVERAT:
+  Atleten har haft {rtp_status['days_off']} vilodagar i rad.
+  TVINGA in detta exakta schema för de kommande 3 dagarna:
+  - Dag 1: 30 min Z1 (Lätt rull/jogg, testa kroppen).
+  - Dag 2: 45 min Z2 (Bekräfta pulsrespons).
+  - Dag 3: 60 min Z2 med 3x1min Z3 (Öppna upp systemet).
+  Efter Dag 3: Återgå till normal AI-planering.
 """
 
     # FIX #4: Yesterday feedback section
@@ -2672,6 +2877,7 @@ TRÄNING:
   Fas: {phase['phase']} | {phase['rule']}
   Volym förra veckan: {' | '.join(f"{k}: {round(v)}min" for k,v in vols.items()) or 'Ingen data'}
 {format_race_week_for_prompt(race_week) if race_week and race_week.get('is_active') else ''}
+{rtp_text}
 {taper_score['summary'] if taper_score and taper_score.get('is_in_taper') else ''}
 
 TSS-BUDGET: TOTALT {tsb_bgt} TSS på {horizon} dagar.
@@ -2696,10 +2902,9 @@ VÄDER ({LOCATION}, eftermiddagsdata kl 13-18):
 {chr(10).join(weather_lines) or '  Ingen väderdata'}
 
 Väderregler:
-  Regn: <5mm em=OK löpning/rullskidor, Cykling→Zwift vid regn. 5-15mm em=Löpning OK, rullskidor undviks. >15mm em=Inomhus.
-  Temp: >2°C em → INGEN snö möjlig. 5-20°C klart→Utomhuscykling. >22°C→Undvik rullskidor. <0°C→Undvik utomhuscykling.
-  VIKTIGT: Använd eftermiddagstemperaturen (em-temp) för beslut, INTE min-temp (natttemp).
-  Snö kräver em-temp < 1°C. Om em-temp > 3°C kan det INTE snöa, oavsett vad prognoskoden säger.
+  Välj tid ("slot": AM eller PM) baserat på när vädret är bäst för utomhuspass!
+  Regn: <5mm=OK utomhus. 5-15mm=Löpning OK, cykel->Zwift. >15mm=Endast inomhus.
+  Temp: Snö kräver temp < 1°C. Om temp > 3°C kan det INTE snöa. Undvik utomhuscykel < 0°C.
 {constraints_text}
 {double_text}
 {lib_text}
@@ -2771,17 +2976,18 @@ def call_ai(provider, prompt):
         from google.genai.errors import ServerError, ClientError
         key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
-        client = genai.Client(api_key=key)
+        genai.configure(api_key=key)
         models_str = os.getenv("GEMINI_MODELS", "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-flash")
         model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
         log.info(f"Skickar till Gemini ({len(model_queue)} modeller i kö)...")
         last_err = None
         for current_model in model_queue:
+            model = genai.GenerativeModel(current_model)
             for attempt in range(1, 3):
                 try:
                     log.info(f"   Försöker {current_model} (försök {attempt})...")
-                    response = client.models.generate_content(
-                        model=current_model, contents=prompt,
+                    response = model.generate_content(
+                        contents=prompt,
                         config=types.GenerateContentConfig(response_mime_type="application/json"),
                     )
                     os.environ["_USED_MODEL"] = current_model
@@ -2864,7 +3070,7 @@ def parse_plan(raw: str) -> AIPlan:
 EMOJIS = {"NordicSki":"⛷️","RollerSki":"🎿","Ride":"🚴","VirtualRide":"🖥️","Run":"🏃","WeightTraining":"💪","Rest":"😴"}
 
 def print_plan(plan, changes, mesocycle=None, trajectory=None,
-               acwr_trend=None, taper_score=None, race_week=None):
+               acwr_trend=None, taper_score=None, race_week=None, rtp_status=None):
     print("\n" + "="*65)
     print(f"  TRÄNINGSPLAN v2  ({args.provider.upper()})")
     if mesocycle:
@@ -2890,6 +3096,10 @@ def print_plan(plan, changes, mesocycle=None, trajectory=None,
             print(f"    {p['date']} (-{p['days_before']}d): {p['title']}")
             if steps:
                 print(f"      {steps}")
+
+    # RTP
+    if rtp_status and rtp_status.get("is_active"):
+        print(f"\n🚑 RETURN TO PLAY AKTIVERAT: {rtp_status['days_off']} vilodagar i rad")
 
     print(f"\nStress Audit: {plan.stress_audit}\n")
     print(f"{plan.summary}\n")
@@ -2980,9 +3190,12 @@ def main():
         activities = fetch_activities(args.days_history)
         races      = fetch_races(180)
         planned    = fetch_planned_workouts(args.horizon)
+        all_events = fetch_all_planned_events(days_back=28)
         log.info(f"  {len(activities)} aktiviteter | {len(wellness)} wellness | {len(races)} tävlingar | {len(planned)} planerade")
     except requests.HTTPError as e:
         log.error(f"API-fel: {e}"); sys.exit(1)
+
+    state = load_state()
 
     manual_workouts = [w for w in planned if not is_ai_generated(w)]
     ai_workouts     = [w for w in planned if is_ai_generated(w)]
@@ -2999,14 +3212,25 @@ def main():
     budgets     = {st: sport_budget(st, activities, manual_workouts) for st in ("Run","RollerSki")}
 
     today_wellness    = next((w for w in wellness if w.get("id","").startswith(date.today().isoformat())), None)
-    yesterday_planned = next((w for w in planned if w.get("start_date_local","")[:10] == (date.today()-timedelta(days=1)).isoformat()), None)
+    
+    y_events = [w for w in all_events if w.get("start_date_local","")[:10] == (date.today()-timedelta(days=1)).isoformat()]
+    y_events.sort(key=lambda x: (0 if x.get("category") == "WORKOUT" else (1 if is_ai_generated(x) else 2)))
+    yesterday_planned = y_events[0] if y_events else None
+
     yesterday_actuals = fetch_yesterday_actual(activities)
+
+    # --- PROGRESSION CHECK ---
+    # Kollar om gårdagens pass bemästrades och avancerar nivån i så fall.
+    check_and_advance_workout_progression(yesterday_planned, yesterday_actuals, state)
 
     morning = morning_questions(args.auto, today_wellness, yesterday_planned, yesterday_actuals)
     vetos   = biometric_vetoes(hrv, morning.get("life_stress",1))
 
-    # ── 1 & 5: MESOCYKEL + DELOAD ────────────────────────────────────────────
-    state = load_state()
+    # ── RETURN TO PLAY ───────────────────────────────────────────────────────
+    rtp_status = check_return_to_play(activities, date.today())
+    if rtp_status.get("is_active"):
+        log.info(f"🚑 Return to Play-protokoll aktivt ({rtp_status['days_off']} vilodagar i rad)")
+
     mesocycle = determine_mesocycle(fitness, activities, state)
     save_state(state)
     log.info(f"🔄 Mesocykel: Block {mesocycle['block_number']}, Vecka {mesocycle['week_in_block']}/4"
@@ -3015,30 +3239,19 @@ def main():
     tsb_bgt = tss_budget(ctl, tsb_val, args.horizon, fitness, mesocycle["load_factor"])
 
     # ── 2: CTL-TRAJEKTORIA ───────────────────────────────────────────────────
-    race_date = None
-    for r in races:
-        try:
-            rd = datetime.strptime(r["start_date_local"][:10], "%Y-%m-%d").date()
-            if rd > date.today():
-                race_date = rd
-                break
-        except Exception:
-            continue
-    trajectory = ctl_trajectory(ctl, race_date, TARGET_CTL)
+    taper_config = get_taper_config(races, date.today())
+    race_date = taper_config["race_date"]
+    taper_days = taper_config["taper_days"]
+    trajectory = ctl_trajectory(ctl, race_date, TARGET_CTL, taper_days=taper_days)
     if trajectory["has_target"]:
         log.info(f"🎯 CTL-trajektoria: {trajectory['message']}")
 
     # ── 3: COMPLIANCE ────────────────────────────────────────────────────────
-    all_events = []
-    try:
-        all_events = fetch_all_planned_events(days_back=28)
-    except Exception as e:
-        log.warning(f"Kunde inte hämta events för compliance: {e}")
     compliance = compliance_analysis(all_events, activities, days=28)
     log.info(f"📋 Compliance: {compliance['completion_rate']}% ({compliance['total_completed']}/{compliance['total_planned']})")
 
     # ── 4: PASSBIBLIOTEK ─────────────────────────────────────────────────────
-    workout_levels = detect_workout_levels(activities)
+    workout_levels = state.get("workout_levels", {}) # Hämta aktuella nivåer från state
     workout_lib_text = get_next_workouts(workout_levels, phase["phase"])
     log.info(f"📚 Passbibliotek: {', '.join(f'{k}=L{v}' for k,v in workout_levels.items())}")
 
@@ -3060,7 +3273,7 @@ def main():
         log.info(f"🏁 Race week aktiv! {race_week['race_name']} om {race_week['days_to_race']}d")
 
     # ── TAPER QUALITY SCORE ──────────────────────────────────────────────────
-    taper_score = taper_quality_score(fitness, race_date)
+    taper_score = taper_quality_score(fitness, race_date, taper_days=taper_days)
     if taper_score.get("is_in_taper"):
         log.info(f"📉 Taper dag {taper_score['taper_day']}/{taper_score['taper_days']} | Score: {taper_score['score']}/100 {taper_score['verdict']}")
 
@@ -3084,17 +3297,18 @@ def main():
         manual_workouts, athlete, hrv, budgets, tsb_bgt, vetos, phase,
         existing_plan_summary, mesocycle, trajectory, compliance,
         workout_lib_text, ftp_check, yesterday_analysis, constraints_text,
-        acwr_trend=acwr_trend, race_week=race_week, taper_score=taper_score,
+        acwr_trend=acwr_trend, race_week=race_week, taper_score=taper_score, 
+        rtp_status=rtp_status
     )
     raw            = call_ai(args.provider, prompt)
     plan           = parse_plan(raw)
     plan, changes  = post_process(
         plan, hrv, budgets, locked_dates, tsb_bgt, activities, weather, athlete,
         injury_note=morning.get('injury_today', ''), mesocycle=mesocycle,
-        constraints=constraints,
+        constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status
     )
 
-    print_plan(plan, changes, mesocycle, trajectory, acwr_trend, taper_score, race_week)
+    print_plan(plan, changes, mesocycle, trajectory, acwr_trend, taper_score, race_week, rtp_status)
 
     if args.dry_run:
         print("\nDRY-RUN - ingenting sparades.")
@@ -3117,6 +3331,12 @@ def main():
         if d in man_nutr:
             update_manual_nutrition(w, man_nutr[d])
             log.info(f"  Nutrition tillagd: {w.get('name','?')} ({d})")
+
+    # ── Spara Daglig Coach-anteckning ─────────────────────────────────────────
+    if not args.dry_run:
+        save_daily_note_to_icu(plan, changes)
+    else:
+        print("\n[DRY-RUN] Skulle ha sparat daglig coach-anteckning till intervals.")
 
     # ── 7: VECKORAPPORT (körs på måndagar eller full regen) ──────────────────
     if date.today().weekday() == 0 or mode == "full":

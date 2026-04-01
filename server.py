@@ -120,9 +120,6 @@ def intervals_webhook():
         log.warning("⚠️   Tom eller ogiltig JSON-payload")
         return jsonify({"error": "Invalid JSON"}), 400
 
-    # TEMPORÄR DEBUG – ta bort när du hittat din secret
-    log.info(f"📥  Full payload: {data}")
-
     # 1. Verifiera webhook-secret
     if WEBHOOK_SECRET and data.get("secret") != WEBHOOK_SECRET:
         log.warning("⚠️   Felaktig webhook-secret – avvisar anrop")
