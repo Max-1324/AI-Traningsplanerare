@@ -807,7 +807,8 @@ def ftp_test_check(activities: list, athlete: dict) -> dict:
 
     current_ftp = None
     for ss in athlete.get("sportSettings", []):
-        if ss.get("type") in ("Ride", "VirtualRide") and ss.get("ftp"):
+        stypes = ss.get("types", []) if isinstance(ss.get("types"), list) else [ss.get("type")]
+        if any(t in ("Ride", "VirtualRide") for t in stypes) and ss.get("ftp"):
             current_ftp = ss["ftp"]
             break
 
@@ -1381,14 +1382,20 @@ def parse_zones(athlete):
     lines = []
     names = {"Ride":"Cykling","Run":"Löpning","NordicSki":"Längdskidor","RollerSki":"Rullskidor","VirtualRide":"Zwift"}
     for ss in athlete.get("sportSettings", []):
-        t = names.get(ss.get("type",""), ss.get("type","?"))
+        # Fix: Hantera både "type" och "types" (lista)
+        stypes = ss.get("types", []) if isinstance(ss.get("types"), list) else [ss.get("type")]
+        t_names = [names.get(x, x) for x in stypes if x]
+        t = "/".join(t_names) if t_names else "Standardzoner"
+        
         parts = []
         if ss.get("ftp"):    parts.append(f"FTP {ss['ftp']}W")
         if ss.get("lthr"):   parts.append(f"LTHR {ss['lthr']}bpm")
         if ss.get("max_hr"): parts.append(f"MaxHR {ss['max_hr']}bpm")
         if parts: lines.append(f"  {t}: {', '.join(parts)}")
+        
         ftp = ss.get("ftp"); lthr = ss.get("lthr")
         zones = ss.get("zones") or []; hr_z = ss.get("hrZones") or []
+        
         if ftp and zones:
             zs = " | ".join(f"{z.get('name','Z'+str(i+1))}: {round(z.get('min',0)*ftp/100)}-{round(z.get('max',0)*ftp/100)}W"
                             for i,z in enumerate(zones) if z.get("min") and z.get("max"))
@@ -1453,6 +1460,7 @@ def enforce_hard_easy(days):
                                 f"(föregående dag: {round(r_prev*100)}% Z4+)"
                 )],
                 "nutrition": "",
+                "description": f"⚠️ KOD-VETO: AI:n försökte lägga ett hårt pass här, men Python-koden ändrade det till återhämtning (Hard-Easy-regeln).\n\nOriginalidé från AI:n: {days[i].description}"
             })
             changes.append(
                 f"HARD-EASY: {days[i].date} '{old}' "
@@ -1535,19 +1543,23 @@ def ftp_for_sport(sport_type: str, athlete: dict) -> float:
     fallbacks = {
         "VirtualRide": ["VirtualRide", "Ride"],
         "RollerSki":   ["RollerSki", "NordicSki"],
-        "NordicSki":   ["RollerSki"],
+        "NordicSki":   ["NordicSki", "RollerSki"],
         "Run":         ["Run"],
         "Ride":        ["Ride", "VirtualRide"],
     }
     candidates = fallbacks.get(sport_type, [sport_type])
-    ftp_map = {
-        ss.get("type"): ss.get("ftp")
-        for ss in athlete.get("sportSettings", [])
-        if ss.get("ftp") and ss["ftp"] > 0
-    }
+    
+    ftp_map = {}
+    for ss in athlete.get("sportSettings", []):
+        ftp_val = ss.get("ftp")
+        if ftp_val and ftp_val > 0:
+            stypes = ss.get("types", []) if isinstance(ss.get("types"), list) else [ss.get("type")]
+            for t in stypes:
+                if t: ftp_map[t] = float(ftp_val)
+                
     for c in candidates:
         if c in ftp_map:
-            return float(ftp_map[c])
+            return ftp_map[c]
     return 200.0
 
 def estimate_tss_coggan(day, athlete: dict) -> float:
@@ -2345,7 +2357,7 @@ def main():
         plan, hrv, budgets, locked_dates, tsb_bgt, activities, weather, athlete,
         injury_note=morning.get('injury_today', ''), mesocycle=mesocycle
     )
-    
+
     print_plan(plan, changes, mesocycle, trajectory)
 
     if args.dry_run:
