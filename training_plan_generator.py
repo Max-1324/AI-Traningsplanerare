@@ -2992,23 +2992,22 @@ Vid WeightTraining: strength_steps MÅSTE ha minst 4-6 övningar med exercise/se
 def call_ai(provider, prompt):
     if provider == "gemini":
         import time
-        import google.generativeai as genai
-        from google.generativeai import types
-        from google.generativeai.errors import ServerError, ClientError
+        from google import genai
+        from google.genai import types
+        from google.genai.errors import ServerError, ClientError
         key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
-        genai.configure(api_key=key)
+        client = genai.Client(api_key=key)
         models_str = os.getenv("GEMINI_MODELS", "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-flash")
         model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
         log.info(f"Skickar till Gemini ({len(model_queue)} modeller i kö)...")
         last_err = None
         for current_model in model_queue:
-            model = genai.GenerativeModel(current_model)
             for attempt in range(1, 3):
                 try:
                     log.info(f"   Försöker {current_model} (försök {attempt})...")
-                    response = model.generate_content(
-                        contents=prompt,
+                    response = client.models.generate_content(
+                        model=current_model, contents=prompt,
                         config=types.GenerateContentConfig(response_mime_type="application/json"),
                     )
                     os.environ["_USED_MODEL"] = current_model
@@ -3038,7 +3037,7 @@ def call_ai(provider, prompt):
         log.info(f"Skickar till OpenAI ({mn})...")
         return OpenAI(api_key=key).chat.completions.create(model=mn, messages=[{"role":"user","content":prompt}], response_format={"type":"json_object"}).choices[0].message.content
     sys.exit(f"Okänd provider: {provider}")
-
+    
 def parse_plan(raw: str) -> AIPlan:
     clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     candidates = [clean]
