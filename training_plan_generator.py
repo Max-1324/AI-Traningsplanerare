@@ -74,7 +74,7 @@ CONSTRAINT_PREFIXES = ("bara:", "bara ", "ej:", "ej ", "only:", "only ", "not:",
 SPORT_NAME_MAP = {
     "cykling": ["Ride"], "cykel": ["Ride"], "ride": ["Ride"], "utomhuscykling": ["Ride"],
     "zwift": ["VirtualRide"], "inomhuscykling": ["VirtualRide"], "virtualride": ["VirtualRide"],
-    "löpning": ["Run"], "löp": ["Run"], "run": ["Run"], "jogg": ["Run"], "jogga": ["Run"], "jogging": ["Run"],
+    "löpning": ["Run"], "löp": ["Run"], "run": ["Run"], "jogg": ["Run"], "jogga": ["Run"], "jogging": ["Run"], "lapning": ["Run"],
     "rullskidor": ["RollerSki"], "rullskid": ["RollerSki"], "rollerski": ["RollerSki"],
     "styrka": ["WeightTraining"], "styrketräning": ["WeightTraining"], "weighttraining": ["WeightTraining"],
     "vila": ["Rest"], "rest": ["Rest"],
@@ -312,9 +312,12 @@ def parse_constraints_from_events(events: list) -> list[dict]:
             continue
 
         # Extrahera datum
-        event_date = (e.get("start_date_local") or "")[:10]
-        if not event_date:
+        start_str = (e.get("start_date_local") or "")[:10]
+        end_str = (e.get("end_date_local") or "")[:10]
+        if not start_str:
             continue
+        if not end_str:
+            end_str = start_str
 
         # Parsa sporter
         sport_types = _parse_sport_names(sport_text)
@@ -325,17 +328,29 @@ def parse_constraints_from_events(events: list) -> list[dict]:
         # Beskrivning/reason
         reason = (e.get("description") or "").split("\n")[0][:100] or name
 
-        constraint = {
-            "date": event_date,
-            "reason": reason,
-        }
-        if mode == "bara":
-            constraint["allowed_types"] = sport_types
-        else:
-            constraint["blocked_types"] = sport_types
+        try:
+            start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+            
+        if end_date < start_date:
+            end_date = start_date
+            
+        current_date = start_date
+        while current_date <= end_date:
+            constraint = {
+                "date": current_date.isoformat(),
+                "reason": reason,
+            }
+            if mode == "bara":
+                constraint["allowed_types"] = sport_types
+            else:
+                constraint["blocked_types"] = sport_types
 
-        constraints.append(constraint)
-        log.info(f"📅 Constraint: {event_date} → {mode.upper()} {', '.join(sport_types)} ({reason})")
+            constraints.append(constraint)
+            log.info(f"📅 Constraint: {current_date.isoformat()} → {mode.upper()} {', '.join(sport_types)} ({reason})")
+            current_date += timedelta(days=1)
 
     return constraints
 
@@ -897,8 +912,31 @@ def advance_workout_level(wk_key: str, state: dict):
 # 6. FTP TEST CHECK
 # ══════════════════════════════════════════════════════════════════════════════
 
-def ftp_test_check(activities: list, athlete: dict) -> dict:
+def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
     ftp_keywords = ["ftp", "ramp", "20min test", "cp20", "all out", "benchmark", "test"]
+    
+    current_ftp = None
+    for ss in athlete.get("sportSettings", []):
+        stypes = ss.get("types", []) if isinstance(ss.get("types"), list) else [ss.get("type")]
+        if any(t in ("Ride", "VirtualRide") for t in stypes) and ss.get("ftp"):
+            current_ftp = ss["ftp"]
+            break
+
+    today = date.today().isoformat()
+    for p in planned:
+        if p.get("start_date_local", "")[:10] >= today:
+            name = (p.get("name", "") or "").lower()
+            if any(kw in name for kw in ftp_keywords):
+                return {
+                    "days_since_test": None,
+                    "needs_test": False,
+                    "current_ftp": current_ftp,
+                    "if_suggests_update": False,
+                    "recommendation": f"FTP-test redan schemalagt ({p.get('start_date_local', '')[:10]}).",
+                    "reasons": [],
+                    "suggested_protocol": ""
+                }
+
     last_test_date = None
     for a in reversed(activities):
         name = (a.get("name", "") or "").lower()
@@ -925,12 +963,6 @@ def ftp_test_check(activities: list, athlete: dict) -> dict:
     ]
     high_if_count = sum(1 for x in recent_ifs if x > 1.05)
     if_suggests_update = high_if_count >= 3 and len(recent_ifs) >= 5
-    current_ftp = None
-    for ss in athlete.get("sportSettings", []):
-        stypes = ss.get("types", []) if isinstance(ss.get("types"), list) else [ss.get("type")]
-        if any(t in ("Ride", "VirtualRide") for t in stypes) and ss.get("ftp"):
-            current_ftp = ss["ftp"]
-            break
     needs_test = False
     reasons = []
     if days_since is None:
@@ -1084,37 +1116,6 @@ def save_weekly_report_to_icu(report: str):
         log.info(f"📊 Veckorapport sparad i intervals.icu ({monday.isoformat()})")
     except Exception as e:
         log.warning(f"Kunde inte spara veckorapport: {e}")
-
-def save_ftp_test_event(ftp_check: dict, horizon_days: list[str]):
-    if not ftp_check["needs_test"]:
-        return
-    test_date = None
-    for i in range(3, min(8, len(horizon_days))):
-        test_date = horizon_days[i] if i < len(horizon_days) else None
-        break
-    if not test_date:
-        test_date = (date.today() + timedelta(days=5)).isoformat()
-    try:
-        requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
-            "category":         "WORKOUT",
-            "start_date_local": test_date + "T09:00:00",
-            "type":             "VirtualRide",
-            "name":             "🔬 FTP-TEST (Ramp eller 20min)",
-            "description": (
-                f"DAGS ATT TESTA FTP!\n\n"
-                f"Anledning: {'. '.join(ftp_check['reasons'])}\n\n"
-                f"Nuvarande FTP: {ftp_check['current_ftp']}W\n\n"
-                f"{ftp_check['suggested_protocol']}\n\n"
-                f"Tips: Vila ordentligt dagen innan. Ät normalt. "
-                f"Kör på Zwift för bäst resultat.\n\n"
-                f"{AI_TAG} ({get_used_model()})"
-            ),
-            "moving_time":      1800,
-            "color":            "#FF6B35",
-        }).raise_for_status()
-        log.info(f"🔬 FTP-test schemalagt {test_date}")
-    except Exception as e:
-        log.warning(f"Kunde inte schemalägga FTP-test: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3042,7 +3043,7 @@ def main():
     log.info(f"📚 Passbibliotek: {', '.join(f'{k}=L{v}' for k,v in workout_levels.items())}")
 
     # ── 6: FTP-TEST ──────────────────────────────────────────────────────────
-    ftp_check = ftp_test_check(activities, athlete)
+    ftp_check = ftp_test_check(activities, planned, athlete)
     if ftp_check["needs_test"]:
         log.info(f"🔬 {ftp_check['recommendation']}")
 
@@ -3129,10 +3130,6 @@ def main():
                 print("\n" + report)
         except Exception as e:
             log.warning(f"Veckorapport misslyckades: {e}")
-
-    # ── 6: FTP-TEST EVENT ────────────────────────────────────────────────────
-    if ftp_check["needs_test"] and not args.dry_run:
-        save_ftp_test_event(ftp_check, horizon_dates)
 
     if mode == "none":
         log.info(f"✅ {mode_reason}")
