@@ -1032,17 +1032,50 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
 
 def save_daily_note_to_icu(plan, changes):
     """
-    Saves a summary of the daily generation process as a NOTE in intervals.icu.
-    This function is a placeholder as it was called but not defined.
+    Sparar en sammanfattning av dagens generering och gårdagens feedback
+    som en NOTE i intervals.icu.
     """
     today_str = date.today().isoformat()
-    log.info(f"INFO: Placeholder function 'save_daily_note_to_icu' called for {today_str}.")
-    # A real implementation would look something like this:
-    # note_content = f"AI Plan Generation for {today_str}\n\nSummary: {plan.summary}\n\nPost-processing changes:\n" + "\n".join(changes)
-    # requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
-    #     "category": "NOTE", "start_date_local": today_str + "T05:00:00",
-    #     "name": "🤖 AI Coach Daily Log", "description": note_content
-    # }).raise_for_status()
+    
+    lines = []
+    if plan.yesterday_feedback:
+        lines.append("📝 FEEDBACK PÅ GÅRDAGENS PASS:")
+        lines.append(plan.yesterday_feedback)
+        lines.append("")
+        
+    lines.append("🤖 DAGENS SAMMANFATTNING:")
+    lines.append(plan.summary)
+    
+    if changes:
+        lines.append("")
+        lines.append("🔧 JUSTERINGAR (Post-processing):")
+        for c in changes:
+            lines.append(f"  • {c}")
+
+    note_content = "\n".join(lines)
+    
+    try:
+        existing = icu_get(f"/athlete/{ATHLETE_ID}/events", {
+            "oldest": today_str,
+            "newest": (date.today() + timedelta(days=1)).isoformat(),
+        })
+        for e in existing:
+            if e.get("name") == "🤖 AI Coach Logg" and e.get("category") == "NOTE":
+                requests.put(
+                    f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
+                    auth=AUTH, timeout=15, json=[{"id": e["id"]}],
+                ).raise_for_status()
+
+        requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
+            "category": "NOTE",
+            "start_date_local": today_str + "T05:00:00",
+            "name": "🤖 AI Coach Logg",
+            "description": note_content + f"\n\n{AI_TAG}",
+            "color": "#8E44AD"  # Lila färg
+        }).raise_for_status()
+        log.info("📝 Daglig coach-logg (med feedback) sparad i intervals.icu")
+    except Exception as e:
+        log.warning(f"Kunde inte spara daglig coach-logg: {e}")
 
 def generate_weekly_report(activities: list, wellness: list, fitness: list,
                            mesocycle: dict, trajectory: dict,
@@ -3221,7 +3254,7 @@ def main():
 
     state = load_state()
 
-    manual_workouts = [w for w in planned if not is_ai_generated(w)]
+    manual_workouts = [w for w in planned if not is_ai_generated(w) and w.get("category") == "WORKOUT"]
     ai_workouts     = [w for w in planned if is_ai_generated(w)]
     locked_dates    = {w.get("start_date_local","")[:10] for w in manual_workouts}
     if manual_workouts: log.info(f"  {len(manual_workouts)} manuella pass låsta: {', '.join(sorted(locked_dates))}")
