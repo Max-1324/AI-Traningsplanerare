@@ -2991,9 +2991,9 @@ Vid WeightTraining: strength_steps MÅSTE ha minst 4-6 övningar med exercise/se
 
 def call_ai(provider, prompt):
     if provider == "gemini":
-        from google import generativeai as genai
-        from google.generativeai import types
-        from google.generativeai.errors import ServerError, ClientError
+        from google import genai
+        from google.genai import types
+        from google.genai import errors  # för ServerError och ClientError
 
         key = os.getenv("GEMINI_API_KEY", "")
         if not key:
