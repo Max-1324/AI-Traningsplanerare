@@ -32,7 +32,7 @@ Kör:
     python training_plan_generator.py --provider anthropic --auto
 """
 
-import os, sys, json, re, math, logging, argparse
+import os, sys, json, re, math, logging, argparse, time
 from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 from typing import Optional, Literal
@@ -2991,16 +2991,19 @@ Vid WeightTraining: strength_steps MÅSTE ha minst 4-6 övningar med exercise/se
 
 def call_ai(provider, prompt):
     if provider == "gemini":
-        import time
-        from google import genai
-        from google.genai import types
-        from google.genai.errors import ServerError, ClientError
+        from google import generativeai as genai
+        from google.generativeai import types
+        from google.generativeai.errors import ServerError, ClientError
+
         key = os.getenv("GEMINI_API_KEY", "")
-        if not key: sys.exit("Satt GEMINI_API_KEY.")
+        if not key:
+            sys.exit("Sätt GEMINI_API_KEY.")
+
         client = genai.Client(api_key=key)
         models_str = os.getenv("GEMINI_MODELS", "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-flash")
         model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
         log.info(f"Skickar till Gemini ({len(model_queue)} modeller i kö)...")
+
         last_err = None
         for current_model in model_queue:
             for attempt in range(1, 3):
@@ -3022,6 +3025,7 @@ def call_ai(provider, prompt):
                         log.warning(f"   {current_model} misslyckades ({status})")
                         break
         raise last_err
+    
     elif provider == "anthropic":
         import anthropic
         key = os.getenv("ANTHROPIC_API_KEY","")
