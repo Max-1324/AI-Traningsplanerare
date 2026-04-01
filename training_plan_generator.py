@@ -1046,7 +1046,8 @@ def save_daily_note_to_icu(plan, changes):
 
 def generate_weekly_report(activities: list, wellness: list, fitness: list,
                            mesocycle: dict, trajectory: dict,
-                           compliance: dict, ftp_check: dict) -> str:
+                           compliance: dict, ftp_check: dict,
+                           acwr_trend: dict, taper_score: dict) -> str:
     today = date.today()
     week_start = today - timedelta(days=today.weekday() + 7)
     week_end   = week_start + timedelta(days=7)
@@ -1127,6 +1128,26 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
         report += "  Milstolpar:\n"
         for m in trajectory["milestones"]:
             report += f"    +{m['weeks']}v: CTL {m['projected_ctl']}\n"
+
+    if acwr_trend and acwr_trend.get("summary"):
+        report += f"""
+📈 ACWR-TREND
+  {acwr_trend['summary']}
+"""
+
+    if taper_score and taper_score.get("is_in_taper"):
+        score = int(taper_score.get('score', 0))
+        length = 20
+        filled_length = int(length * score / 100)
+        bar = '█' * filled_length + '░' * (length - filled_length)
+        report += f"""
+📉 TAPER-KVALITET (Dag {taper_score['taper_day']}/{taper_score['taper_days']})
+  Poäng: {score}/100 {bar}
+  {taper_score.get('verdict', '')}
+  Detaljer: CTL {taper_score.get('ctl_drop_pct'):+.1f}%, ATL {taper_score.get('atl_drop_pct'):+.1f}%, TSB Δ{taper_score.get('tsb_rise'):+.1f}
+  Justeringar: {' '.join(taper_score.get('adjustments', [])) or 'Inga, allt ser bra ut.'}
+"""
+
     report += f"""
 📋 COMPLIANCE
   {compliance['summary']}
@@ -2971,9 +2992,9 @@ Vid WeightTraining: strength_steps MÅSTE ha minst 4-6 övningar med exercise/se
 def call_ai(provider, prompt):
     if provider == "gemini":
         import time
-        from google import genai
-        from google.genai import types
-        from google.genai.errors import ServerError, ClientError
+        import google.generativeai as genai
+        from google.generativeai import types
+        from google.generativeai.errors import ServerError, ClientError
         key = os.getenv("GEMINI_API_KEY", "")
         if not key: sys.exit("Satt GEMINI_API_KEY.")
         genai.configure(api_key=key)
@@ -3342,7 +3363,8 @@ def main():
     if date.today().weekday() == 0 or mode == "full":
         try:
             report = generate_weekly_report(
-                activities, wellness, fitness, mesocycle, trajectory, compliance, ftp_check
+                activities, wellness, fitness, mesocycle, trajectory, compliance, ftp_check,
+                acwr_trend=acwr_trend, taper_score=taper_score
             )
             if not args.dry_run:
                 save_weekly_report_to_icu(report)
