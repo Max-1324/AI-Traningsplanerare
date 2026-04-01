@@ -1032,48 +1032,71 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
 
 def save_daily_note_to_icu(plan, changes):
     """
-    Sparar en sammanfattning av dagens generering och gårdagens feedback
-    som en NOTE i intervals.icu.
+    Sparar dagens sammanfattning som en NOTE idag, och gårdagens 
+    feedback som en separat NOTE igår.
     """
-    today_str = date.today().isoformat()
+    today_date = date.today()
+    today_str = today_date.isoformat()
+    yesterday_str = (today_date - timedelta(days=1)).isoformat()
     
-    lines = []
-    if plan.yesterday_feedback:
-        lines.append("📝 FEEDBACK PÅ GÅRDAGENS PASS:")
-        lines.append(plan.yesterday_feedback)
-        lines.append("")
+    # --- Bygg innehåll för IDAG ---
+    lines_today = ["🤖 DAGENS SAMMANFATTNING:"]
+    lines_today.append(plan.summary)
         
-    lines.append("🤖 DAGENS SAMMANFATTNING:")
-    lines.append(plan.summary)
-    
     if changes:
-        lines.append("")
-        lines.append("🔧 JUSTERINGAR (Post-processing):")
+        lines_today.append("")
+        lines_today.append("🔧 JUSTERINGAR (Post-processing):")
         for c in changes:
-            lines.append(f"  • {c}")
+            lines_today.append(f"  • {c}")
+    note_today = "\n".join(lines_today)
 
-    note_content = "\n".join(lines)
+    # --- Bygg innehåll för IGÅR ---
+    note_yesterday = None
+    if plan.yesterday_feedback:
+        note_yesterday = f"📝 FEEDBACK PÅ GÅRDAGENS PASS:\n{plan.yesterday_feedback}"
     
     try:
+        # Rensa tidigare skapade loggar från idag OCH igår (för att undvika dubbletter)
         existing = icu_get(f"/athlete/{ATHLETE_ID}/events", {
-            "oldest": today_str,
-            "newest": (date.today() + timedelta(days=1)).isoformat(),
+            "oldest": yesterday_str,
+            "newest": (today_date + timedelta(days=1)).isoformat(),
         })
+        
+        has_yesterday_feedback = False
+        
         for e in existing:
-            if e.get("name") == "🤖 AI Coach Logg" and e.get("category") == "NOTE":
-                requests.put(
-                    f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
-                    auth=AUTH, timeout=15, json=[{"id": e["id"]}],
-                ).raise_for_status()
+            if e.get("category") == "NOTE":
+                date_local = e.get("start_date_local", "")[:10]
+                
+                if e.get("name") == "🤖 AI Coach Logg" and date_local == today_str:
+                    requests.put(
+                        f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
+                        auth=AUTH, timeout=15, json=[{"id": e["id"]}],
+                    ).raise_for_status()
+                
+                if e.get("name") == "📝 Coach-feedback" and date_local == yesterday_str:
+                    has_yesterday_feedback = True
 
+        # 1. Spara Dagens Logg (På dagens datum kl 05:00)
         requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
             "category": "NOTE",
             "start_date_local": today_str + "T05:00:00",
             "name": "🤖 AI Coach Logg",
-            "description": note_content + f"\n\n{AI_TAG}",
+            "description": note_today + f"\n\n{AI_TAG}",
             "color": "#8E44AD"  # Lila färg
         }).raise_for_status()
-        log.info("📝 Daglig coach-logg (med feedback) sparad i intervals.icu")
+
+        # 2. Spara Gårdagens Feedback (På gårdagens datum kl 18:00)
+        if note_yesterday and not has_yesterday_feedback:
+            requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
+                "category": "NOTE",
+                "start_date_local": yesterday_str + "T18:00:00",
+                "name": "📝 Coach-feedback",
+                "description": note_yesterday + f"\n\n{AI_TAG}",
+                "color": "#8E44AD"  # Lila färg
+            }).raise_for_status()
+            
+        log.info("📝 Daglig coach-logg och feedback sparad uppdelat i intervals.icu")
     except Exception as e:
         log.warning(f"Kunde inte spara daglig coach-logg: {e}")
 
@@ -1202,10 +1225,8 @@ def save_weekly_report_to_icu(report: str):
         })
         for e in existing:
             if REPORT_TAG in (e.get("description") or ""):
-                requests.put(
-                    f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
-                    auth=AUTH, timeout=15, json=[{"id": e["id"]}],
-                ).raise_for_status()
+                log.info("📊 Veckorapport finns redan för denna vecka, hoppar över.")
+                return
         requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
             "category": "NOTE",
             "start_date_local": monday.isoformat() + "T06:00:00",
