@@ -2377,7 +2377,8 @@ def enforce_hrv(days, hrv):
     lz = "Z1" if (hrv["state"] == "LOW" or hrv["stability"] == "UNSTABLE") else "Z3"
     changes = []
     for i, day in enumerate(days):
-        if is_intense(day):
+        # Applicera HRV-veto ENDAST på de första 2 dagarna (idag och imorgon)
+        if i <= 1 and is_intense(day):
             new_steps = [WorkoutStep(duration_min=s.duration_min, zone=lz, description=f"Konverterad pga HRV {hrv['state']}") for s in day.workout_steps]
             days[i] = day.model_copy(update={
                 "title": f"{day.title} -> {lz} (HRV-VETO)",
@@ -3192,8 +3193,6 @@ def print_plan(plan, changes, mesocycle=None, trajectory=None,
         for c in changes: print(f"  {c}")
         print()
     for day in plan.days:
-        if day.vetoed:
-            continue  # FIX #1: Hoppa över vetoade pass i visningen
         emoji = EMOJIS.get(day.intervals_type, "❓")
         slot_label = f" [{day.slot}]" if day.slot != "MAIN" else ""
         print(f"{emoji} {day.date}{slot_label} - {day.title} [{day.intervals_type}]")
@@ -3438,16 +3437,14 @@ def main():
     elif mode == "full":
         deleted = delete_ai_workouts(ai_workouts)
         if deleted: log.info(f"  Tog bort {deleted} gamla AI-workouts")
-        # FIX #1: Filtrera bort vetoade pass innan sparning
-        days_to_save = [d for d in plan.days if not d.vetoed]
+        days_to_save = plan.days
 
     elif mode == "extend":
         existing_dates = {
             w.get("start_date_local","")[:10]
             for w in ai_workouts
         }
-        # FIX #1: Filtrera bort vetoade pass
-        days_to_save = [d for d in plan.days if d.date not in existing_dates and not d.vetoed]
+        days_to_save = [d for d in plan.days if d.date not in existing_dates]
         log.info(f"  Behåller {len(ai_workouts)} befintliga, lägger till {len(days_to_save)} nya.")
 
     saved = errors = 0
@@ -3462,7 +3459,7 @@ def main():
             log.error(f"Misslyckades spara {day.date}: {e}"); errors += 1
 
     vetoed_count = sum(1 for d in plan.days if d.vetoed)
-    log.info(f"Klart! {saved} pass sparade. {vetoed_count} vetoade (ej sparade). {errors} fel. {len(changes)} post-processing-ändringar.")
+    log.info(f"Klart! {saved} pass sparade. {vetoed_count} säkerhetsjusterades av reglerna. {errors} fel. {len(changes)} post-processing-ändringar.")
     print("\nKör igen imorgon bitti.\n")
 
 if __name__ == "__main__":
