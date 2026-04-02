@@ -3742,7 +3742,7 @@ def call_ai(provider, prompt):
                     )
                     os.environ["_USED_MODEL"] = current_model
                     return response.text
-                except (ServerError, ClientError) as e:
+                except (errors.ServerError, errors.ClientError) as e:
                     status = getattr(e, 'status_code', 0)
                     last_err = e
                     if status in (429, 503) and attempt < 2:
