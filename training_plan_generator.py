@@ -2213,6 +2213,7 @@ def sport_volumes(activities):
         try:
             if datetime.strptime(a["start_date_local"][:10], "%Y-%m-%d") >= cutoff:
                 t = a.get("type","Other")
+                vols[t] = vols.get(t,0) + ((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
                 vols[t] = vols.get(t,0) + (a.get("moving_time",0)/60)
         except: continue
     return vols
@@ -2225,10 +2226,12 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
     cutoff_14d = datetime.now() - timedelta(days=14)
     cutoff_7d  = datetime.now() - timedelta(days=7)
     past_14d = sum(
+        (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
         a.get("moving_time", 0) / 60 for a in activities
         if a.get("type") == sport_type and _safe_date(a) >= cutoff_14d
     )
     past_7d = sum(
+        (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
         a.get("moving_time", 0) / 60 for a in activities
         if a.get("type") == sport_type and _safe_date(a) >= cutoff_7d
     )
@@ -3289,6 +3292,7 @@ def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals
         if yesterday_actuals:
             a = yesterday_actuals[0]
             dur = round((a.get("moving_time") or 0)/60)
+                dur = round((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
             print(f"\nIgår: {name} | Genomfört: {a.get('type','?')}, {dur}min, TSS {a.get('icu_training_load','?')}")
             q = input("Hur kändes det? (bra/okej/tungt/för lätt) [bra]: ").strip() or "bra"
             answers["yesterday_feeling"] = sanitize(q, 50); answers["yesterday_completed"] = True
@@ -4193,4 +4197,5 @@ def main():
     print("\nKör igen imorgon bitti.\n")
 
 if __name__ == "__main__":
+    main()y
     main()
