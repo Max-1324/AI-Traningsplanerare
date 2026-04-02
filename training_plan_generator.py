@@ -448,6 +448,7 @@ def format_constraints_for_prompt(constraints: list[dict], horizon_dates: list[s
     if len(lines) == 1:
         return ""
     lines.append("  RESPEKTERA dessa begränsningar – atleten har lagt in dem själv.")
+    lines.append("  VIKTIGT: Ordet 'resa' eller 'semester' betyder oftast bara logistik (t.ex. cykel saknas) – planera då normal och kvalitativ träning. MEN, om beskrivningen specifikt nämner utmattande faktorer (t.ex. 'långresa', 'flygresa 10h', 'jetlag' eller 'trött'), DÅ ska du absolut sänka intensiteten och lägga in återhämtning/vila!")
     return "\n".join(lines)
 
 
@@ -2193,16 +2194,17 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
     Bygger en detaljerad analys av gårdagens planerade vs faktiska pass
     som skickas till AI:n för feedback.
     """
+    yesterday_date = (date.today() - timedelta(days=1)).isoformat()
     if not yesterday_planned or not is_ai_generated(yesterday_planned):
         if yesterday_actuals:
             a = yesterday_actuals[0]
             return (
-                f"Inget AI-planerat pass igår, men aktivitet registrerad:\n"
+                f"GÅRDAGEN ({yesterday_date}): Inget AI-planerat pass igår, men aktivitet registrerad:\n"
                 f"  Typ: {a.get('type','?')} | {round((a.get('moving_time',0) or 0)/60)}min | "
                 f"TSS: {a.get('icu_training_load','?')} | HR: {a.get('average_heartrate','?')}bpm | "
                 f"RPE: {a.get('perceived_exertion','?')}"
             )
-        return "Inget AI-planerat pass igår, ingen aktivitet registrerad."
+        return f"GÅRDAGEN ({yesterday_date}): Inget AI-planerat pass igår, ingen aktivitet registrerad."
 
     planned_name = yesterday_planned.get("name", "?")
     planned_type = yesterday_planned.get("type", "?")
@@ -2211,14 +2213,14 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
 
     if not yesterday_actuals:
         return (
-            f"MISSAT PASS:\n"
+            f"MISSAT PASS IGÅR ({yesterday_date}):\n"
             f"  Planerat: {planned_name} ({planned_type}, {planned_dur}min)\n"
             f"  Beskrivning: {planned_desc[:200]}\n"
             f"  Faktiskt: Ingenting registrerat.\n"
             f"  → Ge feedback: Vad missades? Är det en compliance-trend?"
         )
 
-    lines = [f"GÅRDAGENS PLANERADE PASS:\n  {planned_name} ({planned_type}, {planned_dur}min)"]
+    lines = [f"GÅRDAGENS ({yesterday_date}) PLANERADE PASS:\n  {planned_name} ({planned_type}, {planned_dur}min)"]
     lines.append(f"  Plan-beskrivning: {planned_desc[:300]}")
     lines.append(f"\nGÅRDAGENS FAKTISKA AKTIVITET(ER):")
 
@@ -2915,6 +2917,7 @@ INSTRUKTION: Ge 3-5 meningar feedback i fältet "yesterday_feedback":
   - Om zoner/HR avviker: vad kan atleten göra annorlunda?
   - Konkreta tips för nästa liknande pass.
   - Om passet missades: bekräfta orsaken, ingen skuld, framåtblickande.
+  - VIKTIGT: Blanda inte ihop gårdagens datum med resplaner eller schemabegränsningar som gäller för IDAG eller framåt!
 """
 
     return f"""Du är en elitcoach som granskar och vid behov justerar träningsplanen.
