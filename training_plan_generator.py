@@ -1539,7 +1539,7 @@ def fetch_athlete():
 def fetch_activities(days):
     return icu_get(f"/athlete/{ATHLETE_ID}/activities", {
         "oldest": (date.today() - timedelta(days=days)).isoformat(),
-        "fields": ("name,type,start_date_local,distance,moving_time,"
+        "fields": ("name,type,start_date_local,distance,moving_time,elapsed_time,"
                    "total_elevation_gain,icu_training_load,average_heartrate,"
                    "max_heartrate,icu_weighted_avg_watts,icu_intensity,trimp,"
                    "icu_zone_times,icu_hr_zone_times,perceived_exertion,feel"),
@@ -1852,7 +1852,7 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
     for a in activities:
         aid = a.get("id") or a.get("start_date_local", "")
         tss = a.get("icu_training_load") or 0
-        dur = (a.get("moving_time") or 0) / 60
+        dur = (a.get("moving_time") or a.get("elapsed_time") or 0) / 60
         intf = a.get("icu_intensity") or 0
         name_lower = (a.get("name") or "").lower()
         is_race = "race" in name_lower or "tävling" in name_lower or a.get("workout_type") == "race"
@@ -1862,7 +1862,7 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
         elif tss > 600:
             warnings.append(f"Orimlig TSS {tss} på {_safe_date_str(a)} – filtreras")
             filtered_activity_ids.add(aid)
-        elif dur < 5 and tss > 0:
+        elif 0 < dur < 5 and tss > 10:
             warnings.append(f"Kort aktivitet ({dur:.0f}min) med TSS {tss} på {_safe_date_str(a)} – filtreras")
             filtered_activity_ids.add(aid)
 
@@ -2214,7 +2214,6 @@ def sport_volumes(activities):
             if datetime.strptime(a["start_date_local"][:10], "%Y-%m-%d") >= cutoff:
                 t = a.get("type","Other")
                 vols[t] = vols.get(t,0) + ((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
-                vols[t] = vols.get(t,0) + (a.get("moving_time",0)/60)
         except: continue
     return vols
 
@@ -2452,8 +2451,9 @@ def check_return_to_play(activities: list, today: date) -> dict:
     for i in range(1, 14):
         check_date = (today - timedelta(days=i)).isoformat()
         daily_acts = [a for a in activities if a.get("start_date_local", "")[:10] == check_date]
-        moving_time = sum((a.get("moving_time", 0) or 0) for a in daily_acts)
-        if moving_time < 900:  # < 15 min räknas som vilodag
+        moving_time = sum((a.get("moving_time") or a.get("elapsed_time") or 0) for a in daily_acts)
+        tss = sum((a.get("icu_training_load", 0) or 0) for a in daily_acts)
+        if moving_time < 900 and tss < 10:  # < 15 min OCH < 10 TSS räknas som vilodag
             days_off += 1
         else:
             break
@@ -3289,7 +3289,7 @@ def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals
         name = yesterday_planned.get("name","träning")
         if yesterday_actuals:
             a = yesterday_actuals[0]
-            dur = round((a.get("moving_time") or 0)/60)
+            dur = round((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
             print(f"\nIgår: {name} | Genomfört: {a.get('type','?')}, {dur}min, TSS {a.get('icu_training_load','?')}")
             q = input("Hur kändes det? (bra/okej/tungt/för lätt) [bra]: ").strip() or "bra"
             answers["yesterday_feeling"] = sanitize(q, 50); answers["yesterday_completed"] = True
