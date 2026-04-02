@@ -1561,13 +1561,25 @@ def calculate_hrv(wellness):
                 "state": "INSUFFICIENT_DATA", "trend": "UNKNOWN", "stability": "UNKNOWN", "deviation_pct": 0.0}
     today = vals[-1]; last7 = vals[-7:]; avg7 = sum(last7)/len(last7); avg60 = sum(vals)/len(vals)
     cv7 = (math.sqrt(sum((x-avg7)**2 for x in last7)/len(last7)) / avg7 * 100) if avg7 else 0
-    dev = (today - avg60) / avg60 if avg60 else 0
-    trend = "DOWN" if avg7 < avg60*0.95 else ("UP" if avg7 > avg60*1.05 else "STABLE")
+    
+    dev_7d = (avg7 - avg60) / avg60 if avg60 else 0
+    dev_today = (today - avg60) / avg60 if avg60 else 0
+    
+    trend = "DOWN" if dev_7d < -0.05 else ("UP" if dev_7d > 0.05 else "STABLE")
     stability = "VERY_STABLE" if cv7 < 8 else ("STABLE" if cv7 < 12 else "UNSTABLE")
-    state = "LOW" if dev < -0.15 else ("SLIGHTLY_LOW" if dev < -0.05 else ("HIGH" if dev > 0.10 else "NORMAL"))
+    
+    if dev_7d < -0.10 or dev_today < -0.25:
+        state = "LOW"
+    elif dev_7d < -0.05 or dev_today < -0.15:
+        state = "SLIGHTLY_LOW"
+    elif dev_7d > 0.05 or dev_today > 0.15:
+        state = "HIGH"
+    else:
+        state = "NORMAL"
+        
     return {"today": today, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
             "cv7d": round(cv7,1), "state": state, "trend": trend, "stability": stability,
-            "deviation_pct": round(dev*100,1)}
+            "deviation_pct": round(dev_today*100,1)}
 
 def rpe_trend(activities) -> str:
     rpes  = [a["perceived_exertion"] for a in activities[-10:] if a.get("perceived_exertion")]
@@ -3232,7 +3244,7 @@ def plan_update_mode(ai_workouts, yesterday_actuals, yesterday_planned, hrv, wel
         if not yesterday_actuals:
             return "full", "Gårdagens planerade pass missades – regenererar plan."
     if hrv["state"] == "LOW":
-        return "full", f"HRV = LOW ({hrv['deviation_pct']}% under snitt) – regenererar plan."
+            return "full", f"HRV = LOW ({hrv.get('today', 'N/A')} ms, {hrv['deviation_pct']}% under snitt) – regenererar plan."
     if sleep_h is not None and sleep_h < 5.5:
         return "full", f"Mycket kort sömn ({sleep_h:.1f}h) – regenererar plan."
     last_act = next((a for a in reversed(activities) if a.get("perceived_exertion")), None)
