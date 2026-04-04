@@ -3146,6 +3146,28 @@ def enforce_rollski_limit(days, max_per_week=1):
     return days, changes
 
 
+WARMUP_BY_SPORT = {
+    "VirtualRide": "🔥 Uppvärmning (5-10 min innan): Bensvingningar fram/bak, höftcirklar, djupa utfall x10/sida. Rulla sedan ut lätt de första minuterna.",
+    "Ride":        "🔥 Uppvärmning (5-10 min innan): Bensvingningar fram/bak, höftcirklar, djupa utfall x10/sida. Rulla sedan ut lätt de första minuterna.",
+    "RollerSki":   "🔥 Uppvärmning (5-10 min innan): Bensvingningar, höftcirklar, axelrotationer, lätt jogg på stället.",
+    "Run":         "🔥 Uppvärmning (5-10 min innan): Höftcirklar, bensvingningar fram/bak, knälyft, hälspark. Börja med promenadtempo.",
+}
+WARMUP_DEFAULT  = "🔥 Uppvärmning (5-10 min innan): Dynamiska rörelser – höftcirklar, bensvingningar, lätt aktivering."
+
+
+def ensure_warmup(days: list) -> list:
+    """Lägger till en sportspecifik uppvärmningstext i description för varje träningspass."""
+    for i, day in enumerate(days):
+        if day.intervals_type in ("Rest", "WeightTraining") or day.duration_min == 0:
+            continue
+        if "uppvärmning" in day.description.lower():
+            continue
+        warmup_text = WARMUP_BY_SPORT.get(day.intervals_type, WARMUP_DEFAULT)
+        new_desc = warmup_text + "\n\n" + day.description if day.description else warmup_text
+        days[i] = day.model_copy(update={"description": new_desc})
+    return days
+
+
 def enforce_deload(days, mesocycle: dict, athlete: dict):
     if not mesocycle["is_deload"]:
         return days, []
@@ -3284,6 +3306,7 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
     if mesocycle:
         days, c = enforce_deload(days, mesocycle, athlete);  all_c += c
     days, c = enforce_tss(days, budget, athlete);      all_c += c
+    days     = ensure_warmup(days)
     days     = add_env_nutrition(days, weather, phase=phase, races=races, athlete=athlete)
     return plan.model_copy(update={"days": days}), all_c
 
