@@ -2444,7 +2444,7 @@ def format_race_week_for_prompt(rw: dict) -> str:
 
 def check_return_to_play(activities: list, today: date) -> dict:
     """
-    Kollar om atleten haft 3 eller fler dagar i rad helt utan träning
+    Kollar om atleten haft 5 eller fler dagar i rad helt utan träning
     och triggar i så fall ett Return to Play-protokoll.
     """
     days_off = 0
@@ -2454,10 +2454,23 @@ def check_return_to_play(activities: list, today: date) -> dict:
         moving_time = sum((a.get("moving_time") or a.get("elapsed_time") or 0) for a in daily_acts)
         tss = sum((a.get("icu_training_load", 0) or 0) for a in daily_acts)
         if moving_time < 900 and tss < 10:  # < 15 min OCH < 10 TSS räknas som vilodag
+            daily_acts = [a for a in activities if a.get("start_date_local", "")[:10] == check_date and a.get("type") not in ("Rest", "Note")]
+        
+        if not daily_acts:
             days_off += 1
+            continue
+            
+        total_time = sum((a.get("moving_time") or a.get("elapsed_time") or 0) for a in daily_acts)
+        total_tss  = sum((a.get("icu_training_load") or 0) for a in daily_acts)
+        has_rpe    = any((a.get("perceived_exertion") or 0) > 0 for a in daily_acts)
+        has_strength = any(a.get("type", "") in ("WeightTraining", "Strength") for a in daily_acts)
+        
+        if total_time >= 900 or total_tss >= 10 or has_rpe or has_strength:
+            break  # Träning loggad och giltig -> bryt vilodagskedjan!
         else:
             break
-    return {"is_active": days_off >= 3, "days_off": days_off}
+            days_off += 1  # Aktiviteten var helt obetydlig (t.ex. 5 min promenad)
+    return {"is_active": days_off >= 5, "days_off": days_off}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAPER QUALITY SCORE
@@ -4015,7 +4028,10 @@ def main():
     vetos   = biometric_vetoes(hrv, morning.get("life_stress",1))
 
     # ── RETURN TO PLAY ───────────────────────────────────────────────────────
-    rtp_status = check_return_to_play(activities_clean, date.today())
+    # Använd den ofiltrerade aktivitetslistan här. En aktivitet med "dålig" data
+    # (t.ex. för hög IF pga fel FTP) är fortfarande en aktivitet, inte en vilodag.
+    # Filtret är för aggressivt för just denna kontroll.
+    rtp_status = check_return_to_play(activities, date.today())
     if rtp_status.get("is_active"):
         log.info(f"🚑 Return to Play-protokoll aktivt ({rtp_status['days_off']} vilodagar i rad)")
 
