@@ -3885,6 +3885,7 @@ Returnera ENBART JSON:
 slot = "AM", "PM", eller "MAIN" (default). Samma datum kan ha max 2 entries (en AM + en PM).
 Inkludera EJ datumen {locked_str} i "days".
 Vid WeightTraining: strength_steps MÅSTE ha minst 4-6 övningar med exercise/sets/reps/rest_sec/notes.
+workout_steps MÅSTE inkluderas för ALLA träningspass (ej WeightTraining/Rest). Minst: uppvärmning (Z1/Z2), huvudblock (rätt zon), nedvarvning (Z1). Intervallpass: varje intervall och vila som eget steg.
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
