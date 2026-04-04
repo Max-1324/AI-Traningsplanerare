@@ -708,6 +708,27 @@ def ctl_trajectory(ctl_now: float, race_date: Optional[date], target_ctl: float,
     }
 
 
+def ctl_ontrack_check(trajectory: dict, ctl_now: float, fitness_history: list) -> str:
+    """Ger en enkel status om atleten är på rätt spår mot Vätternrundan-CTL-målet."""
+    if not trajectory.get("has_target"):
+        return ""
+    gap = trajectory["ctl_gap"]
+    ramp = trajectory["ramp_per_week"]
+    # Kolla om senaste 2 veckors CTL faktiskt stiger tillräckligt snabbt
+    if len(fitness_history) >= 14:
+        ctl_2w_ago = fitness_history[-14].get("ctl", ctl_now)
+        actual_ramp = round((ctl_now - ctl_2w_ago) / 2, 1)
+        ramp_status = f" (faktisk ramp: +{actual_ramp} CTL/v, behövs: +{ramp})"
+    else:
+        ramp_status = ""
+    if gap <= 2:
+        return f"✅ ON TRACK – CTL inom {gap} poäng av Vätternrundan-målet{ramp_status}"
+    elif gap <= 8:
+        return f"🟡 LITE EFTER – {gap} CTL-poäng kvar, behöver +{ramp} CTL/vecka{ramp_status}"
+    else:
+        return f"🔴 EFTER SCHEMA – {gap} CTL-poäng kvar, öka veckovolym nu{ramp_status}"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. COMPLIANCE ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -787,6 +808,74 @@ def compliance_analysis(planned_events: list, activities: list, days: int = 28) 
             + " ".join(patterns)
         ),
     }
+
+
+def update_learned_patterns(state: dict, planned_events: list, activities: list) -> dict:
+    """Uppdaterar lärda mönster i state-filen: sport×veckodag, hög-RPE-typer, AM/PM."""
+    patterns = state.get("learned_patterns", {
+        "skip_by_sport_dow": {}, "high_rpe_by_type": {}, "time_of_day": {}
+    })
+    cutoff = (date.today() - timedelta(days=90)).isoformat()
+    act_by_date: dict = {}
+    for a in activities:
+        d = a.get("start_date_local", "")[:10]
+        if d >= cutoff:
+            act_by_date.setdefault(d, []).append(a)
+
+    for e in planned_events:
+        if not (is_ai_generated(e) or e.get("category") == "WORKOUT"):
+            continue
+        d = e.get("start_date_local", "")[:10]
+        if d < cutoff or d >= date.today().isoformat():
+            continue
+        sport = e.get("type", "Unknown")
+        dow   = str(date.fromisoformat(d).weekday())
+        key   = f"{sport}_{dow}"
+        sp    = patterns["skip_by_sport_dow"].setdefault(key, {"planned": 0, "skipped": 0})
+        sp["planned"] += 1
+        completed = bool(act_by_date.get(d))
+        if not completed:
+            sp["skipped"] += 1
+
+        if completed:
+            act = act_by_date[d][0]
+            rpe = act.get("perceived_exertion")
+            if rpe is not None:
+                hr  = patterns["high_rpe_by_type"].setdefault(sport, {"count": 0, "high_rpe_count": 0})
+                hr["count"] += 1
+                if rpe > 7:
+                    hr["high_rpe_count"] += 1
+            slot = "AM" if "(AM)" in (e.get("name") or "") else ("PM" if "(PM)" in (e.get("name") or "") else "MAIN")
+            tod  = patterns["time_of_day"].setdefault(slot, {"count": 0, "completed": 0})
+            tod["count"] += 1
+            tod["completed"] += 1
+        else:
+            slot = "AM" if "(AM)" in (e.get("name") or "") else ("PM" if "(PM)" in (e.get("name") or "") else "MAIN")
+            patterns["time_of_day"].setdefault(slot, {"count": 0, "completed": 0})["count"] += 1
+
+    patterns["last_updated"] = date.today().isoformat()
+    return patterns
+
+
+def format_learned_patterns(patterns: dict) -> str:
+    """Formaterar lärda mönster för AI-prompten – visar bara signifikanta fynd."""
+    if not patterns:
+        return ""
+    days_sv = ["mån", "tis", "ons", "tor", "fre", "lör", "sön"]
+    lines = []
+    for key, v in patterns.get("skip_by_sport_dow", {}).items():
+        if v["planned"] >= 3 and v["skipped"] / v["planned"] > 0.5:
+            sport, dow = key.rsplit("_", 1)
+            lines.append(f"  Atleten hoppar ofta {sport} på {days_sv[int(dow)]} ({v['skipped']}/{v['planned']} missade)")
+    for sport, v in patterns.get("high_rpe_by_type", {}).items():
+        if v["count"] >= 3 and v["high_rpe_count"] / v["count"] > 0.5:
+            lines.append(f"  {sport} ger ofta hög RPE ({v['high_rpe_count']}/{v['count']} pass RPE>7)")
+    for slot, v in patterns.get("time_of_day", {}).items():
+        if v["count"] >= 5 and slot == "AM" and v["completed"] / v["count"] < 0.70:
+            lines.append(f"  AM-pass genomförs sällan ({round(v['completed']/v['count']*100)}%) – undvik AM")
+    if not lines:
+        return ""
+    return "LÄRDA MÖNSTER (historik):\n" + "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1723,14 +1812,61 @@ def build_workout_step_text(steps: list[WorkoutStep], sport: str) -> str:
 _ZONE_HR_NUM = {"Z1": 1, "Z2": 2, "Z3": 3, "Z4": 4, "Z5": 5, "Z6": 6, "Z7": 7}
 
 def build_hr_workout_doc(steps: list[WorkoutStep]) -> dict:
-    """Bygger workout_doc med hr_zone-format för icke-power-sporter.
-    Använder exakt samma interna format som intervals.icu Workout Builder genererar.
-    """
+    """Bygger workout_doc med hr_zone-format för icke-power-sporter."""
     return {"steps": [
         {"duration": s.duration_min * 60,
          "hr": {"value": _ZONE_HR_NUM.get(s.zone.upper(), 2), "units": "hr_zone"}}
         for s in steps
     ]}
+
+def build_power_workout_doc(steps: list[WorkoutStep]) -> dict:
+    """Bygger workout_doc med %ftp-format för power-sporter (VirtualRide)."""
+    type_map = {"Warmup": "Warmup", "Cooldown": "Cooldown", "SteadyState": "SteadyState"}
+    result = []
+    for s in steps:
+        t = type_map.get(_step_type(s.description), "SteadyState")
+        result.append({
+            "duration": s.duration_min * 60,
+            "power": {"value": _ZONE_POWER_PCT.get(s.zone.upper(), 68), "units": "%ftp"},
+            "type": t,
+        })
+    return {"steps": result}
+
+def format_workout_summary(steps: list[WorkoutStep], sport: str) -> str:
+    """Kort mänsklig sammanfattning – t.ex. '5×3min VO2max / 3min Recovery'."""
+    use_power = sport in _POWER_SPORTS
+    warmup    = [s for s in steps if _step_type(s.description) == "Warmup"]
+    cooldown  = [s for s in steps if _step_type(s.description) == "Cooldown"]
+    middle    = [s for s in steps if _step_type(s.description) == "SteadyState"]
+
+    parts = []
+    if warmup:
+        parts.append(f"{sum(s.duration_min for s in warmup)}min uppvärmning")
+
+    # Hitta upprepande (arbete, vila)-par
+    i = 0
+    while i < len(middle):
+        s = middle[i]
+        if i + 1 < len(middle) and s.zone.upper() in {"Z4","Z5","Z6","Z7"} and middle[i+1].zone.upper() in {"Z1","Z2"}:
+            work_dur  = s.duration_min
+            work_zone = s.zone.upper()
+            rest_dur  = middle[i+1].duration_min
+            reps = 0
+            j = i
+            while j + 1 < len(middle) and middle[j].duration_min == work_dur and middle[j].zone.upper() == work_zone and middle[j+1].duration_min == rest_dur:
+                reps += 1; j += 2
+            label = _ZONE_STEP_LABELS.get(work_zone, work_zone)
+            zone_str = f"{_ZONE_POWER_PCT.get(work_zone,100)}% FTP" if use_power else work_zone
+            parts.append(f"{reps}×{work_dur}min {label} ({zone_str}) / {rest_dur}min Recovery")
+            i = j
+        else:
+            label = _ZONE_STEP_LABELS.get(s.zone.upper(), s.zone)
+            parts.append(f"{s.duration_min}min {label}")
+            i += 1
+
+    if cooldown:
+        parts.append(f"{sum(s.duration_min for s in cooldown)}min nedvarvning")
+    return " · ".join(parts)
 
 def _workout_color(day: PlanDay) -> str:
     """Returnerar hex-färg baserat på passintensitet."""
@@ -1755,7 +1891,6 @@ def save_workout(day: PlanDay, athlete: dict | None = None):
             f"{s.exercise}: {s.sets}x{s.reps}" + (f", vila {s.rest_sec}s" if s.rest_sec else "") + (f" - {s.notes}" if s.notes else "")
             for s in day.strength_steps)
     elif day.workout_steps and day.intervals_type not in ("WeightTraining", "Rest"):
-        # Intervals.icu parsar steg från description-fältet i formatet "- Xm Y% [label]" / "- Xm YYYbpm [label]"
         step_text = build_workout_step_text(day.workout_steps, day.intervals_type)
         log.debug(f"step_text {day.date}: {len(day.workout_steps)} steg")
     else:
@@ -2080,6 +2215,47 @@ def calculate_hrv(wellness):
             "cv7d": round(cv7,1), "state": state, "trend": trend, "stability": stability,
             "deviation_pct": round(dev_today*100,1)}
 
+def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> dict:
+    """Sammansatt formpoäng 0–100 baserat på HRV, sömn, viloHR-trend, RPE och känsla."""
+    def clamp(v, lo=0, hi=100): return max(lo, min(hi, v))
+
+    # HRV (35%) – deviation_pct: -30..+15 → 0..100
+    dev = hrv.get("deviation_pct", 0)
+    hrv_sc = clamp(int((dev + 30) / 45 * 100))
+
+    # Sömn (25%) – senaste natten, 4..9h → 0..100
+    recent_sleep = next((w.get("sleepSecs") for w in reversed(wellness) if w.get("sleepSecs")), None)
+    sleep_h = (recent_sleep / 3600) if recent_sleep else 7.0
+    sleep_sc = clamp(int((sleep_h - 4) / 5 * 100))
+
+    # Vilopuls-trend (15%) – slope sista 7 dagar
+    rhr_vals = [w.get("restingHR") for w in wellness[-7:] if w.get("restingHR")]
+    if len(rhr_vals) >= 3:
+        slope = (rhr_vals[-1] - rhr_vals[0]) / (len(rhr_vals) - 1)
+        rhr_sc = 90 if slope < -0.3 else (40 if slope > 0.3 else 70)
+    else:
+        rhr_sc = 70
+
+    # RPE (15%) – snitt sista 5 pass, 4..9 inverterat → 0..100
+    rpes = [a["perceived_exertion"] for a in activities[-5:] if a.get("perceived_exertion")]
+    mean_rpe = sum(rpes) / len(rpes) if rpes else 6.0
+    rpe_sc = clamp(int((9 - mean_rpe) / 5 * 100))
+
+    # Känsla (10%) – snitt sista 5 pass, 1..5 → 0..100
+    feels = [a["feel"] for a in activities[-5:] if a.get("feel")]
+    mean_feel = sum(feels) / len(feels) if feels else 3.0
+    feel_sc = clamp(int((mean_feel - 1) / 4 * 100))
+
+    score = int(hrv_sc*0.35 + sleep_sc*0.25 + rhr_sc*0.15 + rpe_sc*0.15 + feel_sc*0.10)
+    label = "TOPP" if score >= 80 else ("BRA" if score >= 65 else ("NORMAL" if score >= 50 else ("LAG" if score >= 35 else "KRITISK")))
+
+    return {
+        "score": score, "label": label,
+        "components": {"hrv": hrv_sc, "sleep": sleep_sc, "rhr": rhr_sc, "rpe": rpe_sc, "feel": feel_sc},
+        "summary": f"Readiness: {score}/100 ({label}) | HRV:{hrv_sc} Sömn:{sleep_sc} ViloHR:{rhr_sc} RPE:{rpe_sc} Känsla:{feel_sc}",
+    }
+
+
 def rpe_trend(activities) -> str:
     rpes  = [a["perceived_exertion"] for a in activities[-10:] if a.get("perceived_exertion")]
     feels = [a["feel"]               for a in activities[-10:] if a.get("feel")]
@@ -2103,6 +2279,37 @@ def rpe_trend(activities) -> str:
         if feel_slope < -0.3:
             lines.append(f"  ⚠️  KÄNSLA SJUNKER ({feel_slope:.2f}/pass) – tecken på utmattning")
     return "\n".join(lines)
+
+def analyze_np_if(activities: list) -> dict:
+    """Analyserar NP/IF-mönster för cykelsporter – pacing-kvalitet och belastningstrend."""
+    cycling = [a for a in activities
+               if a.get("type") in ("Ride", "VirtualRide")
+               and a.get("icu_weighted_avg_watts")
+               and a.get("icu_intensity")][-15:]
+    if len(cycling) < 4:
+        return {"summary": "Otillräcklig NP/IF-data (< 4 cykelpass).", "flags": []}
+
+    ifs = [a["icu_intensity"] for a in cycling]
+    nps = [a["icu_weighted_avg_watts"] for a in cycling]
+    mean_if = sum(ifs) / len(ifs)
+    np_mean = sum(nps) / len(nps)
+    np_cv   = (sum((x - np_mean)**2 for x in nps) / len(nps))**0.5 / np_mean if np_mean else 0
+
+    flags = []
+    if mean_if > 0.82:
+        flags.append(f"IF KONSEKVENT HÖG: snitt {mean_if:.2f} – kör hårdare än planerat zon (Z3/Z4)")
+    if np_cv > 0.20:
+        flags.append(f"NP-VARIATION HÖG (CV={np_cv:.2f}) – ojämn belastning vecka-till-vecka")
+    if len(cycling) >= 6:
+        early_np = sum(a["icu_weighted_avg_watts"] for a in cycling[:3]) / 3
+        late_np  = sum(a["icu_weighted_avg_watts"] for a in cycling[-3:]) / 3
+        if late_np < early_np * 0.90:
+            flags.append(f"FRONT-LOADING TREND: NP tidigt {round(early_np)}W → sent {round(late_np)}W – mattning i blocket")
+
+    parts = [f"NP/IF ({len(cycling)} cykelpass): snitt NP {round(np_mean)}W | IF {mean_if:.2f}"]
+    parts += flags if flags else ["Pacing OK – ingen uppenbar IF-drift eller front-loading"]
+    return {"summary": "\n  ".join(parts), "flags": flags, "mean_if": mean_if, "mean_np": round(np_mean)}
+
 
 def acwr(atl, ctl, fitness_history=None) -> dict:
     if ctl <= 0:
@@ -2954,29 +3161,26 @@ def apply_injury_rules(days, injury_note: str):
     return days, changes
 
 def enforce_hrv(days, hrv):
-    if hrv["state"] not in ("LOW","SLIGHTLY_LOW") and hrv["stability"] != "UNSTABLE":
+    # Veto endast vid tydligt LOW – SLIGHTLY_LOW och UNSTABLE-ensamt informeras bara AI:n
+    if hrv["state"] != "LOW":
         return days, []
 
-    veto_reason = hrv['state']
-    if hrv["stability"] == "UNSTABLE":
-        if hrv["state"] in ("LOW", "SLIGHTLY_LOW"):
-            veto_reason = f"{hrv['state']} och instabil"
-        else:
-            veto_reason = "instabil"
-
-    lz = "Z1" if (hrv["state"] == "LOW" or hrv["stability"] == "UNSTABLE") else "Z3"
     changes = []
     for i, day in enumerate(days):
         # Applicera HRV-veto ENDAST på de första 2 dagarna (idag och imorgon)
         if i <= 1 and is_intense(day):
-            new_steps = [WorkoutStep(duration_min=s.duration_min, zone=lz, description=f"Konverterad pga HRV ({veto_reason})") for s in day.workout_steps]
+            recovery_step = WorkoutStep(
+                duration_min=day.duration_min,
+                zone="Z1",
+                description=f"Lugn återhämtning – HRV är LOW ({hrv['deviation_pct']}% under baseline)",
+            )
             days[i] = day.model_copy(update={
-                "title": f"{day.title} -> {lz} (HRV-VETO)",
-                "workout_steps": new_steps,
+                "title": f"{day.title} -> Z1 (HRV-VETO)",
+                "workout_steps": [recovery_step],
                 "nutrition": "",
                 "vetoed": True,
             })
-            changes.append(f"HRV-VETO: {day.date} - intensitet sänkt till {lz} (HRV är {veto_reason}).")
+            changes.append(f"HRV-VETO: {day.date} - ersatt med Z1 återhämtning (HRV LOW).")
     return days, changes
 
 def enforce_sport_budget(days, budgets):
@@ -3036,6 +3240,8 @@ def ftp_for_sport(sport_type: str, athlete: dict) -> float:
 def estimate_tss_coggan(day, athlete: dict) -> float:
     if day.duration_min == 0 or day.intervals_type == "Rest":
         return 0.0
+    if day.intervals_type == "WeightTraining":
+        return round(day.duration_min * 0.5, 1)  # ~20 TSS för 40min styrka
     ftp      = ftp_for_sport(day.intervals_type, athlete)
     dur_sek  = day.duration_min * 60
     if day.workout_steps:
@@ -3287,6 +3493,23 @@ WARMUP_BY_SPORT = {
 WARMUP_DEFAULT  = "🔥 Uppvärmning (5-10 min innan): Dynamiska rörelser – höftcirklar, bensvingningar, lätt aktivering."
 
 
+_MIN_DURATION = {
+    "Ride": 75, "VirtualRide": 45, "RollerSki": 60,
+    "Run": 30, "WeightTraining": 30,
+}
+
+def enforce_min_duration(days: list) -> list:
+    """Klampar duration till minimum per sport – hoppar över vetade/återhämtningspass."""
+    for i, day in enumerate(days):
+        if day.vetoed:
+            continue
+        min_dur = _MIN_DURATION.get(day.intervals_type)
+        if min_dur and 0 < day.duration_min < min_dur:
+            days[i] = day.model_copy(update={"duration_min": min_dur})
+            log.debug(f"enforce_min_duration: {day.date} {day.intervals_type} {day.duration_min}→{min_dur}min")
+    return days
+
+
 def ensure_warmup(days: list) -> list:
     """Lägger till en sportspecifik uppvärmningstext i description för varje träningspass."""
     for i, day in enumerate(days):
@@ -3440,6 +3663,7 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
     days, c = enforce_tss(days, budget, athlete);      all_c += c
     days     = ensure_warmup(days)
     days     = add_env_nutrition(days, weather, phase=phase, races=races, athlete=athlete, wellness=wellness)
+    days     = enforce_min_duration(days)
     return plan.model_copy(update={"days": days}), all_c
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3490,7 +3714,8 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
                  acwr_trend=None, race_week=None, taper_score=None, rtp_status=None,
                  data_quality=None, per_sport_acwr=None, motivation=None,
                  prehab=None, pre_race_info=None, autoregulation_signals=None,
-                 mesocycle_for_strength=None):
+                 mesocycle_for_strength=None,
+                 readiness=None, np_if_analysis=None, learned_patterns=""):
     today = date.today()
     lf = fitness[-1] if fitness else {}
     atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb = lf.get("tsb",0.0)
@@ -3592,13 +3817,15 @@ MESOCYKEL (3+1 blockstruktur):
 """
     traj_text = ""
     if trajectory and trajectory.get("has_target"):
+        ontrack = ctl_ontrack_check(trajectory, ctl, fitness)
         traj_text = f"""
-CTL-TRAJEKTORIA MOT TÄVLING:
+CTL-TRAJEKTORIA MOT VÄTTERNRUNDAN:
   {trajectory['message']}
   Erforderlig vecko-TSS: {trajectory['required_weekly_tss']}
   Daglig TSS-target: {trajectory['required_daily_tss']}
   Ramp: +{trajectory['ramp_per_week']} CTL/vecka
   Taper start: {trajectory['taper_start']}
+  {ontrack}
   {'⚠️ AGGRESSIV RAMP – sänk mål-CTL eller acceptera risken.' if not trajectory['is_achievable'] else ''}
 """
     comp_text = ""
@@ -3608,7 +3835,7 @@ COMPLIANCE-ANALYS (senaste {compliance['period_days']}d):
   Genomförda: {compliance['total_completed']}/{compliance['total_planned']} ({compliance['completion_rate']}%)
   Missade intensitetspass: {compliance['intensity_missed']}/{compliance['intensity_planned']}
   {'Mönster: ' + '. '.join(compliance['patterns']) if compliance['patterns'] else 'Inga problematiska mönster.'}
-
+{learned_patterns}
   COACHENS RESPONSE PÅ COMPLIANCE:
   - Om compliance < 70%: Förenkla planen. Kortare, enklare pass som atleten faktiskt gör.
   - Om intensitetspass missas ofta: Gör dem kortare (45min max) eller byt till roligare format.
@@ -3703,12 +3930,16 @@ STYRKEBIBLIOTEK (kroppsvikt, periodiserat):
     double_text = """
 DUBBELPASS & TIDSVAL (AM/PM):
   Du kan välja när på dagen atleten ska träna ("slot": "AM", "PM" eller "MAIN").
-  - Anpassa efter VÄDRET! Regnar det på EM men sol på FM? Välj "AM" (förmiddag).
-  - Om du schemalägger ett DUBBELPASS (en AM och en PM samma dag):
-    * AM: styrka eller lätt aerob (30-45min). PM: huvudpasset.
-  - ALDRIG två hårda pass samma dag (ett Z4+ AM + ett Z4+ PM = förbjudet).
-  - Motivera alltid i description varför du valt att köra dubbelpass just nu.
-  - Använd AM/PM sparsamt, max 1-2 ggr/10d.
+  - Anpassa efter VÄDRET! Regnar det på EM men sol på FM? Välj "AM".
+  - DUBBELPASS = TVÅ SEPARATA JSON-OBJEKT med samma datum men olika slot.
+    ALDRIG kombinera två sporter i ett enda pass-objekt.
+    Korrekt format för dubbelpass löpning + cykel på 2026-04-05:
+      {{"date":"2026-04-05","title":"Löpning","intervals_type":"Run","slot":"AM","duration_min":40,...}}
+      {{"date":"2026-04-05","title":"Inomhuscykel","intervals_type":"VirtualRide","slot":"PM","duration_min":60,...}}
+  - Villkor: TSB ≥ 0 OCH atleten inte rapporterat besvär.
+  - AM=lättare pass (30-45min). PM=huvudpasset.
+  - ALDRIG Z4+ på båda passen samma dag.
+  - Sikta på 1-2 dubbelpass per 10-dagarshorisonten om villkoren är uppfyllda.
 """
 
     rtp_text = ""
@@ -3739,10 +3970,18 @@ INSTRUKTION: Ge 3-5 meningar feedback i fältet "yesterday_feedback":
   - SPRÅKREGEL: Använd INTE ordet "igår" i feedbacken! Eftersom texten sparas på passets eget datum i kalendern, skriv "passet" eller "dagens pass".
 """
 
+    athlete_note = morning.get('athlete_note', '').strip()
+    athlete_note_block = f"""
+⚡ ATLETENS DIREKTA ÖNSKEMÅL (HÖG PRIORITET – FÖLJ DETTA):
+  <user_input>{athlete_note}</user_input>
+  Om atleten nämner ett specifikt datum eller en dag – schemalägg EXAKT på det datumet.
+  Om atleten ber om dubbelpass (två sporter samma dag) – skapa ALLTID två SEPARATA JSON-objekt med samma datum men slot "AM" och "PM". Kombinera ALDRIG i ett objekt.
+""" if athlete_note else ""
+
     return f"""Du är en elitcoach som granskar och vid behov justerar träningsplanen.
 Datum att planera: {', '.join(dates)}.
 OBS: Alla pass schemaläggs på EFTERMIDDAGEN (kl 16:00) som default. AM=07:00, PM=17:00.
-
+{athlete_note_block}
 BEFINTLIG PLAN (om den finns):
 {existing_plan_summary}
 {yesterday_section}
@@ -3775,11 +4014,12 @@ IGÅRDAGENS PASS: {yday}
 {ftp_text}
 DAGSFORM:
   Tid: {morning.get('time_available','1h')} | Livsstress: {morning.get('life_stress',1)}/5 | Besvär: {morning.get('injury_today') or 'Inga'}
-  Anteckning: <user_input>{morning.get('athlete_note','')}</user_input>
 {auto_text}
+{readiness['summary'] if readiness else ''}
 HRV: {fmt(hrv['today'],'ms')} idag | 7d-snitt: {fmt(hrv['avg7d'],'ms')} | 60d: {fmt(hrv['avg60d'],'ms')}
 HRV-state: {hrv['state']} | Trend: {hrv['trend']} | Stabilitet: {hrv['stability']} | Avvikelse: {hrv['deviation_pct']}%
 RPE-trend: {rpe_trend(activities)}
+{np_if_analysis['summary'] if np_if_analysis else ''}
 {motiv_text}
 TRÄNING:
   ATL: {fmt(atl)} | CTL: {fmt(ctl)} | TSB: {fmt(tsb)} | TSB-zon: {tsb_st}
@@ -3843,16 +4083,47 @@ HISTORIK (senaste 20 pass):
 WELLNESS (14 dagar):
 {chr(10).join(well_lines) or '  Ingen data'}
 
+TRÄNINGSVETENSKAPLIGA PRINCIPER (baserat på modern forskning):
+
+POLARISERAD TRÄNINGSMODELL (Seiler 2010, Stöggl & Sperlich 2014):
+  - 80% av volymen i Z1-Z2 (under VT1/aerob tröskel). Bygg mitokondrier, fettsyreoxidation.
+  - 20% i Z4-Z5 (över VT2/anaerob tröskel). VO2max-stimulans, cardiac output.
+  - Minimera Z3 ("sweet spot"/"tröskelträning") – ökar trötthet utan proportionell adaptation.
+  - Undvik "grå zonen" (Z3 varje dag) – vanligaste felet hos amatöratlet.
+
+VO2MAX-INTERVALLER (Helgerud 2007, Rønnestad 2020):
+  - 4×4min vid 90-95% HRmax med 3min aktiv vila – mest effektiva VO2max-protokollet.
+  - Alternativ: 4-6×3-5min Z5. Minst 2min i Z5 per intervall för full stimulus.
+  - Frekvens: max 1-2 VO2max-pass/vecka. Fler ger inte mer adaptation.
+
+TRÖSKELARBETE (Tjelta 2019, norska modellen):
+  - Dubbel-tröskeldagar (2×per dag) ger snabb CTL-ökning, men bara vid TSB ≥ 0.
+  - Enkelpass: 3-4×8-12min Z4 med 2-3min vila mer effektivt än lång kontinuerlig Z3.
+  - "Threshold by feel" – håll RPE 6-7/10, inte max effekt.
+
+STYRKA FÖR UTHÅLLIGHETSIDROTTARE (Rønnestad & Mujika 2014):
+  - Tung styrka (3-5 reps, 85-90% 1RM) förbättrar cykeleffektivitet och löpekonomi.
+  - Explosiv styrka (plyometrics) förbättrar neuromuskulär effektivitet.
+  - Kombination styrka+uthållighet samma dag: styrka FÖRE uthållighet (inte tvärtom).
+  - 2 styrkepass/vecka under basfas, 1/vecka under tävlingsfas.
+
+ÅTERHÄMTNING & SUPERKOMPENSATION:
+  - Adaptation sker under vila, inte träning. Sömnkvalitet är viktigaste återhämtningsfaktorn.
+  - Hard-easy-principen: intensivt pass → minst 48h innan nästa Z4+.
+  - Progressiv överbelastning: öka veckovolym max 10% per vecka (per sport).
+  - Deload var 4:e vecka: -30-40% volym, behåll intensitet.
+
 COACHREGLER:
-1. HARD-EASY: Aldrig Z4+ två dagar i rad.
-2. VOLYMSPÄRR: Aldrig mer än KVAR per sport.
-3. HRV-VETO: HRV LOW → bara Z1/vila.
-4. NUTRITION: <60min→"". >120min→60-90g CHO/h.
-5. EXAKTA ZONER: VirtualRide→watt+puls. Ride/Run/RollerSki→ENBART puls.
-6. STYRKA: Kroppsvikt ENDAST. Max 2/10d. Aldrig i rad. ANGE EXAKTA ÖVNINGAR från styrkebiblioteket.
-7. MESOCYKEL: Vecka 4=deload (-35-40% volym, max Z2). Vecka 1-3=progressiv laddning.
-8. PASSBIBLIOTEK: Använd intervallpass från biblioteket – uppfinn inte nya format.
-9. RTP-NAMNGIVNING: Använd ALDRIG "RTP" eller "Return to Play" i passnamn/titlar om inte "RETURN TO PLAY-PROTOKOLL AKTIVERAT" visas explicit ovan. Låg compliance eller kort uppehåll (< 5 dagar) = normal plan med försiktig upptrappning, men INTE RTP-terminologi.
+1. POLARISERING: 80% Z1-Z2, max 20% Z4+. Minimera Z3 – undvik "grå zonen".
+2. HARD-EASY: Aldrig Z4+ två dagar i rad. Minst 48h mellan VO2max-pass.
+3. VOLYMSPÄRR: Aldrig mer än KVAR per sport.
+4. HRV-VETO: HRV LOW → bara Z1/vila.
+5. NUTRITION: <60min→"". >120min→60-90g CHO/h.
+6. EXAKTA ZONER: VirtualRide→watt+puls. Ride/Run/RollerSki→ENBART puls.
+7. STYRKA: Kroppsvikt ENDAST. Max 2/10d. Aldrig i rad. ANGE EXAKTA ÖVNINGAR från styrkebiblioteket.
+8. MESOCYKEL: Vecka 4=deload (-35-40% volym, max Z2). Vecka 1-3=progressiv laddning.
+9. PASSBIBLIOTEK: Använd intervallpass från biblioteket – uppfinn inte nya format.
+10. RTP-NAMNGIVNING: Använd ALDRIG "RTP" eller "Return to Play" i passnamn/titlar om inte "RETURN TO PLAY-PROTOKOLL AKTIVERAT" visas explicit ovan.
 
 PASSLÄNGDER:
   Ride: 75-240min. VirtualRide: 45-120min. RollerSki: 60-150min. Run: 30-90min. Styrka: 30-45min.
@@ -4270,6 +4541,14 @@ def main():
     # ── Sammanfatta befintlig plan ───────────────────────────────────────────
     existing_plan_summary = format_existing_plan(ai_workouts)
 
+    # ── NYA ANALYSER ─────────────────────────────────────────────────────────
+    readiness      = calculate_readiness_score(hrv, wellness_clean, activities_clean)
+    np_if_analysis = analyze_np_if(activities_clean)
+    state["learned_patterns"] = update_learned_patterns(state, all_events, activities_clean)
+    save_state(state)
+    learned_patterns = format_learned_patterns(state["learned_patterns"])
+    log.info(f"💪 Readiness: {readiness['score']}/100 ({readiness['label']})")
+
     log.info(f"🤖 Coachen granskar plan och dagsform...")
     prompt = build_prompt(
         activities, wellness_clean, fitness, races, weather, morning, args.horizon,
@@ -4281,6 +4560,7 @@ def main():
         data_quality=dq, per_sport_acwr=sport_acwr, motivation=motivation,
         prehab=prehab, pre_race_info=pre_race_advice,
         autoregulation_signals=auto_signals, mesocycle_for_strength=mesocycle,
+        readiness=readiness, np_if_analysis=np_if_analysis, learned_patterns=learned_patterns,
     )
     raw            = call_ai(args.provider, prompt)
     plan           = parse_plan(raw)
@@ -4348,12 +4628,28 @@ def main():
         days_to_save = plan.days
 
     elif mode == "extend":
-        existing_dates = {
-            w.get("start_date_local","")[:10]
-            for w in ai_workouts
+        # Räkna befintliga events per datum
+        existing_count = {}
+        for w in ai_workouts:
+            d = w.get("start_date_local","")[:10]
+            existing_count[d] = existing_count.get(d, 0) + 1
+        # Räkna planerade events per datum i nya planen
+        new_count = {}
+        for d in plan.days:
+            new_count[d.date] = new_count.get(d.date, 0) + 1
+        # Datum att ta bort: befintliga events på datum där nya planen har fler pass (dubbelpass)
+        dates_to_delete = {
+            date for date, cnt in new_count.items()
+            if existing_count.get(date, 0) > 0 and cnt > existing_count.get(date, 0)
         }
+        if dates_to_delete:
+            to_del = [{"id": w["id"]} for w in ai_workouts if w.get("start_date_local","")[:10] in dates_to_delete]
+            for chunk in [to_del[i:i+50] for i in range(0, len(to_del), 50)]:
+                requests.put(f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete", auth=AUTH, timeout=15, json=chunk).raise_for_status()
+            log.info(f"  Ersätter {len(to_del)} event(s) med dubbelpass på: {', '.join(sorted(dates_to_delete))}")
+        existing_dates = {d for d in existing_count if d not in dates_to_delete}
         days_to_save = [d for d in plan.days if d.date not in existing_dates]
-        log.info(f"  Behåller {len(ai_workouts)} befintliga, lägger till {len(days_to_save)} nya.")
+        log.info(f"  Behåller {len(existing_dates)} befintliga datum, lägger till {len(days_to_save)} nya.")
 
     saved = errors = 0
     for day in days_to_save:
