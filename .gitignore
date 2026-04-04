@@ -2,3 +2,5 @@
 .claude
 __pycache__/
 training_ai
+.weather_cache.json
+.coach_state.json

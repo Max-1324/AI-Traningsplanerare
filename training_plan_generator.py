@@ -1540,8 +1540,8 @@ def fetch_activities(days):
     return icu_get(f"/athlete/{ATHLETE_ID}/activities", {
         "oldest": (date.today() - timedelta(days=days)).isoformat(),
         "fields": ("name,type,start_date_local,distance,moving_time,elapsed_time,"
-                   "total_elevation_gain,icu_training_load,average_heartrate,"
-                   "max_heartrate,icu_weighted_avg_watts,icu_intensity,trimp,"
+                   "icu_training_load,average_heartrate,"
+                   "max_heartrate,icu_weighted_avg_watts,icu_intensity,"
                    "icu_zone_times,icu_hr_zone_times,perceived_exertion,feel"),
     })
 
@@ -1653,7 +1653,122 @@ def save_event(day: PlanDay):
         "description": day.description + f"\n\n{AI_TAG} ({get_used_model()})",
     }).raise_for_status()
 
-def save_workout(day: PlanDay):
+# Zon → % av tröskeleffekt (cykling) / % av tröskelfart (löpning)
+_ZONE_POWER_PCT = {"Z1": 55, "Z2": 68, "Z3": 83, "Z4": 100, "Z5": 112, "Z6": 130, "Z7": 150}
+_ZONE_PACE_PCT  = {"Z1": 65, "Z2": 76, "Z3": 87, "Z4": 100, "Z5": 108, "Z6": 116, "Z7": 125}
+
+_RUNNING_TYPES = {"Run", "VirtualRun", "TrailRun", "Treadmill"}
+
+def _step_type(desc: str) -> str:
+    d = desc.lower()
+    if "uppvärmning" in d or "warm" in d:
+        return "Warmup"
+    if "nedvarvning" in d or "cool" in d or "varv ner" in d:
+        return "Cooldown"
+    return "SteadyState"
+
+_INTERVAL_WORK_ZONES = {"Z3", "Z4", "Z5", "Z6", "Z7"}
+_INTERVAL_REST_ZONES = {"Z1", "Z2"}
+
+def build_workout_doc(steps: list[WorkoutStep], sport: str) -> dict:
+    """Bygger intervals.icu workout_doc från WorkoutStep-lista.
+
+    Detekterar upprepade (arbete, vila)-par och grupperar dem som IntervalsT.
+    Lägger till text-fält på varje steg.
+    """
+    is_running = sport in _RUNNING_TYPES
+
+    def make_target(zone: str) -> dict:
+        z = zone.upper()
+        if is_running:
+            return {"pace": {"value": _ZONE_PACE_PCT.get(z, 80), "units": "% of threshold pace"}}
+        return {"power": {"value": _ZONE_POWER_PCT.get(z, 68), "units": "% of threshold"}}
+
+    # Dela upp i ledande uppvärmning / mellansteg / avslutande nedvarvning
+    start = 0
+    end = len(steps)
+    doc_steps = []
+
+    while start < end and _step_type(steps[start].description) == "Warmup":
+        s = steps[start]
+        doc_steps.append({"type": "Warmup", "duration": s.duration_min * 60,
+                           "text": s.description, **make_target(s.zone)})
+        start += 1
+
+    cooldown_buf = []
+    while end > start and _step_type(steps[end - 1].description) == "Cooldown":
+        end -= 1
+        s = steps[end]
+        cooldown_buf.insert(0, {"type": "Cooldown", "duration": s.duration_min * 60,
+                                "text": s.description, **make_target(s.zone)})
+
+    # Sök efter upprepade (arbete, vila)-par i mitten
+    middle = steps[start:end]
+    i = 0
+    while i < len(middle):
+        s = middle[i]
+        # Försök identifiera ett intervallblock: arbete följt av vila, upprepat ≥2 ggr
+        if (i + 1 < len(middle)
+                and s.zone.upper() in _INTERVAL_WORK_ZONES
+                and middle[i + 1].zone.upper() in _INTERVAL_REST_ZONES
+                and _step_type(s.description) == "SteadyState"
+                and _step_type(middle[i + 1].description) == "SteadyState"):
+            work_dur  = s.duration_min
+            work_zone = s.zone.upper()
+            rest_dur  = middle[i + 1].duration_min
+            rest_zone = middle[i + 1].zone.upper()
+            reps = 0
+            j = i
+            while (j + 1 < len(middle)
+                   and middle[j].duration_min == work_dur
+                   and middle[j].zone.upper() == work_zone
+                   and middle[j + 1].duration_min == rest_dur
+                   and middle[j + 1].zone.upper() == rest_zone
+                   and _step_type(middle[j + 1].description) == "SteadyState"):
+                reps += 1
+                j += 2
+            if reps >= 2:
+                on_t  = make_target(work_zone)
+                off_t = make_target(rest_zone)
+                on_key  = "onPace"  if is_running else "onPower"
+                off_key = "offPace" if is_running else "offPower"
+                doc_steps.append({
+                    "type":        "IntervalsT",
+                    "reps":        reps,
+                    "onDuration":  work_dur * 60,
+                    "offDuration": rest_dur * 60,
+                    on_key:        list(on_t.values())[0],
+                    off_key:       list(off_t.values())[0],
+                    "text":        f"{reps}×{work_dur}min {work_zone} / {rest_dur}min {rest_zone}",
+                })
+                i = j
+                continue
+        # Vanligt steg
+        doc_steps.append({"type": _step_type(s.description), "duration": s.duration_min * 60,
+                           "text": s.description, **make_target(s.zone)})
+        i += 1
+
+    doc_steps.extend(cooldown_buf)
+    return {"steps": doc_steps}
+
+def _workout_color(day: PlanDay) -> str:
+    """Returnerar hex-färg baserat på passintensitet."""
+    if day.intervals_type == "WeightTraining":
+        return "#8E44AD"   # Lila
+    if not day.workout_steps:
+        return "#3498DB"   # Blå standard
+    zones = {s.zone.upper() for s in day.workout_steps}
+    if zones & {"Z6", "Z7"}:
+        return "#C0392B"   # Mörkröd – anaerob
+    if zones & {"Z5"}:
+        return "#E74C3C"   # Röd – VO2max
+    if zones & {"Z4"}:
+        return "#E67E22"   # Orange – tröskel
+    if zones & {"Z3"}:
+        return "#F1C40F"   # Gul – tempo
+    return "#27AE60"       # Grön – Z1/Z2
+
+def save_workout(day: PlanDay, athlete: dict | None = None):
     if day.strength_steps:
         step_text = "\n".join(
             f"{s.exercise}: {s.sets}x{s.reps}" + (f", vila {s.rest_sec}s" if s.rest_sec else "") + (f" - {s.notes}" if s.notes else "")
@@ -1667,7 +1782,7 @@ def save_workout(day: PlanDay):
 
     slot_suffix = f" ({day.slot})" if day.slot != "MAIN" else ""
 
-    requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
+    payload: dict = {
         "category":          "WORKOUT",
         "start_date_local":  day.date + _slot_time(day.slot),
         "type":              day.intervals_type,
@@ -1675,7 +1790,16 @@ def save_workout(day: PlanDay):
         "description":       full_desc + f"\n\n{AI_TAG} ({get_used_model()})",
         "moving_time":       day.duration_min * 60,
         "planned_distance":  day.distance_km * 1000,
-    }).raise_for_status()
+        "color":             _workout_color(day),
+    }
+    if day.workout_steps and day.intervals_type not in ("WeightTraining", "Rest"):
+        payload["workout_doc"] = build_workout_doc(day.workout_steps, day.intervals_type)
+    if athlete and day.intervals_type != "Rest":
+        tss = estimate_tss_coggan(day, athlete)
+        if tss > 0:
+            payload["planned_load"] = tss
+
+    requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json=payload).raise_for_status()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VÄDER (utökade WMO-koder, timdata för eftermiddag)
@@ -3012,7 +3136,8 @@ def enforce_tss(days, budget, athlete, floor_pct=0.80, ceil_pct=1.00):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[int],
-                                       workout_day, tss_estimate: float) -> str:
+                                       workout_day, tss_estimate: float,
+                                       weight_kg: float | None = None) -> str:
     """
     Returnerar näringsstrategi baserat på träningsfas, tävlingsproximitet och passets belastning.
     Kompletterar miljöbaserad nutrition med periodiserade rekommendationer.
@@ -3023,6 +3148,13 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
     if sport in ("Rest", "WeightTraining") or dur < 30:
         return ""
 
+    def cho_range(low_g_kg: float, high_g_kg: float) -> str:
+        if weight_kg:
+            lo = round(low_g_kg * weight_kg)
+            hi = round(high_g_kg * weight_kg)
+            return f"{lo}–{hi}g CHO ({low_g_kg}–{high_g_kg}g/kg × {round(weight_kg)}kg)"
+        return f"{low_g_kg}–{high_g_kg}g CHO/kg kroppsvikt"
+
     # Tävlingsdag
     if days_to_race == 0:
         return ("TÄVLINGSDAG: Start 300ml sportdryck. 60-90g CHO/h under loppet (gels + bars). "
@@ -3031,12 +3163,12 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
     # Kolhydratladning 3 dagar före
     if days_to_race is not None and 1 <= days_to_race <= 3:
         dag = 4 - days_to_race
-        return (f"KOLHYDRATLADNING dag {dag}/3: 8-10g CHO/kg kroppsvikt idag. "
+        return (f"KOLHYDRATLADNING dag {dag}/3: {cho_range(8, 10)} idag. "
                 f"Ris, pasta, havregryn, bröd. Undvik fiber och fett. Drick 2-3L.")
 
     # Hög TSS-dag
     if tss_estimate > 100:
-        return (f"HIGH-CARB: {round(tss_estimate)} TSS planerat – 6-8g CHO/kg kroppsvikt idag. "
+        return (f"HIGH-CARB: {round(tss_estimate)} TSS planerat – {cho_range(6, 8)} idag. "
                 f"Frukost: havregryn + banan + honung. Under: 60-90g CHO/h.")
 
     # Basfas + Z2-pass (fasted training OK)
@@ -3054,7 +3186,13 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
         return f"60-90g CHO/h under passet ({dur}min). Testa race-dag-nutrition."
 
 
-def add_env_nutrition(days, weather, phase=None, races=None, athlete=None):
+def add_env_nutrition(days, weather, phase=None, races=None, athlete=None, wellness=None):
+    weight_kg: float | None = None
+    if wellness:
+        for w in reversed(wellness):
+            if w.get("weight"):
+                weight_kg = float(w["weight"])
+                break
     wmap = {w["date"]: w for w in weather}
     for i, day in enumerate(days):
         if day.duration_min < 60 or day.intervals_type in ("Rest","WeightTraining"): continue
@@ -3089,7 +3227,7 @@ def add_env_nutrition(days, weather, phase=None, races=None, athlete=None):
                 except Exception:
                     pass
             phase_name = phase.get("phase", "Base") if isinstance(phase, dict) else str(phase)
-            perio = calculate_nutrition_periodization(phase_name, d2r, day, tss_est)
+            perio = calculate_nutrition_periodization(phase_name, d2r, day, tss_est, weight_kg)
             if perio:
                 nutr_parts.append(perio)
 
@@ -3276,7 +3414,7 @@ def enforce_per_sport_acwr_veto(days: list, per_sport: dict) -> tuple:
 def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlete,
                  injury_note="", mesocycle=None, constraints=None, today_wellness=None,
                  rtp_status=None, per_sport_acwr_data=None, motivation=None,
-                 phase=None, races=None):
+                 phase=None, races=None, wellness=None):
     days = plan.days
     all_c = []
 
@@ -3307,7 +3445,7 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
         days, c = enforce_deload(days, mesocycle, athlete);  all_c += c
     days, c = enforce_tss(days, budget, athlete);      all_c += c
     days     = ensure_warmup(days)
-    days     = add_env_nutrition(days, weather, phase=phase, races=races, athlete=athlete)
+    days     = add_env_nutrition(days, weather, phase=phase, races=races, athlete=athlete, wellness=wellness)
     return plan.model_copy(update={"days": days}), all_c
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4152,7 +4290,7 @@ def main():
         injury_note=morning.get('injury_today', ''), mesocycle=mesocycle,
         constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
         per_sport_acwr_data=sport_acwr, motivation=motivation,
-        phase=phase, races=races,
+        phase=phase, races=races, wellness=wellness_clean,
     )
 
     print_plan(plan, changes, mesocycle, trajectory, acwr_trend, taper_score, race_week, rtp_status)
@@ -4222,7 +4360,7 @@ def main():
     for day in days_to_save:
         try:
             if day.intervals_type != "Rest" and day.duration_min > 0:
-                save_workout(day)
+                save_workout(day, athlete)
             else:
                 save_event(day)
             saved += 1
