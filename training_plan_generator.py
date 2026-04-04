@@ -49,7 +49,10 @@ except ImportError:
 load_dotenv()
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S")
+logging.basicConfig(
+    level=logging.DEBUG if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG" else logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S"
+)
 log = logging.getLogger(__name__)
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -1653,11 +1656,16 @@ def save_event(day: PlanDay):
         "description": day.description + f"\n\n{AI_TAG} ({get_used_model()})",
     }).raise_for_status()
 
-# Zon → % av tröskeleffekt (cykling) / % av tröskelfart (löpning)
-_ZONE_POWER_PCT = {"Z1": 55, "Z2": 68, "Z3": 83, "Z4": 100, "Z5": 112, "Z6": 130, "Z7": 150}
-_ZONE_PACE_PCT  = {"Z1": 65, "Z2": 76, "Z3": 87, "Z4": 100, "Z5": 108, "Z6": 116, "Z7": 125}
+# Zon → % av tröskeleffekt (cykling) / % av tröskelpuls (löpning, rullskidor, m.fl.)
+_ZONE_POWER_PCT   = {"Z1": 55, "Z2": 68, "Z3": 83, "Z4": 100, "Z5": 112, "Z6": 130, "Z7": 150}
+_ZONE_STEP_LABELS = {"Z1": "Recovery", "Z2": "Aerobic", "Z3": "Sweet spot",
+                     "Z4": "Threshold", "Z5": "VO2max", "Z6": "Anaerobic", "Z7": "Sprint"}
 
-_RUNNING_TYPES = {"Run", "VirtualRun", "TrailRun", "Treadmill"}
+# Sporter med effektmätare – använder %ftp i steg-text (övriga använder %lthr)
+# Konfigurerbart via POWER_SPORTS i .env, t.ex.: VirtualRide,MountainBikeRide
+_POWER_SPORTS = {
+    s.strip() for s in os.getenv("POWER_SPORTS", "VirtualRide").split(",") if s.strip()
+}
 
 def _step_type(desc: str) -> str:
     d = desc.lower()
@@ -1667,89 +1675,62 @@ def _step_type(desc: str) -> str:
         return "Cooldown"
     return "SteadyState"
 
-_INTERVAL_WORK_ZONES = {"Z3", "Z4", "Z5", "Z6", "Z7"}
-_INTERVAL_REST_ZONES = {"Z1", "Z2"}
 
-def build_workout_doc(steps: list[WorkoutStep], sport: str) -> dict:
-    """Bygger intervals.icu workout_doc från WorkoutStep-lista.
+def build_workout_step_text(steps: list[WorkoutStep], sport: str) -> str:
+    """Bygger intervals.icu parsningsbar step-text för description-fältet.
 
-    Detekterar upprepade (arbete, vila)-par och grupperar dem som IntervalsT.
-    Lägger till text-fält på varje steg.
+    Format som intervals.icu förstår:
+      - Xm Y% Warmup
+      Nx
+      - Xm Y%
+      - Xm Y%
+      - Xm Y% Cooldown
     """
-    is_running = sport in _RUNNING_TYPES
+    use_power = sport in _POWER_SPORTS
 
-    def make_target(zone: str) -> dict:
+    def pct(zone: str) -> str:
         z = zone.upper()
-        if is_running:
-            return {"pace": {"value": _ZONE_PACE_PCT.get(z, 80), "units": "% of threshold pace"}}
-        return {"power": {"value": _ZONE_POWER_PCT.get(z, 68), "units": "% of threshold"}}
+        if use_power:
+            return f"{_ZONE_POWER_PCT.get(z, 68)}%"
+        # HR-sporter: använd intervals.icu hr_zone-format (t.ex. "Z2 HR")
+        return f"{z} HR"
 
-    # Dela upp i ledande uppvärmning / mellansteg / avslutande nedvarvning
+    lines: list[str] = []
     start = 0
     end = len(steps)
-    doc_steps = []
 
+    # Ledande uppvärmningssteg
     while start < end and _step_type(steps[start].description) == "Warmup":
         s = steps[start]
-        doc_steps.append({"type": "Warmup", "duration": s.duration_min * 60,
-                           "text": s.description, **make_target(s.zone)})
+        lines.append(f"- {s.duration_min}m {pct(s.zone)} Warmup")
         start += 1
 
-    cooldown_buf = []
+    # Avslutande nedvarvningssteg (buffras, läggs till sist)
+    cooldown_lines: list[str] = []
     while end > start and _step_type(steps[end - 1].description) == "Cooldown":
         end -= 1
         s = steps[end]
-        cooldown_buf.insert(0, {"type": "Cooldown", "duration": s.duration_min * 60,
-                                "text": s.description, **make_target(s.zone)})
+        cooldown_lines.insert(0, f"- {s.duration_min}m {pct(s.zone)} Cooldown")
 
-    # Sök efter upprepade (arbete, vila)-par i mitten
-    middle = steps[start:end]
-    i = 0
-    while i < len(middle):
-        s = middle[i]
-        # Försök identifiera ett intervallblock: arbete följt av vila, upprepat ≥2 ggr
-        if (i + 1 < len(middle)
-                and s.zone.upper() in _INTERVAL_WORK_ZONES
-                and middle[i + 1].zone.upper() in _INTERVAL_REST_ZONES
-                and _step_type(s.description) == "SteadyState"
-                and _step_type(middle[i + 1].description) == "SteadyState"):
-            work_dur  = s.duration_min
-            work_zone = s.zone.upper()
-            rest_dur  = middle[i + 1].duration_min
-            rest_zone = middle[i + 1].zone.upper()
-            reps = 0
-            j = i
-            while (j + 1 < len(middle)
-                   and middle[j].duration_min == work_dur
-                   and middle[j].zone.upper() == work_zone
-                   and middle[j + 1].duration_min == rest_dur
-                   and middle[j + 1].zone.upper() == rest_zone
-                   and _step_type(middle[j + 1].description) == "SteadyState"):
-                reps += 1
-                j += 2
-            if reps >= 2:
-                on_t  = make_target(work_zone)
-                off_t = make_target(rest_zone)
-                on_key  = "onPace"  if is_running else "onPower"
-                off_key = "offPace" if is_running else "offPower"
-                doc_steps.append({
-                    "type":        "IntervalsT",
-                    "reps":        reps,
-                    "onDuration":  work_dur * 60,
-                    "offDuration": rest_dur * 60,
-                    on_key:        list(on_t.values())[0],
-                    off_key:       list(off_t.values())[0],
-                    "text":        f"{reps}×{work_dur}min {work_zone} / {rest_dur}min {rest_zone}",
-                })
-                i = j
-                continue
-        # Vanligt steg
-        doc_steps.append({"type": _step_type(s.description), "duration": s.duration_min * 60,
-                           "text": s.description, **make_target(s.zone)})
-        i += 1
+    # Mittensteg – lista varje steg individuellt (Nx-syntax stöds ej av intervals.icu)
+    for s in steps[start:end]:
+        label = _ZONE_STEP_LABELS.get(s.zone.upper(), "")
+        lines.append(f"- {s.duration_min}m {pct(s.zone)} {label}".rstrip())
 
-    doc_steps.extend(cooldown_buf)
-    return {"steps": doc_steps}
+    lines.extend(cooldown_lines)
+    return "\n".join(lines)
+
+_ZONE_HR_NUM = {"Z1": 1, "Z2": 2, "Z3": 3, "Z4": 4, "Z5": 5, "Z6": 6, "Z7": 7}
+
+def build_hr_workout_doc(steps: list[WorkoutStep]) -> dict:
+    """Bygger workout_doc med hr_zone-format för icke-power-sporter.
+    Använder exakt samma interna format som intervals.icu Workout Builder genererar.
+    """
+    return {"steps": [
+        {"duration": s.duration_min * 60,
+         "hr": {"value": _ZONE_HR_NUM.get(s.zone.upper(), 2), "units": "hr_zone"}}
+        for s in steps
+    ]}
 
 def _workout_color(day: PlanDay) -> str:
     """Returnerar hex-färg baserat på passintensitet."""
@@ -1773,12 +1754,15 @@ def save_workout(day: PlanDay, athlete: dict | None = None):
         step_text = "\n".join(
             f"{s.exercise}: {s.sets}x{s.reps}" + (f", vila {s.rest_sec}s" if s.rest_sec else "") + (f" - {s.notes}" if s.notes else "")
             for s in day.strength_steps)
-    elif day.workout_steps:
-        step_text = "\n".join(f"{s.duration_min} min {s.zone} - {s.description}" for s in day.workout_steps)
+    elif day.workout_steps and day.intervals_type not in ("WeightTraining", "Rest"):
+        # Intervals.icu parsar steg från description-fältet i formatet "- Xm Y% [label]" / "- Xm YYYbpm [label]"
+        step_text = build_workout_step_text(day.workout_steps, day.intervals_type)
+        log.debug(f"step_text {day.date}: {len(day.workout_steps)} steg")
     else:
         step_text = ""
     nutr_block = f"{NUTRITION_TAG} {day.nutrition}" if day.nutrition else ""
-    full_desc  = "\n\n".join(filter(None, [day.description, step_text, nutr_block]))
+    # Steg-rader FÖRST så intervals.icu hittar och parsar dem
+    full_desc  = "\n\n".join(filter(None, [step_text, day.description, nutr_block]))
 
     slot_suffix = f" ({day.slot})" if day.slot != "MAIN" else ""
 
@@ -1792,14 +1776,16 @@ def save_workout(day: PlanDay, athlete: dict | None = None):
         "planned_distance":  day.distance_km * 1000,
         "color":             _workout_color(day),
     }
-    if day.workout_steps and day.intervals_type not in ("WeightTraining", "Rest"):
-        payload["workout_doc"] = build_workout_doc(day.workout_steps, day.intervals_type)
     if athlete and day.intervals_type != "Rest":
         tss = estimate_tss_coggan(day, athlete)
         if tss > 0:
             payload["planned_load"] = tss
+    if day.workout_steps and day.intervals_type not in _POWER_SPORTS | {"WeightTraining", "Rest"}:
+        payload["workout_doc"] = build_hr_workout_doc(day.workout_steps)
 
-    requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json=payload).raise_for_status()
+    resp = requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json=payload)
+    resp.raise_for_status()
+    log.debug(f"Sparat {day.date} – event id: {resp.json().get('id')}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VÄDER (utökade WMO-koder, timdata för eftermiddag)
@@ -2970,19 +2956,27 @@ def apply_injury_rules(days, injury_note: str):
 def enforce_hrv(days, hrv):
     if hrv["state"] not in ("LOW","SLIGHTLY_LOW") and hrv["stability"] != "UNSTABLE":
         return days, []
+
+    veto_reason = hrv['state']
+    if hrv["stability"] == "UNSTABLE":
+        if hrv["state"] in ("LOW", "SLIGHTLY_LOW"):
+            veto_reason = f"{hrv['state']} och instabil"
+        else:
+            veto_reason = "instabil"
+
     lz = "Z1" if (hrv["state"] == "LOW" or hrv["stability"] == "UNSTABLE") else "Z3"
     changes = []
     for i, day in enumerate(days):
         # Applicera HRV-veto ENDAST på de första 2 dagarna (idag och imorgon)
         if i <= 1 and is_intense(day):
-            new_steps = [WorkoutStep(duration_min=s.duration_min, zone=lz, description=f"Konverterad pga HRV {hrv['state']}") for s in day.workout_steps]
+            new_steps = [WorkoutStep(duration_min=s.duration_min, zone=lz, description=f"Konverterad pga HRV ({veto_reason})") for s in day.workout_steps]
             days[i] = day.model_copy(update={
                 "title": f"{day.title} -> {lz} (HRV-VETO)",
                 "workout_steps": new_steps,
                 "nutrition": "",
                 "vetoed": True,
             })
-            changes.append(f"HRV-VETO: {day.date} - intensitet sänkt till {lz}.")
+            changes.append(f"HRV-VETO: {day.date} - intensitet sänkt till {lz} (HRV är {veto_reason}).")
     return days, changes
 
 def enforce_sport_budget(days, budgets):
@@ -3833,6 +3827,7 @@ Väderregler:
 SPORTER:
 ⚠️ NordicSki INTE tillgänglig.
 🚴 HUVUDSPORT: Cykling. 🎿 Rullskidor max 1/vecka. 🏃 Löpning sparsamt. Styrka max 2/10d.
+🎿 RULLSKIDOR: Atleten kör dubbelstakning (double poling / doubble polling). Nämn detta i beskrivningen och anpassa teknikfokus därefter (axelrotation, core-aktivering, rytm i staket).
 {chr(10).join(f"  {s['namn']} ({s['intervals_type']}): {s.get('kommentar','')}" for s in SPORTS)}
 
 LÅSTA DATUM: {locked_str}
@@ -3896,14 +3891,13 @@ def call_ai(provider, prompt):
     if provider == "gemini":
         from google import genai
         from google.genai import types
-        from google.genai import errors  # för ServerError och ClientError
 
         key = os.getenv("GEMINI_API_KEY", "")
         if not key:
             sys.exit("Sätt GEMINI_API_KEY.")
 
-        client = genai.Client(api_key=key)
-        models_str = os.getenv("GEMINI_MODELS", "gemini-3-flash-preview,gemini-3.1-flash-lite-preview,gemini-2.5-flash")
+        client = genai.Client(api_key=key, http_options={"timeout": 120_000})
+        models_str = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash")
         model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
         log.info(f"Skickar till Gemini ({len(model_queue)} modeller i kö)...")
 
@@ -3918,9 +3912,13 @@ def call_ai(provider, prompt):
                     )
                     os.environ["_USED_MODEL"] = current_model
                     return response.text
-                except (errors.ServerError, errors.ClientError) as e:
-                    status = getattr(e, 'status_code', 0)
+                except Exception as e:
+                    import httpx
                     last_err = e
+                    if isinstance(e, httpx.ReadTimeout):
+                        log.warning(f"   {current_model} timeout – provar nästa modell")
+                        break
+                    status = getattr(e, 'status_code', 0)
                     if status in (429, 503) and attempt < 2:
                         log.warning(f"   {current_model} {status} – väntar 30s...")
                         time.sleep(30)
