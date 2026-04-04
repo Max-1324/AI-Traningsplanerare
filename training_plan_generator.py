@@ -3719,6 +3719,7 @@ COACHREGLER:
 6. STYRKA: Kroppsvikt ENDAST. Max 2/10d. Aldrig i rad. ANGE EXAKTA ÖVNINGAR från styrkebiblioteket.
 7. MESOCYKEL: Vecka 4=deload (-35-40% volym, max Z2). Vecka 1-3=progressiv laddning.
 8. PASSBIBLIOTEK: Använd intervallpass från biblioteket – uppfinn inte nya format.
+9. RTP-NAMNGIVNING: Använd ALDRIG "RTP" eller "Return to Play" i passnamn/titlar om inte "RETURN TO PLAY-PROTOKOLL AKTIVERAT" visas explicit ovan. Låg compliance eller kort uppehåll (< 5 dagar) = normal plan med försiktig upptrappning, men INTE RTP-terminologi.
 
 PASSLÄNGDER:
   Ride: 75-240min. VirtualRide: 45-120min. RollerSki: 60-150min. Run: 30-90min. Styrka: 30-45min.
