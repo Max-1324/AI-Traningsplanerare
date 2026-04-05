@@ -1,6 +1,6 @@
 .env
 .claude
 __pycache__/
-training_ai
+training_plan/__pycache__/
 .weather_cache.json
 .coach_state.json
