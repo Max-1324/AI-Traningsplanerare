@@ -26,6 +26,60 @@ class ManualNutrition(BaseModel):
     nutrition: str
 
 
+class ReviewDimension(BaseModel):
+    rating: Literal["STRONG", "ADEQUATE", "WEAK", "CRITICAL"] = "ADEQUATE"
+    rationale: str = ""
+    issues: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+
+
+class CounterfactualScenario(BaseModel):
+    question: str
+    answer: str
+    tradeoffs: str = ""
+    recommendation: str = ""
+
+
+class PlanReview(BaseModel):
+    summary: str = ""
+    goal_alignment: ReviewDimension = Field(default_factory=ReviewDimension)
+    key_sessions: ReviewDimension = Field(default_factory=ReviewDimension)
+    efficiency: ReviewDimension = Field(default_factory=ReviewDimension)
+    load_and_risk: ReviewDimension = Field(default_factory=ReviewDimension)
+    individualization: ReviewDimension = Field(default_factory=ReviewDimension)
+    race_demands: ReviewDimension = Field(default_factory=ReviewDimension)
+    strengths: list[str] = Field(default_factory=list)
+    must_fix: list[str] = Field(default_factory=list)
+    uncertainty_sources: list[str] = Field(default_factory=list)
+    counterfactuals: list[CounterfactualScenario] = Field(default_factory=list)
+    overall_verdict: Literal["PASS", "REVISE", "REJECT"] = "REVISE"
+
+
+class PlanScores(BaseModel):
+    effectiveness: int = Field(ge=0, le=10)
+    risk: int = Field(ge=0, le=10)
+    specificity: int = Field(ge=0, le=10)
+    simplicity: int = Field(ge=0, le=10)
+    confidence: int = Field(ge=0, le=10)
+    rationale: str = ""
+    uncertainty_sources: list[str] = Field(default_factory=list)
+    action_hint: Literal["ACCEPT", "REVISE", "REJECT"] = "REVISE"
+
+
+class PlanDecisionTrace(BaseModel):
+    action: Literal["ACCEPT", "REVISE", "REJECT"]
+    rationale: str = ""
+    iterations_run: int = Field(default=1, ge=1)
+    used_with_override: bool = False
+    selected_candidate: str = ""
+    historical_validation_summary: str = ""
+    outcome_tracking_summary: str = ""
+    review: Optional[PlanReview] = None
+    scores: Optional[PlanScores] = None
+    candidate_pool_summary: list[str] = Field(default_factory=list)
+    revision_history: list[str] = Field(default_factory=list)
+
+
 class PlanDay(BaseModel):
     date: str
     title: str
@@ -96,3 +150,4 @@ class AIPlan(BaseModel):
     weekly_feedback: str = ""
     manual_workout_nutrition: list[ManualNutrition] = Field(default_factory=list)
     days: list[PlanDay]
+    decision_trace: Optional[PlanDecisionTrace] = None

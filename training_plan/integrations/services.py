@@ -2,12 +2,103 @@ from training_plan.core.common import *
 from training_plan.engine.analysis import *
 from training_plan.engine.planning import *
 from training_plan.engine.postprocess import estimate_tss_coggan
+from training_plan.engine.ai import sanitize
 
-def save_daily_note_to_icu(plan, changes):
+PLANNER_COMMENT_START = "[AI_MORNING]"
+PLANNER_COMMENT_END = "[/AI_MORNING]"
+
+
+def _strip_planner_comment_block(comments):
+    if not comments:
+        return ""
+    cleaned = re.sub(
+        rf"{re.escape(PLANNER_COMMENT_START)}.*?{re.escape(PLANNER_COMMENT_END)}",
+        "",
+        comments,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def _build_planner_comment_block(morning):
+    lines = []
+    time_available = sanitize(morning.get("time_available", ""), 20)
+    injury_today = sanitize(morning.get("injury_today", ""), 150)
+    athlete_note = sanitize(morning.get("athlete_note", ""), 200)
+    if time_available:
+        lines.append(f"time_available={time_available}")
+    if injury_today:
+        lines.append(f"injury={injury_today}")
+    if athlete_note:
+        lines.append(f"athlete_note={athlete_note}")
+    if not lines:
+        return ""
+    return (
+        f"{PLANNER_COMMENT_START}\n"
+        + "\n".join(lines)
+        + f"\n{PLANNER_COMMENT_END}"
+    )
+
+
+def _merge_planner_comments(existing_comments, morning):
+    base_comments = _strip_planner_comment_block(existing_comments or "")
+    planner_block = _build_planner_comment_block(morning)
+    if base_comments and planner_block:
+        return f"{base_comments}\n\n{planner_block}"
+    return base_comments or planner_block
+
+
+def _read_wellness_score(today_wellness, keys, default=1, minimum=1, maximum=4):
+    if not today_wellness:
+        return default
+    for key in keys:
+        value = today_wellness.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return max(minimum, min(maximum, int(float(value))))
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def save_morning_wellness(morning, today_wellness=None):
+    today_wellness = today_wellness or {}
+    payload = {}
+
+    stress_value = _read_wellness_score(
+        {"stress": morning.get("life_stress", 1)},
+        ("stress",),
+        default=1,
+    )
+    current_stress = _read_wellness_score(today_wellness, ("stress", "Stress"), default=None)
+    if current_stress != stress_value:
+        payload["stress"] = stress_value
+
+    merged_comments = _merge_planner_comments(today_wellness.get("comments", ""), morning)
+    if merged_comments != (today_wellness.get("comments", "") or ""):
+        payload["comments"] = merged_comments
+
+    if not payload:
+        return
+
+    try:
+        requests.put(
+            f"{BASE}/athlete/{ATHLETE_ID}/wellness/{date.today().isoformat()}",
+            auth=AUTH,
+            timeout=15,
+            json=payload,
+        ).raise_for_status()
+        log.info("Wellness uppdaterad med morgonsvar.")
+    except Exception as e:
+        log.warning(f"Kunde inte spara morgon-wellness: {e}")
+
+def save_daily_note_to_icu(plan, changes, planner_insights=None):
     """
     Sparar dagens sammanfattning som en NOTE idag, och gårdagens 
     feedback som en separat NOTE igår.
     """
+    planner_insights = planner_insights or {}
     today_date = date.today()
     today_str = today_date.isoformat()
     yesterday_str = (today_date - timedelta(days=1)).isoformat()
@@ -15,6 +106,65 @@ def save_daily_note_to_icu(plan, changes):
     # --- Bygg innehåll för IDAG ---
     lines_today = ["🤖 DAGENS SAMMANFATTNING:"]
     lines_today.append(plan.summary)
+
+    if planner_insights:
+        race_readiness = planner_insights.get("race_readiness", {})
+        performance_forecast = planner_insights.get("performance_forecast", {})
+        minimum_effective_dose = planner_insights.get("minimum_effective_dose", {})
+        execution_friction = planner_insights.get("execution_friction", {})
+        benchmark_system = planner_insights.get("benchmark_system", {})
+        season_plan = planner_insights.get("season_plan", {})
+        lines_today.append("")
+        lines_today.append("Planner insights:")
+        if race_readiness:
+            lines_today.append(f"Race readiness: {race_readiness.get('summary', '')}")
+        if performance_forecast:
+            lines_today.append(f"Forecast: {performance_forecast.get('summary', '')}")
+        if minimum_effective_dose:
+            lines_today.append(f"MED: {minimum_effective_dose.get('summary', '')}")
+        if execution_friction:
+            lines_today.append(f"Friction: {execution_friction.get('summary', '')}")
+        if benchmark_system.get("next_benchmark"):
+            nb = benchmark_system["next_benchmark"]
+            lines_today.append(
+                f"Next benchmark: {nb.get('name')} (~{nb.get('due_in_days')}d) - {nb.get('session')}"
+            )
+        if season_plan.get("blocks"):
+            block = season_plan["blocks"][0]
+            lines_today.append(
+                f"Season block: {block.get('label')} ({block.get('start')} -> {block.get('end')}) focus {block.get('focus')}"
+            )
+
+    if getattr(plan, "decision_trace", None) and plan.decision_trace and plan.decision_trace.scores:
+        trace = plan.decision_trace
+        scores = trace.scores
+        lines_today.append("")
+        lines_today.append("🧪 PLAN REVIEW:")
+        lines_today.append(
+            f"Beslut: {trace.action}"
+            + (" (override efter max varv)" if trace.used_with_override else "")
+        )
+        if trace.selected_candidate:
+            lines_today.append(f"Vald kandidat: {trace.selected_candidate}")
+        lines_today.append(
+            f"Scores: Effekt {scores.effectiveness}/10 | Risk {scores.risk}/10 | "
+            f"Specificitet {scores.specificity}/10 | Enkelhet {scores.simplicity}/10 | "
+            f"Confidence {scores.confidence}/10"
+        )
+        if trace.review and trace.review.summary:
+            lines_today.append(f"Review: {trace.review.summary}")
+        if trace.rationale:
+            lines_today.append(f"Varfor vald: {trace.rationale}")
+        if trace.review and trace.review.must_fix:
+            lines_today.append("Must-fix: " + " | ".join(trace.review.must_fix[:3]))
+        if trace.candidate_pool_summary:
+            lines_today.append("Kandidatpool:")
+            for line in trace.candidate_pool_summary[:5]:
+                lines_today.append(f"  - {line}")
+        if trace.outcome_tracking_summary:
+            lines_today.append(f"Outcome: {trace.outcome_tracking_summary}")
+        if trace.historical_validation_summary:
+            lines_today.append(f"Historik: {trace.historical_validation_summary}")
         
     if changes:
         lines_today.append("")
@@ -85,7 +235,9 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
                            race_demands: dict = None,
                            session_quality: dict = None,
                            coach_confidence: dict = None,
-                           polarization: dict = None) -> str:
+                           polarization: dict = None,
+                           planner_insights: dict = None) -> str:
+    planner_insights = planner_insights or {}
     today = date.today()
     week_start = today - timedelta(days=today.weekday() + 7)
     week_end   = week_start + timedelta(days=7)
@@ -252,6 +404,54 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
   {ftp_check['recommendation']}
   {ftp_check.get('suggested_protocol', '')}
 """
+    if planner_insights:
+        capacity_map = planner_insights.get("capacity_map", {})
+        performance_forecast = planner_insights.get("performance_forecast", {})
+        race_readiness = planner_insights.get("race_readiness", {})
+        benchmark_system = planner_insights.get("benchmark_system", {})
+        minimum_effective_dose = planner_insights.get("minimum_effective_dose", {})
+        execution_friction = planner_insights.get("execution_friction", {})
+        block_learning = planner_insights.get("block_learning", {})
+        season_plan = planner_insights.get("season_plan", {})
+        nutrition_readiness = planner_insights.get("nutrition_readiness", {})
+        individualization_profile = planner_insights.get("individualization_profile", {})
+        report += "\n\nPLANNER INSIGHTS\n"
+        if race_readiness:
+            report += f"  {race_readiness.get('summary', '')}\n"
+        if performance_forecast:
+            report += f"  {performance_forecast.get('summary', '')}\n"
+        if minimum_effective_dose:
+            report += f"  {minimum_effective_dose.get('summary', '')}\n"
+        if execution_friction:
+            report += f"  {execution_friction.get('summary', '')}\n"
+        if capacity_map:
+            report += (
+                "  Capacity strongest: "
+                + (", ".join(capacity_map.get("strongest", [])) or "unknown")
+                + " | weakest: "
+                + (", ".join(capacity_map.get("weakest", [])) or "unknown")
+                + "\n"
+            )
+        if nutrition_readiness:
+            report += f"  Nutrition: {nutrition_readiness.get('summary', '')}\n"
+        if individualization_profile:
+            report += f"  Individualization: {individualization_profile.get('summary', '')}\n"
+        if block_learning:
+            report += f"  Block learning: {block_learning.get('summary', '')}\n"
+        if benchmark_system.get("benchmarks"):
+            report += "  Benchmarks:\n"
+            for item in benchmark_system["benchmarks"][:3]:
+                report += (
+                    f"    - {item.get('name')} ({item.get('priority')} in ~{item.get('due_in_days')}d): "
+                    f"{item.get('session')}\n"
+                )
+        if season_plan.get("blocks"):
+            report += "  Season map:\n"
+            for block in season_plan["blocks"][:4]:
+                report += (
+                    f"    - {block.get('label')} ({block.get('start')} -> {block.get('end')}): "
+                    f"{block.get('focus')}\n"
+                )
     return report.strip()
 
 
@@ -369,9 +569,6 @@ def fetch_yesterday_actual(activities):
 # ══════════════════════════════════════════════════════════════════════════════
 # INTERVALS.ICU – SPARNING
 # ══════════════════════════════════════════════════════════════════════════════
-
-def is_ai_generated(w):
-    return AI_TAG in (w.get("description") or "")
 
 def _parse_local_event_datetime(start_date_local: str) -> Optional[datetime]:
     if not start_date_local:
@@ -575,6 +772,22 @@ def save_workout(day: PlanDay, athlete: dict | None = None):
 # VÄDER (utökade WMO-koder, timdata för eftermiddag)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Komplett Yr (Met.no) symbolkodstabell
+YR_CODES = {
+    "clearsky": "Klart", "fair": "Halvklart", "partlycloudy": "Växlande moln",
+    "cloudy": "Mulet", "lightrainshowers": "Lätta regnskurar", "rainshowers": "Regnskurar",
+    "heavyrainshowers": "Kraftiga regnskurar", "lightrainshowersandthunder": "Åskskurar",
+    "rainshowersandthunder": "Åskskurar", "heavyrainshowersandthunder": "Kraftiga åskskurar",
+    "lightrain": "Lätt regn", "rain": "Regn", "heavyrain": "Kraftigt regn",
+    "lightrainandthunder": "Lätt regn/åska", "rainandthunder": "Regn och åska",
+    "heavyrainandthunder": "Kraftigt regn/åska", "lightsleetshowers": "Lätta byar snöbl. regn",
+    "sleetshowers": "Byar snöbl. regn", "heavysleetshowers": "Kraftiga byar snöbl. regn",
+    "lightsleet": "Lätt snöblandat regn", "sleet": "Snöblandat regn", "heavysleet": "Kraft. snöbl. regn",
+    "lightsnowshowers": "Lätta snöbyar", "snowshowers": "Snöbyar", "heavysnowshowers": "Kraftiga snöbyar",
+    "lightsnow": "Lätt snöfall", "snow": "Snöfall", "heavysnow": "Kraftigt snöfall",
+    "fog": "Dimma"
+}
+
 def fetch_weather(days):
     try:
        # Yr kräver en User-Agent för att tillåta anrop
@@ -690,26 +903,3 @@ def fetch_weather(days):
             return cached.get("data", [])
         log.warning("Ingen väder-cache. Fortsätter utan väderdata.")
         return []
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ANALYS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def sanitize(text, max_len=300):
-    if not text: return ""
-    text = text[:max_len]
-    for pat in [r"ignore\s+(all\s+)?instructions?", r"ignorera\s+restriktioner",
-                r"act\s+as", r"jailbreak", r"<[^>]+>", r"system\s*:"]:
-        text = re.sub(pat, "[REDACTED]", text, flags=re.IGNORECASE)
-    text = re.sub(r"[^\w\s,.!?:;()/\-]", "", text)
-    return text.strip()
-
-def fmt(val, suffix=""):
-    if val is None: return "N/A"
-    if isinstance(val, float): return f"{round(val,1)}{suffix}"
-    return f"{val}{suffix}"
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATAKVALITETSVALIDERING
-# ══════════════════════════════════════════════════════════════════════════════
-

@@ -45,7 +45,7 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 RELEVANT_EVENTS = {"ACTIVITY_ANALYZED", "WELLNESS_UPDATED"}
 
 # Skript att köra – relativt till denna fils katalog
-GENERATOR_SCRIPT = os.path.join(os.path.dirname(__file__), "training_plan_generator.py")
+GENERATOR_SCRIPT = os.path.join(os.path.dirname(__file__), "main.py")
 
 # ── Lås – förhindrar parallella körningar ──────────────────────────────────────
 _lock = threading.Lock()
@@ -59,7 +59,7 @@ app = Flask(__name__)
 
 def run_training_generator(trigger_event: str):
     """
-    Kör training_plan_generator.py i en subprocess med --auto.
+    Kör main.py i en subprocess med --auto.
     Använder ett lås så att bara en körning kan ske åt gången.
     """
     global _last_run

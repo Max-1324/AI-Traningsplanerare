@@ -4,11 +4,209 @@ from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.engine.analysis import *
 
-def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals):
-    answers = {"life_stress": 1, "injury_today": None, "athlete_note": "", "time_available": "1h"}
+PLANNER_COMMENT_START = "[AI_MORNING]"
+PLANNER_COMMENT_END = "[/AI_MORNING]"
+
+
+def sanitize(text, max_len=300):
+    if not text:
+        return ""
+    text = str(text)[:max_len]
+    for pat in [
+        r"ignore\s+(all\s+)?instructions?",
+        r"ignorera\s+restriktioner",
+        r"act\s+as",
+        r"jailbreak",
+        r"<[^>]+>",
+        r"system\s*:",
+    ]:
+        text = re.sub(pat, "[REDACTED]", text, flags=re.IGNORECASE)
+    text = re.sub(r"[^\w\s,.!?:;()/\-]", "", text)
+    return text.strip()
+
+def fmt(val, suffix=""):
+    if val is None: return "N/A"
+    if isinstance(val, float): return f"{round(val,1)}{suffix}"
+    return f"{val}{suffix}"
+
+
+def _strip_planner_comment_block(comments):
+    if not comments:
+        return ""
+    cleaned = re.sub(
+        rf"{re.escape(PLANNER_COMMENT_START)}.*?{re.escape(PLANNER_COMMENT_END)}",
+        "",
+        comments,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def _parse_planner_comment_block(comments):
+    parsed = {}
+    if not comments:
+        return parsed
+    match = re.search(
+        rf"{re.escape(PLANNER_COMMENT_START)}(.*?){re.escape(PLANNER_COMMENT_END)}",
+        comments,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return parsed
+    for raw_line in match.group(1).splitlines():
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = sanitize(key, 40).lower().strip()
+        value = sanitize(value, 200).strip()
+        if key and value:
+            parsed[key] = value
+    return parsed
+
+
+def _minutes_to_time_text(minutes):
+    if minutes <= 0:
+        return ""
+    hours, mins = divmod(int(minutes), 60)
+    if hours and mins:
+        return f"{hours}h {mins}m"
+    if hours:
+        return f"{hours}h"
+    return f"{mins}m"
+
+
+def _normalize_time_available(value):
+    if not value:
+        return ""
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+    no_limit_phrases = (
+        "ingen begr",
+        "ingen tids",
+        "obegr",
+        "unlimited",
+        "no limit",
+        "fri tid",
+        "fritt",
+    )
+    if any(phrase in text for phrase in no_limit_phrases):
+        return ""
+    normalized = (
+        text.replace("timmar", "h")
+        .replace("timme", "h")
+        .replace("hours", "h")
+        .replace("hour", "h")
+        .replace("hrs", "h")
+        .replace("hr", "h")
+        .replace("minuter", "m")
+        .replace("minutes", "m")
+        .replace("minute", "m")
+        .replace("mins", "m")
+        .replace("min", "m")
+    )
+    hours_match = re.search(r"(\d+(?:[.,]\d+)?)\s*h(?:\s*(\d+)\s*m)?", normalized)
+    if hours_match:
+        minutes = round(float(hours_match.group(1).replace(",", ".")) * 60)
+        if hours_match.group(2):
+            minutes += int(hours_match.group(2))
+        return _minutes_to_time_text(minutes)
+    mins_match = re.search(r"(\d+)\s*m", normalized)
+    if mins_match:
+        return _minutes_to_time_text(int(mins_match.group(1)))
+    if normalized.isdigit():
+        return normalized
+    return sanitize(value, 20)
+
+
+def _extract_time_available_from_comments(comments):
+    if not comments:
+        return None
+    text = comments.lower()
+    no_limit_patterns = (
+        r"ingen\s+tids?(?:begransning|grans|limit)",
+        r"no\s+time\s+limit",
+        r"unlimited",
+        r"fri\s+tid",
+        r"obegr[a-z]*\s+tid",
+    )
+    for pattern in no_limit_patterns:
+        if re.search(pattern, text):
+            return ""
+    time_patterns = (
+        r"(?:tid(?:\s+idag)?|time(?:\s+today)?|max(?:\s+tid)?|time\s+limit|available|tillg[a-z]*lig(?:\s+tid)?|kan\s+bara(?:\s+tr[a-z]+)?|bara|endast)[^0-9]{0,20}(\d+(?:[.,]\d+)?\s*h(?:\s*\d+\s*m)?|\d+\s*m)",
+        r"(\d+(?:[.,]\d+)?\s*h(?:\s*\d+\s*m)?|\d+\s*m)\s*(?:max|totalt|available|tillg[a-z]*ligt?|tid)",
+    )
+    for pattern in time_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _normalize_time_available(match.group(1))
+    return None
+
+
+def _read_wellness_score(today_wellness, keys, default=1, minimum=1, maximum=4):
+    if not today_wellness:
+        return default
+    for key in keys:
+        value = today_wellness.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return max(minimum, min(maximum, int(float(value))))
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _read_wellness_injury(today_wellness):
+    if not today_wellness:
+        return None
+    for key in ("injury", "Injury"):
+        value = today_wellness.get(key)
+        if value in (None, "", 0, "0"):
+            continue
+        try:
+            score = int(float(value))
+        except (TypeError, ValueError):
+            text = sanitize(str(value), 150)
+            return text or None
+        if score <= 1:
+            return None
+        return f"Wellness injury score {score}/4"
+    return None
+
+def _legacy_morning_questions_unused(auto, today_wellness, yesterday_planned, yesterday_actuals):
+    raw_comments = (today_wellness or {}).get("comments", "")
+    structured_comments = _parse_planner_comment_block(raw_comments)
+    free_comments = _strip_planner_comment_block(raw_comments)
+    comment_time = _extract_time_available_from_comments(free_comments)
+    structured_time = _normalize_time_available(
+        structured_comments.get("time_available") or structured_comments.get("time") or ""
+    )
+    existing_time = structured_time if comment_time is None else comment_time
+    existing_stress = _read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
+    existing_injury = (
+        structured_comments.get("injury")
+        or structured_comments.get("injury_today")
+        or _read_wellness_injury(today_wellness)
+    )
+    existing_note = structured_comments.get("athlete_note") or structured_comments.get("note") or ""
+    notes = []
+    clean_free_comments = sanitize(free_comments, 250)
+    if clean_free_comments:
+        notes.append(clean_free_comments)
+    if existing_note and existing_note not in notes:
+        notes.append(existing_note)
+    answers = {
+        "life_stress": existing_stress,
+        "injury_today": existing_injury,
+        "athlete_note": " | ".join(notes),
+        "time_available": existing_time or "",
+    }
     if auto:
-        answers["athlete_note"] = sanitize((today_wellness or {}).get("comments",""))
-        answers["yesterday_completed"] = len(yesterday_actuals) > 0 if yesterday_actuals else False
+        if yesterday_planned and is_ai_generated(yesterday_planned):
+            answers["yesterday_completed"] = len(yesterday_actuals) > 0 if yesterday_actuals else False
         return answers
     print("\n" + "-"*50 + "\n  MORGONCHECK\n" + "-"*50)
     if yesterday_planned and is_ai_generated(yesterday_planned):
@@ -39,6 +237,89 @@ def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals
 # PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
 
+def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals):
+    raw_comments = (today_wellness or {}).get("comments", "")
+    structured_comments = _parse_planner_comment_block(raw_comments)
+    free_comments = _strip_planner_comment_block(raw_comments)
+    comment_time = _extract_time_available_from_comments(free_comments)
+    structured_time = _normalize_time_available(
+        structured_comments.get("time_available") or structured_comments.get("time") or ""
+    )
+    existing_time = structured_time if comment_time is None else comment_time
+    existing_stress = _read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
+    existing_injury = (
+        structured_comments.get("injury")
+        or structured_comments.get("injury_today")
+        or _read_wellness_injury(today_wellness)
+    )
+    existing_note = structured_comments.get("athlete_note") or structured_comments.get("note") or ""
+
+    note_parts = []
+    clean_free_comments = sanitize(free_comments, 250)
+    if clean_free_comments:
+        note_parts.append(clean_free_comments)
+    if existing_note and existing_note not in note_parts:
+        note_parts.append(existing_note)
+
+    answers = {
+        "life_stress": existing_stress,
+        "injury_today": existing_injury,
+        "athlete_note": " | ".join(note_parts),
+        "time_available": existing_time or "",
+    }
+
+    if auto:
+        if yesterday_planned and is_ai_generated(yesterday_planned):
+            answers["yesterday_completed"] = len(yesterday_actuals) > 0 if yesterday_actuals else False
+        return answers
+
+    print("\n" + "-"*50 + "\n  MORGONCHECK\n" + "-"*50)
+    if yesterday_planned and is_ai_generated(yesterday_planned):
+        name = yesterday_planned.get("name","träning")
+        if yesterday_actuals:
+            a = yesterday_actuals[0]
+            dur = round((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
+            print(f"\nIgår: {name} | Genomfört: {a.get('type','?')}, {dur}min, TSS {a.get('icu_training_load','?')}")
+            q = input("Hur kändes det? (bra/okej/tungt/för lätt) [bra]: ").strip() or "bra"
+            answers["yesterday_feeling"] = sanitize(q, 50)
+            answers["yesterday_completed"] = True
+        else:
+            print(f"\nIgår planerat: {name} - ingen aktivitet hittades.")
+            r = input("Varför? (sjuk/trött/tidsbrist/annat): ").strip()
+            answers["yesterday_missed_reason"] = sanitize(r, 100)
+            answers["yesterday_completed"] = False
+
+    time_label = existing_time or "ingen begransning"
+    entered_time = input(f"\nTid för träning idag? [{time_label}]: ").strip()
+    answers["time_available"] = existing_time if not entered_time else _normalize_time_available(entered_time)
+
+    entered_stress = input(f"Livsstress (1-4) [{existing_stress}]: ").strip()
+    try:
+        answers["life_stress"] = max(1, min(4, int(entered_stress))) if entered_stress else existing_stress
+    except Exception:
+        answers["life_stress"] = existing_stress
+
+    injury_label = existing_injury or "nej"
+    entered_injury = input(f"Besvär/smärtor? (nej/beskriv) [{injury_label}]: ").strip()
+    if not entered_injury:
+        answers["injury_today"] = existing_injury
+    elif entered_injury.lower() in ("nej", "n"):
+        answers["injury_today"] = None
+    else:
+        answers["injury_today"] = sanitize(entered_injury, 150)
+
+    entered_note = input("övrig anteckning till coachen (valfritt, '-' rensar): ").strip()
+    if entered_note == "":
+        answers["athlete_note"] = existing_note
+    elif entered_note == "-":
+        answers["athlete_note"] = ""
+    else:
+        answers["athlete_note"] = sanitize(entered_note, 200)
+
+    print("-"*50)
+    return answers
+
+
 def build_prompt(activities, wellness, fitness, races, weather, morning, horizon,
                  manual_workouts, athlete, hrv, budgets, tsb_bgt, vetos, phase,
                  existing_plan_summary="  Ingen befintlig plan.",
@@ -52,7 +333,8 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
                  readiness=None, np_if_analysis=None, learned_patterns="",
                  exclude_dates=None, development_needs=None, block_objective=None,
                  race_demands=None, session_quality=None, coach_confidence=None,
-                 polarization=None):
+                 polarization=None, historical_validation=None,
+                 outcome_tracking=None, planner_insights=None):
     today = date.today()
     lf = fitness[-1] if fitness else {}
     atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb = lf.get("tsb",0.0)
@@ -60,6 +342,18 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
     tsb_st = tsb_zone(tsb, ctl, fitness)
     vols = sport_volumes(activities)
     zone_info = parse_zones(athlete)
+    planner_insights = planner_insights or {}
+    capacity_map = planner_insights.get("capacity_map", {})
+    nutrition_readiness = planner_insights.get("nutrition_readiness", {})
+    individualization_profile = planner_insights.get("individualization_profile", {})
+    minimum_effective_dose = planner_insights.get("minimum_effective_dose", {})
+    execution_friction = planner_insights.get("execution_friction", {})
+    training_frequency_target = planner_insights.get("training_frequency_target", {})
+    benchmark_system = planner_insights.get("benchmark_system", {})
+    block_learning = planner_insights.get("block_learning", {})
+    performance_forecast = planner_insights.get("performance_forecast", {})
+    race_readiness = planner_insights.get("race_readiness", {})
+    season_plan = planner_insights.get("season_plan", {})
 
     act_lines = []
     for a in activities[-20:]:
@@ -129,6 +423,7 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
     dates = [d for d in all_dates if not exclude_dates or d not in exclude_dates]
     if not dates:
         dates = all_dates  # fallback om allt är exkluderat
+    planning_day_count = len(dates)
 
     weekly_instruction = ""
     if date.today().weekday() == 0:
@@ -317,6 +612,134 @@ COACH CONFIDENCE:
   Om nivån är LOW: förenkla, håll färre men viktigare pass och undvik falsk precision.
 """
 
+    historical_validation_text = ""
+    if historical_validation:
+        historical_validation_text = f"""
+HISTORISK VALIDERING:
+  {historical_validation.get('summary', '')}
+  Use this as calibration, not as a guarantee. If previous plans did not translate well, simplify.
+"""
+
+    outcome_tracking_text = ""
+    if outcome_tracking:
+        outcome_tracking_text = f"""
+OUTCOME TRACKING:
+  {outcome_tracking.get('summary', '')}
+  If the model seems to overestimate effect or compliance, prioritize robustness, simpler structure, and protected key sessions.
+"""
+
+    capacity_map_text = ""
+    if capacity_map:
+        lines_capacity = ["CAPACITY MAP:"]
+        for area in capacity_map.get("areas", [])[:6]:
+            lines_capacity.append(
+                f"  - {area.get('name')}: {area.get('score')}/100 [{area.get('status')}] - {area.get('meaning')}"
+            )
+        lines_capacity.append(
+            f"  Strongest: {', '.join(capacity_map.get('strongest', [])) or 'Unknown'} | "
+            f"Weakest: {', '.join(capacity_map.get('weakest', [])) or 'Unknown'}"
+        )
+        capacity_map_text = "\n" + "\n".join(lines_capacity)
+
+    forecast_text = ""
+    if performance_forecast:
+        forecast_text = f"""
+PERFORMANCE FORECAST:
+  {performance_forecast.get('summary', '')}
+  Assumptions: {' | '.join(performance_forecast.get('assumptions', [])[:3]) or 'No explicit assumptions'}
+  Risks: {' | '.join(performance_forecast.get('risks', [])[:3]) or 'No major forecast risks'}
+"""
+
+    race_readiness_text = ""
+    if race_readiness:
+        race_readiness_text = f"""
+RACE READINESS:
+  {race_readiness.get('summary', '')}
+"""
+
+    benchmark_text = ""
+    if benchmark_system:
+        benchmark_text = f"""
+BENCHMARK SYSTEM:
+  {benchmark_system.get('summary', '')}
+"""
+        for item in benchmark_system.get("benchmarks", [])[:3]:
+            benchmark_text += (
+                f"  - {item.get('name')} ({item.get('priority')} in ~{item.get('due_in_days')}d): "
+                f"{item.get('session')} | Why: {item.get('purpose')}\n"
+            )
+
+    med_text = ""
+    if minimum_effective_dose:
+        med_text = f"""
+MINIMUM EFFECTIVE DOSE:
+  {minimum_effective_dose.get('summary', '')}
+  Must-protect: {' | '.join(minimum_effective_dose.get('must_hit_sessions', [])) or 'No explicit must-hit sessions'}
+"""
+
+    friction_text = ""
+    if execution_friction:
+        friction_text = f"""
+EXECUTION FRICTION:
+  {execution_friction.get('summary', '')}
+  Friction factors: {' | '.join(execution_friction.get('risk_factors', [])[:4]) or 'Low baseline friction'}
+"""
+
+    training_frequency_text = ""
+    if training_frequency_target:
+        training_frequency_text = f"""
+TRAINING STRUCTURE TARGET:
+  {training_frequency_target.get('summary', '')}
+  Training days: {training_frequency_target.get('min_training_days', '?')}-{training_frequency_target.get('max_training_days', '?')}
+  Rest days: {training_frequency_target.get('min_rest_days', '?')}-{training_frequency_target.get('max_rest_days', '?')}
+  Double days max: {training_frequency_target.get('max_double_days', '?')}
+"""
+
+    individualization_text = ""
+    if individualization_profile:
+        individualization_text = f"""
+INDIVIDUALIZATION:
+  {individualization_profile.get('summary', '')}
+"""
+        if individualization_profile.get("positive_signals"):
+            individualization_text += "  Positive signals:\n" + "\n".join(
+                f"    - {item}" for item in individualization_profile["positive_signals"][:3]
+            ) + "\n"
+        if individualization_profile.get("caution_signals"):
+            individualization_text += "  Caution:\n" + "\n".join(
+                f"    - {item}" for item in individualization_profile["caution_signals"][:3]
+            ) + "\n"
+
+    nutrition_readiness_text = ""
+    if nutrition_readiness:
+        nutrition_readiness_text = f"""
+NUTRITION READINESS:
+  {nutrition_readiness.get('summary', '')}
+  Next steps: {' | '.join(nutrition_readiness.get('next_steps', [])[:3]) or 'Maintain current race-fueling practice'}
+"""
+
+    block_learning_text = ""
+    if block_learning:
+        block_learning_text = f"""
+BLOCK LEARNING:
+  {block_learning.get('summary', '')}
+  Worked: {' | '.join(block_learning.get('worked', [])[:3])}
+  Did not work: {' | '.join(block_learning.get('did_not_work', [])[:3])}
+  Next bias: {' | '.join(block_learning.get('next_bias', [])[:3]) or 'No explicit bias'}
+"""
+
+    season_plan_text = ""
+    if season_plan:
+        season_plan_text = f"""
+SEASON PLAN:
+  {season_plan.get('summary', '')}
+"""
+        for block in season_plan.get("blocks", [])[:4]:
+            season_plan_text += (
+                f"  - {block.get('label')} ({block.get('start')} -> {block.get('end')} | {block.get('weeks')}w): "
+                f"focus {block.get('focus')} | milestones: {' | '.join(block.get('milestones', [])) or 'execution'}\n"
+            )
+
     polarization_text = ""
     if polarization:
         polarization_text = f"""
@@ -378,6 +801,7 @@ INSTRUKTION: Ge 3-5 meningar feedback i fältet "yesterday_feedback":
 """
 
     athlete_note = morning.get('athlete_note', '').strip()
+    time_available_label = morning.get("time_available", "").strip() or "Ingen explicit tidsgrans"
     athlete_note_block = f"""
 ⚡ ATLETENS DIREKTA ÖNSKEMÅL (HÖG PRIORITET – FÖLJ DETTA):
   <user_input>{athlete_note}</user_input>
@@ -402,6 +826,9 @@ Varje plan ska ha:
   - 2-3 MUST-HIT stimuli som direkt stödjer nuvarande block objective
   - Övriga pass som FLEX-pass: stödjande, genomförbara och enkla att skala bort
   - Tydlig koppling mellan utvecklingsbehov, race demands och val av pass
+  - Om benchmark system säger att en checkpoint är due och dagsformen tillåter: schemalägg den inom horisonten
+  - Om minimum effective dose är ACTIVE: välj den minsta plan som fortfarande skyddar must-hit-pass
+  - Håll planen i linje med season plan, inte bara nästa vecka
 
 REGENERERA HELA PLANEN om:
   - Gårdagens pass missades
@@ -438,6 +865,18 @@ RPE-trend: {rpe_trend(activities)}
 {session_quality_text}
 {polarization_text}
 {coach_confidence_text}
+{historical_validation_text}
+{outcome_tracking_text}
+{capacity_map_text}
+{forecast_text}
+{race_readiness_text}
+{benchmark_text}
+{med_text}
+{friction_text}
+{training_frequency_text}
+{individualization_text}
+{nutrition_readiness_text}
+{block_learning_text}
 TRÄNING:
   ATL: {fmt(atl)} | CTL: {fmt(ctl)} | TSB: {fmt(tsb)} | TSB-zon: {tsb_st}
   ACWR: {ac['ratio']} -> {ac['action']}
@@ -449,12 +888,13 @@ TRÄNING:
 {format_race_week_for_prompt(race_week) if race_week and race_week.get('is_active') else ''}
 {rtp_text}
 {taper_score['summary'] if taper_score and taper_score.get('is_in_taper') else ''}
+{season_plan_text}
 
-TSS-BUDGET: TOTALT {tsb_bgt} TSS på {horizon} dagar.
+TSS-BUDGET: TOTALT {tsb_bgt} TSS på {planning_day_count} plan-dagar.
 Sikta på 95-100% ({round(tsb_bgt * 0.95)}-{tsb_bgt} TSS). Under 90% ({round(tsb_bgt * 0.90)}) = för lite för optimal utveckling.
 {'⚠️ DELOAD: Budgeten är redan sänkt med 40%.' if mesocycle and mesocycle['is_deload'] else ''}
 
-VOLYMSPÄRRAR:
+SPORTSPECIFIKA SPARRAR (bara dar "KVAR" visas):
 {chr(10).join(budget_lines) or '  Inga data'}
 
 HÅRDA VETON:
@@ -533,20 +973,21 @@ STYRKA FÖR UTHÅLLIGHETSIDROTTARE (Rønnestad & Mujika 2014):
 COACHREGLER:
 1. POLARISERING: 80% Z1-Z2, max 20% Z4+. Minimera Z3 – undvik "grå zonen".
 2. HARD-EASY: Aldrig Z4+ två dagar i rad. Minst 48h mellan VO2max-pass.
-3. VOLYMSPÄRR: Aldrig mer än KVAR per sport.
+3. SPORTSPARRAR: Respektera KVAR bara for sporter som faktiskt har en KVAR-rad ovan.
 4. HRV-VETO: HRV LOW → bara Z1/vila.
 5. NUTRITION: <60min→"". >120min→60-90g CHO/h.
 6. EXAKTA ZONER: VirtualRide→watt+puls. Ride/Run/RollerSki→ENBART puls.
 7. STYRKA: Kroppsvikt ENDAST. Max 2/10d. Aldrig i rad. ANGE EXAKTA ÖVNINGAR från styrkebiblioteket.
-8. VILODAGAR: Max 2 vilodagar i rad. Aldrig 3+ konsekutiva vilodagar om inte HRV=LOW eller skada.
 8. MESOCYKEL: Vecka 4=deload (-35-40% volym, max Z2). Vecka 1-3=progressiv laddning.
 9. PASSBIBLIOTEK: Använd intervallpass från biblioteket – uppfinn inte nya format.
 10. RTP-NAMNGIVNING: Använd ALDRIG "RTP" eller "Return to Play" i passnamn/titlar om inte "RETURN TO PLAY-PROTOKOLL AKTIVERAT" visas explicit ovan.
 11. MUST-HIT-PASS: Skydda blockets viktigaste pass även om flexpassen behöver göras kortare eller enklare.
 12. FYLLERIPASS ÄR FÖRBJUDNA: Om ett pass inte driver adaptation eller återhämtning ska det bort eller göras enklare.
 
-PASSLÄNGDER:
-  Ride: 75-240min. VirtualRide: 45-120min. RollerSki: 60-150min. Run: 30-90min. Styrka: 30-45min.
+MINPASSLÄNGDER:
+  Ride: minst 75min. VirtualRide: minst 45min. RollerSki: minst 60min. Run: minst 30min. Styrka: minst 30min.
+  Ingen hard maxtid: valj den langd som bast tjanar blockmal, race demands, budget och aterhamtning.
+  Dagens TOTALA planerade traning pa {today.isoformat()} maste rymmas inom angiven tid om en tid ar angiven ovan.
 
 Returnera ENBART JSON:
 {{
@@ -695,7 +1136,9 @@ def _active_provider() -> str:
     return os.getenv("AI_PROVIDER", "gemini")
 
 def print_plan(plan, changes, mesocycle=None, trajectory=None,
-               acwr_trend=None, taper_score=None, race_week=None, rtp_status=None):
+               acwr_trend=None, taper_score=None, race_week=None, rtp_status=None,
+               planner_insights=None):
+    planner_insights = planner_insights or {}
     print("\n" + "="*65)
     print(f"  TRÄNINGSPLAN v2  ({_active_provider().upper()})")
     if mesocycle:
@@ -728,6 +1171,70 @@ def print_plan(plan, changes, mesocycle=None, trajectory=None,
 
     print(f"\nStress Audit: {plan.stress_audit}\n")
     print(f"{plan.summary}\n")
+
+    if planner_insights:
+        capacity_map = planner_insights.get("capacity_map", {})
+        performance_forecast = planner_insights.get("performance_forecast", {})
+        race_readiness = planner_insights.get("race_readiness", {})
+        minimum_effective_dose = planner_insights.get("minimum_effective_dose", {})
+        execution_friction = planner_insights.get("execution_friction", {})
+        benchmark_system = planner_insights.get("benchmark_system", {})
+        season_plan = planner_insights.get("season_plan", {})
+
+        if race_readiness or performance_forecast or minimum_effective_dose:
+            print("PLANNER INSIGHTS:")
+            if race_readiness:
+                print(f"  {race_readiness.get('summary', '')}")
+            if performance_forecast:
+                print(f"  {performance_forecast.get('summary', '')}")
+            if minimum_effective_dose:
+                print(f"  {minimum_effective_dose.get('summary', '')}")
+            if execution_friction:
+                print(f"  {execution_friction.get('summary', '')}")
+            if capacity_map:
+                print(
+                    "  Capacity strongest: "
+                    + (", ".join(capacity_map.get("strongest", [])) or "unknown")
+                    + " | weakest: "
+                    + (", ".join(capacity_map.get("weakest", [])) or "unknown")
+                )
+            if benchmark_system.get("next_benchmark"):
+                next_benchmark = benchmark_system["next_benchmark"]
+                print(
+                    f"  Next benchmark: {next_benchmark.get('name')} "
+                    f"(~{next_benchmark.get('due_in_days')}d)"
+                )
+            if season_plan.get("blocks"):
+                first_block = season_plan["blocks"][0]
+                print(
+                    f"  Season map: {season_plan.get('total_weeks', '?')}w | "
+                    f"current block {first_block.get('label')} -> {first_block.get('focus')}"
+                )
+            print()
+
+    if plan.decision_trace and plan.decision_trace.scores:
+        trace = plan.decision_trace
+        scores = trace.scores
+        override = " [OVERRIDE]" if trace.used_with_override else ""
+        print(f"REVIEW GATE: {trace.action}{override}")
+        if trace.selected_candidate:
+            print(f"  Vald kandidat: {trace.selected_candidate}")
+        print(
+            f"  Effekt {scores.effectiveness}/10 | Risk {scores.risk}/10 | "
+            f"Specificitet {scores.specificity}/10 | Enkelhet {scores.simplicity}/10 | "
+            f"Confidence {scores.confidence}/10"
+        )
+        if trace.review and trace.review.summary:
+            print(f"  {trace.review.summary}")
+        if trace.rationale:
+            print(f"  Varfor vald: {trace.rationale}")
+        if trace.review and trace.review.must_fix:
+            print(f"  Must-fix: {' | '.join(trace.review.must_fix[:3])}")
+        if trace.candidate_pool_summary:
+            print("  Kandidatpool:")
+            for line in trace.candidate_pool_summary[:5]:
+                print(f"    - {line}")
+        print()
 
     # FIX #4: Visa yesterday feedback
     if plan.yesterday_feedback:
@@ -803,5 +1310,3 @@ def plan_update_mode(ai_workouts, yesterday_actuals, yesterday_planned, hrv, wel
     except Exception:
         pass
     return "none", "Plan komplett och återhämtning normal – inga ändringar."
-
-

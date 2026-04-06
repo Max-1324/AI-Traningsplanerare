@@ -1,4 +1,4 @@
-﻿"""
+﻿﻿"""
 Adaptiv Träningsplansgenerator v2
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Kör varje morgon. Hämtar data från intervals.icu, utvärderar form och
@@ -4078,7 +4078,6 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
         week_days_count = len(week_dates)
         # Veckobudget proportionell mot totala horisonten (fast nämnare)
         wk_budget = round(budget * week_days_count / total_days)
-        wk_floor  = round(wk_budget * floor_pct)
         wk_base   = round(sum(base_tss_by_date.get(d, 0) for d in week_dates))
 
         wk_tss = sum(estimate_tss_coggan(result[i], athlete) for i in indices)
@@ -4111,36 +4110,8 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
                 changes.append(f"  {day.date}: -{reduction}min → TAK v{wk[1]}")
             wk_tss = sum(estimate_tss_coggan(result[i], athlete) for i in indices)
 
-        # GOLV: förläng cykelpass i veckan
-        if wk_tss + wk_base < wk_floor:
-            deficit = wk_floor - (wk_tss + wk_base)
-            extendable = sorted(
-                [(i, result[i]) for i in indices
-                 if result[i].intervals_type in ("VirtualRide", "Ride") and result[i].duration_min > 0],
-                key=lambda x: x[1].duration_min
-            )
-            for idx, day in extendable:
-                if deficit <= 0: break
-                ftp = ftp_for_sport(day.intervals_type, athlete)
-                tss_per_min = (0.70**2 * 100) / 60
-                extra_min   = min(round(deficit / tss_per_min), 60)
-                if extra_min < 10: break
-                new_steps = list(day.workout_steps) + [WorkoutStep(
-                    duration_min=extra_min, zone="Z2",
-                    description=f"Extra Z2-block för TSS-golv @ {round(0.70*ftp)}W"
-                )]
-                result[idx] = day.model_copy(update={
-                    "duration_min": day.duration_min + extra_min,
-                    "workout_steps": new_steps,
-                    "title": day.title + f" (+{extra_min}min Z2)",
-                })
-                extra_tss = estimate_tss_coggan(result[idx], athlete) - estimate_tss_coggan(day, athlete)
-                deficit  -= extra_tss
-                changes.append(f"  {day.date}: +{extra_min}min Z2 → GOLV v{wk[1]}")
-            wk_tss = sum(estimate_tss_coggan(result[i], athlete) for i in indices)
-
         pct    = round((wk_tss + wk_base) / wk_budget * 100) if wk_budget > 0 else 0
-        status = "✅" if wk_floor <= wk_tss + wk_base <= wk_budget else "⚠️"
+        status = "✅" if wk_tss + wk_base <= wk_budget else "⚠️"
         week_summaries.append(f"v{wk[1]}: {round(wk_tss + wk_base)} TSS inkl. låsta pass {status} ({pct}% av {wk_budget})")
 
     total = sum(estimate_tss_coggan(d, athlete) for d in result)

@@ -4,15 +4,25 @@ from training_plan.core.cli import parse_args
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.integrations.services import *
+from training_plan.integrations.services import _stockholm_now_naive
 from training_plan.engine.analysis import *
+from training_plan.engine.insights import *
 from training_plan.engine.postprocess import *
 from training_plan.engine.ai import *
+from training_plan.engine.pipeline import *
 
 args = None
 
 
 def main(argv=None):
     global args
+
+    # Tvinga Python att använda UTF-8 för in- och utmatning så att å, ä, ö fungerar i Windows-terminaler
+    import sys
+    if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stdin.reconfigure(encoding='utf-8')
+
     args = parse_args(argv)
     common.args = args
     ensure_required_config()
@@ -22,7 +32,7 @@ def main(argv=None):
         wellness   = fetch_wellness(args.days_history)
         fitness    = fetch_fitness(args.days_history)
         activities = fetch_activities(args.days_history)
-        races      = fetch_races(180)
+        races      = fetch_races(365)
         planned    = fetch_planned_workouts(args.horizon)
         all_events = fetch_all_planned_events(days_back=28)
         log.info(f"  {len(activities)} aktiviteter | {len(wellness)} wellness | {len(races)} tävlingar | {len(planned)} planerade")
@@ -96,6 +106,8 @@ def main(argv=None):
     auto_signals = autoregulate_from_yesterday(yesterday_raw, state)
 
     morning = morning_questions(args.auto, today_wellness, yesterday_planned, yesterday_actuals)
+    if not args.auto and not args.dry_run:
+        save_morning_wellness(morning, today_wellness=today_wellness)
     vetos   = biometric_vetoes(hrv, morning.get("life_stress",1))
 
     # ── RETURN TO PLAY ───────────────────────────────────────────────────────
@@ -192,7 +204,7 @@ def main(argv=None):
 
     # ── SCHEDULE CONSTRAINTS ─────────────────────────────────────────────────
     constraints = parse_constraints_from_events(planned)
-    horizon_dates = [(date.today() + timedelta(days=i+1)).isoformat() for i in range(args.horizon)]
+    horizon_dates = [(date.today() + timedelta(days=i)).isoformat() for i in range(args.horizon + 1)]
     constraints_text = format_constraints_for_prompt(constraints, horizon_dates)
     if constraints:
         log.info(f"📅 Schema-begränsningar: {len(constraints)} regler från intervals.icu")
@@ -208,17 +220,138 @@ def main(argv=None):
     race_demands   = race_demands_analysis(races, activities_clean)
     coach_confidence = coach_confidence_analysis(dq, activities_clean, wellness_clean, fitness, hrv)
     state["learned_patterns"] = update_learned_patterns(state, all_events, activities_clean)
-    state["response_profile"] = {
-        "updated": date.today().isoformat(),
-        "session_quality": session_quality.get("category_scores", {}),
-    }
+    historical_validation, outcome_tracking = update_plan_outcome_tracking(state, activities_clean)
     development_needs = development_needs_analysis(
         phase, readiness, motivation, compliance, ftp_check,
         np_if_analysis, session_quality, race_demands, polarization,
     )
     block_objective = update_block_objective(state, mesocycle, phase, development_needs, race_demands)
+    learned_patterns_raw = state["learned_patterns"]
+    capacity_map = build_capacity_map(
+        activities_clean,
+        session_quality=session_quality,
+        race_demands=race_demands,
+        readiness=readiness,
+        np_if_analysis=np_if_analysis,
+        polarization=polarization,
+    )
+    nutrition_readiness = build_nutrition_readiness(
+        activities_clean,
+        race_demands=race_demands,
+        athlete=athlete,
+        phase=phase,
+    )
+    individualization_profile = build_individualization_profile(
+        state,
+        learned_patterns=learned_patterns_raw,
+        compliance=compliance,
+        session_quality=session_quality,
+        motivation=motivation,
+        outcome_tracking=outcome_tracking,
+    )
+    minimum_effective_dose = build_minimum_effective_dose(
+        ctl,
+        tsb_bgt,
+        readiness=readiness,
+        motivation=motivation,
+        compliance=compliance,
+        block_objective=block_objective,
+        development_needs=development_needs,
+        race_demands=race_demands,
+        coach_confidence=coach_confidence,
+    )
+    execution_friction = build_execution_friction(
+        constraints,
+        manual_workouts,
+        compliance=compliance,
+        learned_patterns=learned_patterns_raw,
+        motivation=motivation,
+        morning=morning,
+        minimum_effective_dose=minimum_effective_dose,
+    )
+    training_frequency_target = build_training_frequency_target(
+        args.horizon + 1,
+        manual_workouts,
+        readiness=readiness,
+        motivation=motivation,
+        compliance=compliance,
+        minimum_effective_dose=minimum_effective_dose,
+        execution_friction=execution_friction,
+        mesocycle=mesocycle,
+        morning=morning,
+    )
+    benchmark_system = build_benchmark_system(
+        activities_clean,
+        planned,
+        athlete=athlete,
+        phase=phase,
+        ftp_check=ftp_check,
+        race_demands=race_demands,
+        capacity_map=capacity_map,
+        nutrition_readiness=nutrition_readiness,
+        readiness=readiness,
+        np_if_analysis=np_if_analysis,
+    )
+    block_learning = build_block_learning(
+        state,
+        compliance=compliance,
+        session_quality=session_quality,
+        outcome_tracking=outcome_tracking,
+        development_needs=development_needs,
+        individualization_profile=individualization_profile,
+    )
+    performance_forecast = build_performance_forecast(
+        fitness,
+        readiness=readiness,
+        compliance=compliance,
+        trajectory=trajectory,
+        capacity_map=capacity_map,
+        coach_confidence=coach_confidence,
+        nutrition_readiness=nutrition_readiness,
+        block_learning=block_learning,
+    )
+    race_readiness = build_race_readiness_score(
+        readiness=readiness,
+        race_demands=race_demands,
+        session_quality=session_quality,
+        compliance=compliance,
+        taper_score=taper_score,
+        coach_confidence=coach_confidence,
+        performance_forecast=performance_forecast,
+        capacity_map=capacity_map,
+        nutrition_readiness=nutrition_readiness,
+    )
+    season_plan = build_season_plan(
+        phase=phase,
+        races=races,
+        mesocycle=mesocycle,
+        trajectory=trajectory,
+        development_needs=development_needs,
+        block_objective=block_objective,
+        benchmark_system=benchmark_system,
+        performance_forecast=performance_forecast,
+        capacity_map=capacity_map,
+        race_readiness=race_readiness,
+    )
+    planner_insights = {
+        "capacity_map": capacity_map,
+        "nutrition_readiness": nutrition_readiness,
+        "individualization_profile": individualization_profile,
+        "minimum_effective_dose": minimum_effective_dose,
+        "execution_friction": execution_friction,
+        "training_frequency_target": training_frequency_target,
+        "benchmark_system": benchmark_system,
+        "block_learning": block_learning,
+        "performance_forecast": performance_forecast,
+        "race_readiness": race_readiness,
+        "season_plan": season_plan,
+    }
+    state["planner_insights"] = {
+        "updated": date.today().isoformat(),
+        **{key: value.get("summary", "") for key, value in planner_insights.items()},
+    }
     save_state(state)
-    learned_patterns = format_learned_patterns(state["learned_patterns"])
+    learned_patterns = format_learned_patterns(learned_patterns_raw)
     log.info(f"💪 Readiness: {readiness['score']}/100 ({readiness['label']})")
     log.info(f"🎯 {development_needs['summary']}")
     log.info(f"🏁 {race_demands['summary']}")
@@ -226,6 +359,11 @@ def main(argv=None):
     log.info(f"🧭 {coach_confidence['summary']}")
 
     # Datum att exkludera från AI-planen = endast manuellt inlagda pass (AI-events regenereras alltid)
+    log.info(f"Capacity map: {capacity_map['summary']}")
+    log.info(f"Performance forecast: {performance_forecast['summary']}")
+    log.info(f"Race readiness: {race_readiness['summary']}")
+    log.info(f"Historical validation: {historical_validation['summary']}")
+    log.info(f"Outcome tracking: {outcome_tracking['summary']}")
     existing_plan_dates = locked_dates  # locked_dates = datum med manuella (ej AI) pass
     # TSS från manuella pass (AI-events räknas inte – de ska regenereras)
     base_tss_by_date = {}
@@ -236,8 +374,12 @@ def main(argv=None):
         base_tss_by_date[d] = base_tss_by_date.get(d, 0) + (w.get("planned_load", 0) or 0)
 
     log.info(f"🤖 Coachen granskar plan och dagsform...")
+    prompt_morning = dict(morning)
+    if not prompt_morning.get("time_available"):
+        prompt_morning["time_available"] = "Ingen explicit tidsgrans"
+
     prompt = build_prompt(
-        activities, wellness_clean, fitness, races, weather, morning, args.horizon,
+        activities, wellness_clean, fitness, races, weather, prompt_morning, args.horizon,
         manual_workouts, athlete, hrv, budgets, tsb_bgt, vetos, phase,
         existing_plan_summary, mesocycle, trajectory, compliance,
         workout_lib_text, ftp_check, yesterday_analysis, constraints_text,
@@ -250,27 +392,96 @@ def main(argv=None):
         exclude_dates=existing_plan_dates, development_needs=development_needs,
         block_objective=block_objective, race_demands=race_demands,
         session_quality=session_quality, coach_confidence=coach_confidence,
-        polarization=polarization,
+        polarization=polarization, historical_validation=historical_validation,
+        outcome_tracking=outcome_tracking, planner_insights=planner_insights,
     )
-    raw            = call_ai(args.provider, prompt)
-    plan           = parse_plan(raw)
+    review_context = {
+        "today": date.today().isoformat(),
+        "phase": phase.get("phase"),
+        "mesocycle": {
+            "block_number": mesocycle.get("block_number"),
+            "week_in_block": mesocycle.get("week_in_block"),
+            "is_deload": mesocycle.get("is_deload"),
+            "load_factor": mesocycle.get("load_factor"),
+        },
+        "trajectory": {
+            "message": trajectory.get("message"),
+            "required_weekly_tss": trajectory.get("required_weekly_tss"),
+            "required_daily_tss": trajectory.get("required_daily_tss"),
+        },
+        "block_objective": block_objective,
+        "development_needs": {
+            "summary": development_needs.get("summary"),
+            "must_hit_sessions": development_needs.get("must_hit_sessions", []),
+            "priorities": development_needs.get("priorities", [])[:3],
+        },
+        "race_demands": race_demands,
+        "readiness": readiness,
+        "motivation": motivation,
+        "compliance": {
+            "completion_rate": compliance.get("completion_rate"),
+            "intensity_missed": compliance.get("intensity_missed"),
+            "intensity_planned": compliance.get("intensity_planned"),
+        },
+        "coach_confidence": coach_confidence,
+        "session_quality": session_quality,
+        "capacity_map": {
+            "summary": capacity_map.get("summary"),
+            "weakest": capacity_map.get("weakest", []),
+            "strongest": capacity_map.get("strongest", []),
+        },
+        "performance_forecast": performance_forecast,
+        "race_readiness": race_readiness,
+        "nutrition_readiness": nutrition_readiness,
+        "minimum_effective_dose": minimum_effective_dose,
+        "execution_friction": execution_friction,
+        "training_frequency_target": training_frequency_target,
+        "benchmark_system": {
+            "summary": benchmark_system.get("summary"),
+            "benchmarks": benchmark_system.get("benchmarks", [])[:3],
+        },
+        "block_learning": block_learning,
+        "season_plan": {
+            "summary": season_plan.get("summary"),
+            "blocks": season_plan.get("blocks", [])[:4],
+        },
+        "historical_validation_summary": historical_validation.get("summary", ""),
+        "outcome_tracking_summary": outcome_tracking.get("summary", ""),
+    }
+
+    def apply_postprocess(candidate_plan):
+        return post_process(
+            candidate_plan, hrv, budgets, locked_dates, tsb_bgt, activities_clean, weather, athlete,
+            injury_note=morning.get('injury_today', ''), mesocycle=mesocycle,
+            constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
+            per_sport_acwr_data=sport_acwr, motivation=motivation,
+            phase=phase, races=races, wellness=wellness_clean,
+            base_tss_by_date=base_tss_by_date, horizon_days=args.horizon + 1,
+            time_available_text=morning.get("time_available", ""),
+        )
+
+    plan, changes, decision_trace = run_plan_pipeline(
+        args.provider,
+        prompt,
+        apply_postprocess,
+        athlete,
+        base_tss_by_date,
+        review_context,
+        max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "2")),
+        candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "3")),
+    )
     # Rensa coach-feedback om det inte finns faktisk aktivitetsdata att ge feedback om
     if not yesterday_analysis:
         plan = plan.model_copy(update={"yesterday_feedback": ""})
-    plan, changes  = post_process(
-        plan, hrv, budgets, locked_dates, tsb_bgt, activities_clean, weather, athlete,
-        injury_note=morning.get('injury_today', ''), mesocycle=mesocycle,
-        constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
-        per_sport_acwr_data=sport_acwr, motivation=motivation,
-        phase=phase, races=races, wellness=wellness_clean,
-        base_tss_by_date=base_tss_by_date, horizon_days=args.horizon + 1,  # idag + horizon dagar framåt
-    )
     planned_total_tss = sum(estimate_tss_coggan(d, athlete) for d in plan.days) + sum(base_tss_by_date.values())
     planned_daily_tss = planned_total_tss / max(args.horizon + 1, 1)
     planned_ramp = ctl_ramp_from_daily_tss(ctl, planned_daily_tss)
     log.info(f"📐 Planerad ramp från sparad plan: ca +{planned_ramp:.1f} CTL/vecka")
 
-    print_plan(plan, changes, mesocycle, trajectory, acwr_trend, taper_score, race_week, rtp_status)
+    print_plan(
+        plan, changes, mesocycle, trajectory, acwr_trend, taper_score, race_week, rtp_status,
+        planner_insights=planner_insights,
+    )
 
     if args.dry_run:
         print("\nDRY-RUN - ingenting sparades.")
@@ -314,7 +525,7 @@ def main(argv=None):
 
     # ── Spara Daglig Coach-anteckning ─────────────────────────────────────────
     if not args.dry_run:
-        save_daily_note_to_icu(plan, changes)
+        save_daily_note_to_icu(plan, changes, planner_insights=planner_insights)
     else:
         print("\n[DRY-RUN] Skulle ha sparat daglig coach-anteckning till intervals.")
 
@@ -327,7 +538,7 @@ def main(argv=None):
                 motivation=motivation, development_needs=development_needs,
                 block_objective=block_objective, race_demands=race_demands,
                 session_quality=session_quality, coach_confidence=coach_confidence,
-                polarization=polarization,
+                polarization=polarization, planner_insights=planner_insights,
             )
             if not args.dry_run:
                 save_weekly_report_to_icu(report)
@@ -341,7 +552,10 @@ def main(argv=None):
         print(f"\n✅ {mode_reason}\n")
         return
 
-    elif mode == "full":
+    record_plan_decision(state, plan, decision_trace, planned_total_tss, block_objective, race_demands)
+    save_state(state)
+
+    if mode == "full":
         started_ai = [w for w in ai_workouts if event_has_started(w, now_local)]
         deleted = delete_ai_workouts(ai_workouts, now_local)
         if deleted: log.info(f"  Tog bort {deleted} gamla AI-workouts")

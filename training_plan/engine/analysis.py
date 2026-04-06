@@ -484,6 +484,13 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
     }
 
 
+def _safe_date_str(activity) -> str:
+    try:
+        return activity["start_date_local"][:10]
+    except Exception:
+        return ""
+
+
 def _safe_date(activity) -> datetime:
     try:
         return datetime.strptime(activity["start_date_local"][:10], "%Y-%m-%d")
@@ -1204,5 +1211,3 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
     )
 
     return "\n".join(lines)
-
-

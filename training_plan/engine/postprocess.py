@@ -1,5 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.analysis import *
+from training_plan.engine.planning import classify_session_category
 
 # ══════════════════════════════════════════════════════════════════════════════
 # POST-PROCESSING – tvingande regler
@@ -96,6 +97,37 @@ def enforce_max_consecutive_rest(days):
                     rest_streak = []
                     break
     return days, changes
+
+
+def _time_available_minutes(value: str) -> int | None:
+    if not value:
+        return None
+    text = value.strip().lower()
+    hours_match = re.search(r"(\d+(?:[.,]\d+)?)\s*h", text)
+    mins_match = re.search(r"(\d+)\s*m", text)
+    if hours_match:
+        return round(float(hours_match.group(1).replace(",", ".")) * 60)
+    if mins_match:
+        return int(mins_match.group(1))
+    if text.isdigit():
+        return int(text)
+    return None
+
+
+def _trim_workout_steps(day: PlanDay, new_duration: int) -> list[WorkoutStep]:
+    if new_duration <= 0 or not day.workout_steps:
+        return []
+    remaining = new_duration
+    trimmed = []
+    for step in day.workout_steps:
+        if remaining <= 0:
+            break
+        step_duration = min(step.duration_min, remaining)
+        if step_duration <= 0:
+            continue
+        trimmed.append(step.model_copy(update={"duration_min": step_duration}))
+        remaining -= step_duration
+    return trimmed
 
 
 def enforce_hard_easy(days):
@@ -287,7 +319,6 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
         week_days_count = len(week_dates)
         # Veckobudget proportionell mot totala horisonten (fast nämnare)
         wk_budget = round(budget * week_days_count / total_days)
-        wk_floor  = round(wk_budget * floor_pct)
         wk_base   = round(sum(base_tss_by_date.get(d, 0) for d in week_dates))
 
         wk_tss = sum(estimate_tss_coggan(result[i], athlete) for i in indices)
@@ -297,12 +328,43 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
             surplus = wk_tss + wk_base - wk_budget
             light = sorted(
                 [(i, result[i]) for i in indices
-                 if result[i].intervals_type not in ("Rest", "WeightTraining") and result[i].duration_min > 30],
-                key=lambda x: estimate_tss_coggan(x[1], athlete)
+                 if result[i].intervals_type not in ("Rest", "WeightTraining")
+                 and result[i].duration_min > _MIN_DURATION.get(result[i].intervals_type, 30)],
+                key=lambda x: (
+                    {
+                        "recovery": 0,
+                        "general": 1,
+                        "endurance": 2,
+                        "long_ride": 3,
+                        "threshold": 4,
+                        "vo2": 5,
+                        "ftp_test": 6,
+                    }.get(classify_session_category(x[1].model_dump()), 2),
+                    estimate_tss_coggan(x[1], athlete),
+                )
             )
             for idx, day in light:
                 if surplus <= 0: break
-                reduction = min(30, day.duration_min - 30,
+                category = classify_session_category(day.model_dump())
+                min_duration = _MIN_DURATION.get(day.intervals_type, 30)
+                old_tss = estimate_tss_coggan(day, athlete)
+                if category in ("recovery", "general") and day.duration_min <= max(min_duration + 20, 50):
+                    result[idx] = day.model_copy(update={
+                        "intervals_type": "Rest",
+                        "duration_min": 0,
+                        "workout_steps": [],
+                        "nutrition": "",
+                        "title": f"{day.title} [filler borttagen]",
+                        "description": (
+                            day.description
+                            + "\n\nTSS-justering: lagprioriterad fyllnadsvolym togs bort for att skydda viktigare struktur."
+                        ),
+                        "vetoed": True,
+                    })
+                    surplus -= old_tss
+                    changes.append(f"  {day.date}: filler-pass borttaget -> TAK v{wk[1]}")
+                    continue
+                reduction = min(30, day.duration_min - min_duration,
                                 round(surplus / ((0.65**2 * 100) / 60)))
                 if reduction < 10: continue
                 new_dur   = day.duration_min - reduction
@@ -311,7 +373,6 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
                     last = new_steps[-1]
                     new_steps[-1] = last.model_copy(
                         update={"duration_min": max(5, last.duration_min - reduction)})
-                old_tss = estimate_tss_coggan(day, athlete)
                 result[idx] = day.model_copy(update={
                     "duration_min": new_dur, "workout_steps": new_steps,
                     "title": day.title + f" (-{reduction}min)",
@@ -320,41 +381,108 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
                 changes.append(f"  {day.date}: -{reduction}min → TAK v{wk[1]}")
             wk_tss = sum(estimate_tss_coggan(result[i], athlete) for i in indices)
 
-        # GOLV: förläng cykelpass i veckan
-        if wk_tss + wk_base < wk_floor:
-            deficit = wk_floor - (wk_tss + wk_base)
-            extendable = sorted(
-                [(i, result[i]) for i in indices
-                 if result[i].intervals_type in ("VirtualRide", "Ride") and result[i].duration_min > 0],
-                key=lambda x: x[1].duration_min
-            )
-            for idx, day in extendable:
-                if deficit <= 0: break
-                ftp = ftp_for_sport(day.intervals_type, athlete)
-                tss_per_min = (0.70**2 * 100) / 60
-                extra_min   = min(round(deficit / tss_per_min), 60)
-                if extra_min < 10: break
-                new_steps = list(day.workout_steps) + [WorkoutStep(
-                    duration_min=extra_min, zone="Z2",
-                    description=f"Extra Z2-block för TSS-golv @ {round(0.70*ftp)}W"
-                )]
-                result[idx] = day.model_copy(update={
-                    "duration_min": day.duration_min + extra_min,
-                    "workout_steps": new_steps,
-                    "title": day.title + f" (+{extra_min}min Z2)",
-                })
-                extra_tss = estimate_tss_coggan(result[idx], athlete) - estimate_tss_coggan(day, athlete)
-                deficit  -= extra_tss
-                changes.append(f"  {day.date}: +{extra_min}min Z2 → GOLV v{wk[1]}")
-            wk_tss = sum(estimate_tss_coggan(result[i], athlete) for i in indices)
-
         pct    = round((wk_tss + wk_base) / wk_budget * 100) if wk_budget > 0 else 0
-        status = "✅" if wk_floor <= wk_tss + wk_base <= wk_budget else "⚠️"
+        status = "✅" if wk_tss + wk_base <= wk_budget else "⚠️"
         week_summaries.append(f"v{wk[1]}: {round(wk_tss + wk_base)} TSS inkl. låsta pass {status} ({pct}% av {wk_budget})")
 
     total = sum(estimate_tss_coggan(d, athlete) for d in result)
     changes.append("TSS-AUDIT " + " | ".join(week_summaries) + f" | Totalt {round(total)} TSS")
     return result, changes
+
+
+def enforce_today_time_budget(days: list[PlanDay], time_available_text: str) -> tuple[list[PlanDay], list[str]]:
+    available_min = _time_available_minutes(time_available_text)
+    if available_min is None:
+        return days, []
+
+    today_str = date.today().isoformat()
+    today_indices = [
+        idx for idx, day in enumerate(days)
+        if day.date == today_str and day.intervals_type != "Rest" and day.duration_min > 0
+    ]
+    if not today_indices:
+        return days, []
+
+    def removable_priority(day: PlanDay) -> tuple[int, int]:
+        category = classify_session_category(day.model_dump())
+        min_duration = _MIN_DURATION.get(day.intervals_type, 0)
+        return (
+            0 if min_duration > available_min else 1,
+            {
+                "recovery": 0,
+                "general": 1,
+                "endurance": 2,
+                "strength": 3,
+                "long_ride": 4,
+                "threshold": 5,
+                "vo2": 6,
+                "ftp_test": 7,
+            }.get(category, 2),
+            -day.duration_min,
+        )
+
+    changes = []
+    total_today = sum(days[idx].duration_min for idx in today_indices)
+    if total_today <= available_min:
+        return days, []
+
+    active_today = list(today_indices)
+    for idx in sorted(active_today, key=lambda item: removable_priority(days[item])):
+        if total_today <= available_min or len(active_today) <= 1:
+            break
+        day = days[idx]
+        days[idx] = day.model_copy(update={
+            "intervals_type": "Rest",
+            "duration_min": 0,
+            "workout_steps": [],
+            "strength_steps": [],
+            "nutrition": "",
+            "title": f"{day.title} [tidsbudget]",
+            "description": (
+                day.description
+                + f"\n\nTidsjustering: dagens totala tid behovde rymmas inom {available_min} min."
+            ),
+            "vetoed": True,
+        })
+        total_today -= day.duration_min
+        active_today.remove(idx)
+        changes.append(f"TIDSBUDGET: {day.date} tog bort '{day.title}' for att rymmas inom {available_min}min idag")
+
+    if total_today > available_min and active_today:
+        idx = max(active_today, key=lambda item: days[item].duration_min)
+        day = days[idx]
+        other_total = total_today - day.duration_min
+        new_duration = max(available_min - other_total, 0)
+        min_duration = _MIN_DURATION.get(day.intervals_type, 0)
+        if new_duration < min_duration:
+            days[idx] = day.model_copy(update={
+                "intervals_type": "Rest",
+                "duration_min": 0,
+                "workout_steps": [],
+                "strength_steps": [],
+                "nutrition": "",
+                "title": f"{day.title} [tidsbudget -> vila]",
+                "description": (
+                    day.description
+                    + f"\n\nTidsjustering: dagens tid ({available_min} min) rackte inte for minimilangd."
+                ),
+                "vetoed": True,
+            })
+            changes.append(f"TIDSBUDGET: {day.date} ersatte '{day.title}' med vila eftersom {available_min}min ar under minimilangd")
+        else:
+            days[idx] = day.model_copy(update={
+                "duration_min": new_duration,
+                "workout_steps": _trim_workout_steps(day, new_duration),
+                "title": f"{day.title} ({day.duration_min}->{new_duration}min)",
+                "description": (
+                    day.description
+                    + f"\n\nTidsjustering: dagens totala tid klamptes till {available_min} min."
+                ),
+                "vetoed": True,
+            })
+            changes.append(f"TIDSBUDGET: {day.date} kortade '{day.title}' till {new_duration}min for att rymmas inom {available_min}min idag")
+
+    return days, changes
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NÄRINGSSTYRNING (periodiserad)
@@ -644,7 +772,8 @@ def enforce_per_sport_acwr_veto(days: list, per_sport: dict) -> tuple:
 def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlete,
                  injury_note="", mesocycle=None, constraints=None, today_wellness=None,
                  rtp_status=None, per_sport_acwr_data=None, motivation=None,
-                 phase=None, races=None, wellness=None, base_tss_by_date=None, horizon_days=None):
+                 phase=None, races=None, wellness=None, base_tss_by_date=None, horizon_days=None,
+                 time_available_text=""):
     days = plan.days
     all_c = []
 
@@ -669,7 +798,6 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
         days, c = enforce_per_sport_acwr_veto(days, per_sport_acwr_data); all_c += c
     days, c = enforce_sport_budget(days, budgets);     all_c += c
     days, c = enforce_hard_easy(days);                 all_c += c
-    days, c = enforce_max_consecutive_rest(days);      all_c += c
     days, c = enforce_strength_limit(days, max_strength=2); all_c += c
     days, c = enforce_rollski_limit(days, max_per_week=1);  all_c += c
     if mesocycle:
@@ -678,9 +806,9 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
     days     = ensure_warmup(days)
     days     = add_env_nutrition(days, weather, phase=phase, races=races, athlete=athlete, wellness=wellness)
     days     = enforce_min_duration(days)
+    days, c = enforce_today_time_budget(days, time_available_text); all_c += c
     return plan.model_copy(update={"days": days}), all_c
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MORGONCHECK
 # ══════════════════════════════════════════════════════════════════════════════
-

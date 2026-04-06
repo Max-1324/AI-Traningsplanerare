@@ -12,6 +12,9 @@ def load_state() -> dict:
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
 
+def is_ai_generated(w):
+    return AI_TAG in (w.get("description") or "")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 1 & 5. MESOCYCLE PERIODIZATION + AUTO DELOAD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1260,4 +1263,3 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # 7. WEEKLY REPORT
 # ══════════════════════════════════════════════════════════════════════════════
-
