@@ -40,13 +40,13 @@ def determine_mesocycle(fitness_history: list, activities: list, state: dict) ->
     forced_deload = False
     if weeks_since_deload >= 4 and week_in_block != 4:
         forced_deload = True
-        deload_reason = f"TVINGAD DELOAD: {weeks_since_deload} veckor utan vila. Kroppen behöver återhämtning."
+        deload_reason = f"FORCED DELOAD: {weeks_since_deload} weeks without rest. The body needs recovery."
         week_in_block = 4
     is_deload = (week_in_block == 4)
     if is_deload:
         load_factor = 0.60
         if not deload_reason:
-            deload_reason = "Planerad deload-vecka (vecka 4 av 4). Sänkt volym och intensitet."
+            deload_reason = "Planned deload week (week 4 of 4). Reduced volume and intensity."
     else:
         load_factor = 1.0 + (week_in_block - 1) * 0.05
     state["mesocycle_block"]       = block_number
@@ -104,14 +104,14 @@ def format_zone_times(zt) -> str:
 
 _KEY_SESSION_CATEGORIES = {"ftp_test", "long_ride", "threshold", "vo2"}
 _SESSION_CATEGORY_LABELS = {
-    "ftp_test":   "FTP-kalibrering",
-    "long_ride":  "Långpass / durability",
-    "threshold":  "Tröskel",
+    "ftp_test":   "FTP calibration",
+    "long_ride":  "Long ride / durability",
+    "threshold":  "Threshold",
     "vo2":        "VO2max",
-    "endurance":  "Aerob bas",
-    "strength":   "Styrka",
-    "recovery":   "Återhämtning",
-    "general":    "Generellt pass",
+    "endurance":  "Aerobic base",
+    "strength":   "Strength",
+    "recovery":   "Recovery",
+    "general":    "General session",
 }
 
 
@@ -123,7 +123,10 @@ def session_duration_min(item: dict) -> int:
 def session_intensity(item: dict) -> float | None:
     val = item.get("icu_intensity")
     try:
-        return float(val) if val is not None else None
+        if val is not None:
+            v = float(val)
+            return v / 100.0 if v > 5.0 else v
+        return None
     except Exception:
         return None
 
@@ -169,8 +172,8 @@ def polarization_analysis(activities: list, days: int = 21) -> dict:
             "low_pct": 0,
             "mid_pct": 0,
             "high_pct": 0,
-            "verdict": "Otillräcklig data.",
-            "summary": f"Polarisation: ingen aktivitetsdata senaste {days} dagarna.",
+            "verdict": "Insufficient data.",
+            "summary": f"Polarization: no activity data last {days} days.",
         }
 
     zone_mins = [0.0] * 7
@@ -192,13 +195,13 @@ def polarization_analysis(activities: list, days: int = 21) -> dict:
     high_pct = round(sum(zone_mins[3:]) / total * 100) if len(zone_mins) > 3 else 0
 
     if low_pct >= 75 and mid_pct <= 15:
-        verdict = "Bra polariserad fördelning."
+        verdict = "Good polarized distribution."
     elif mid_pct > 20:
-        verdict = "För mycket Z3/svartzon - flytta tid till ren Z2 eller ren Z4+."
+        verdict = "Too much Z3/black zone - shift time to pure Z2 or pure Z4+."
     elif high_pct < 8 and low_pct > 85:
-        verdict = "Mycket lugn fördelning - kan tåla mer kvalitetsstimuli om återhämtningen är god."
+        verdict = "Very easy distribution - can tolerate more quality stimuli if recovery is good."
     else:
-        verdict = "Neutral fördelning."
+        verdict = "Neutral distribution."
 
     return {
         "days": days,
@@ -206,7 +209,7 @@ def polarization_analysis(activities: list, days: int = 21) -> dict:
         "mid_pct": mid_pct,
         "high_pct": high_pct,
         "verdict": verdict,
-        "summary": f"Polarisation senaste {days}d: Z1-Z2 {low_pct}% | Z3 {mid_pct}% | Z4+ {high_pct}%. {verdict}",
+        "summary": f"Polarization last {days}d: Z1-Z2 {low_pct}% | Z3 {mid_pct}% | Z4+ {high_pct}%. {verdict}",
     }
 
 
@@ -218,9 +221,9 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
             "days": days,
             "overall_score": None,
             "category_scores": {},
-            "priority_alerts": ["Ingen aktivitetsdata för passkvalitet."],
+            "priority_alerts": ["No activity data for session quality."],
             "recent_sessions": [],
-            "summary": f"Passkvalitet: ingen data senaste {days} dagarna.",
+            "summary": f"Session quality: no data last {days} days.",
         }
 
     def clamp_local(v, lo=0, hi=100):
@@ -320,9 +323,9 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
             "poor": data["poor"],
         }
         if cat in _KEY_SESSION_CATEGORIES and data["count"] >= 2 and avg_score < 65:
-            alerts.append(f"{_SESSION_CATEGORY_LABELS.get(cat, cat)}: låg passkvalitet ({avg_score}/100).")
+            alerts.append(f"{_SESSION_CATEGORY_LABELS.get(cat, cat)}: low session quality ({avg_score}/100).")
         if cat in {"threshold", "vo2"} and data["count"] == 0:
-            alerts.append(f"{_SESSION_CATEGORY_LABELS.get(cat, cat)}: inga tydliga pass senaste {days} dagarna.")
+            alerts.append(f"{_SESSION_CATEGORY_LABELS.get(cat, cat)}: no clear sessions last {days} days.")
 
     key_scores = [
         v["avg_score"] for k, v in normalized_scores.items()
@@ -334,9 +337,9 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
         for s in recent_sessions[-5:]
     ]
     summary = (
-        f"Passkvalitet senaste {days}d: {overall_score}/100."
+        f"Session quality last {days}d: {overall_score}/100."
         if overall_score is not None else
-        f"Passkvalitet senaste {days}d: otillräcklig data för nyckelpass."
+        f"Session quality last {days}d: insufficient data for key sessions."
     )
     if alerts:
         summary += " " + " ".join(alerts[:2])
@@ -379,46 +382,46 @@ def race_demands_analysis(races: list, activities: list) -> dict:
     fueling_sims = sum(1 for a in recent_cycling if session_duration_min(a) >= 180)
 
     demands = [
-        "Aerob durability för 4-6h cykling i jämn fart.",
-        "Nutritionstolerans: 80-100g CHO/h på långa pass.",
-        "Pacing: undvik att köra långpass för hårt tidigt.",
-        "Sittställning och muskulär tålighet över många timmar.",
+        "Aerobic durability for 4-6h cycling at an even pace.",
+        "Nutrition tolerance: 80-100g CHO/h on long rides.",
+        "Pacing: avoid riding long rides too hard early on.",
+        "Riding position and muscular durability over many hours.",
     ]
     markers = [
-        f"Längsta cykelpass senaste 8v: {round(longest_ride/60, 1) if longest_ride else 0}h",
-        f"Antal cykelpass >=3h: {rides_3h}",
-        f"Antal cykelpass >=4h: {rides_4h}",
-        f"Tröskelpass senaste 21d: {threshold_21d}",
-        f"VO2-pass senaste 21d: {vo2_21d}",
-        f"Långa fueling-repetitioner (>=3h): {fueling_sims}",
+        f"Longest ride last 8w: {round(longest_ride/60, 1) if longest_ride else 0}h",
+        f"Number of rides >=3h: {rides_3h}",
+        f"Number of rides >=4h: {rides_4h}",
+        f"Threshold sessions last 21d: {threshold_21d}",
+        f"VO2 sessions last 21d: {vo2_21d}",
+        f"Long fueling repetitions (>=3h): {fueling_sims}",
     ]
     gaps = []
     if longest_ride < 240:
-        gaps.append("Durability-gap: längsta ride är under 4h.")
+        gaps.append("Durability gap: longest ride is under 4h.")
     if rides_4h < 2 and (days_to_race is None or days_to_race > 28):
-        gaps.append("Specifik uthållighets-gap: för få pass över 4h.")
+        gaps.append("Specific endurance gap: too few rides over 4h.")
     if fueling_sims < 2 and (days_to_race is None or days_to_race > 21):
-        gaps.append("Fueling-gap: för få långa nutrition-repetitioner.")
+        gaps.append("Fueling gap: too few long nutrition repetitions.")
     if threshold_21d < 1 and (days_to_race is None or days_to_race > 21):
-        gaps.append("Tröskel-gap: för lite arbete runt sustainable power senaste 3 veckorna.")
+        gaps.append("Threshold gap: too little work around sustainable power last 3 weeks.")
     if vo2_21d < 1 and (days_to_race is None or days_to_race > 35):
-        gaps.append("VO2-gap: ingen tydlig högkvalitativ syrestimuli senaste 3 veckorna.")
+        gaps.append("VO2 gap: no clear high-quality oxygen stimuli last 3 weeks.")
 
     must_have = []
-    if any("Durability-gap" in g for g in gaps):
-        must_have.append("1 långt Z2-pass som successivt byggs mot 4-6h.")
-    if any("Fueling-gap" in g for g in gaps):
-        must_have.append("1 lång nutrition-repetition med tydligt CHO-mål.")
-    if any("Tröskel-gap" in g for g in gaps):
-        must_have.append("1 tröskelpass för sustainable power/ekonomi.")
-    if any("VO2-gap" in g for g in gaps):
-        must_have.append("1 kort VO2-stimuli om återhämtningen tillåter.")
+    if any("Durability gap" in g for g in gaps):
+        must_have.append("1 long Z2 ride progressively building towards 4-6h.")
+    if any("Fueling gap" in g for g in gaps):
+        must_have.append("1 long nutrition repetition with clear CHO goal.")
+    if any("Threshold gap" in g for g in gaps):
+        must_have.append("1 threshold session for sustainable power/economy.")
+    if any("VO2 gap" in g for g in gaps):
+        must_have.append("1 short VO2 stimuli if recovery allows.")
 
     summary = (
         f"Race demands ({target_name}{' ' + target_date if target_date else ''}): "
         f"longest ride {round(longest_ride/60,1) if longest_ride else 0}h | >=4h rides {rides_4h} | "
-        f"tröskel {threshold_21d}/21d | VO2 {vo2_21d}/21d. "
-        + ("Gaps: " + " ".join(gaps[:3]) if gaps else "Nuvarande profil täcker huvudkraven hyggligt.")
+        f"threshold {threshold_21d}/21d | VO2 {vo2_21d}/21d. "
+        + ("Gaps: " + " ".join(gaps[:3]) if gaps else "Current profile covers main demands fairly well.")
     )
     return {
         "target_name": target_name,
@@ -438,33 +441,37 @@ def coach_confidence_analysis(data_quality: dict, activities: list, wellness: li
 
     if len(activities) < 10:
         score -= 20
-        reasons.append("få aktiviteter i historiken")
+        reasons.append(f"few activities in history ({len(activities)})")
     if len(wellness) < 7:
         score -= 15
-        reasons.append("begränsad wellness-data")
+        reasons.append(f"limited wellness data ({len(wellness)} days)")
     if len(fitness) < 14:
         score -= 10
-        reasons.append("kort fitnesshistorik")
+        reasons.append(f"short fitness history ({len(fitness)} days)")
     if hrv.get("state") == "INSUFFICIENT_DATA":
         score -= 10
-        reasons.append("HRV underlag otillräckligt")
+        reasons.append("insufficient HRV data")
     warnings = len((data_quality or {}).get("warnings", []))
     if warnings >= 5:
         score -= 20
-        reasons.append("mycket datakvalitetsvarningar")
+        reasons.append(f"many data quality warnings ({warnings})")
     elif warnings >= 2:
         score -= 10
-        reasons.append("viss datakvalitetsosäkerhet")
+        reasons.append(f"some data quality uncertainty ({warnings})")
+    
+    log.info(f"🔍 History check: {len(activities)} activities approved, {warnings} warnings found.")
+
 
     if score >= 85:
         level = "HIGH"
-        advice = "Data ser robust ut - coachen kan vara offensiv inom säkra ramar."
+        advice = "Data looks robust - the coach can be offensive within safe boundaries."
     elif score >= 65:
         level = "MEDIUM"
-        advice = "Tillräcklig datakvalitet - bra för coachning men vissa beslut bör vara pragmatiska."
+        level = "LOW"
+        advice = "Sufficient data quality - good for coaching but some decisions should be pragmatic."
     else:
         level = "LOW"
-        advice = "Osäker datagrund - prioritera enkelhet, genomförbarhet och tydliga nyckelpass."
+        advice = "Uncertain data foundation - prioritize simplicity, feasibility, and clear key sessions."
 
     return {
         "score": score,
@@ -472,7 +479,7 @@ def coach_confidence_analysis(data_quality: dict, activities: list, wellness: li
         "reasons": reasons,
         "advice": advice,
         "summary": f"Coach confidence: {level} ({score}/100). {advice}"
-                   + (f" Orsaker: {', '.join(reasons)}." if reasons else ""),
+                   + (f" Reasons: {', '.join(reasons)}." if reasons else ""),
     }
 
 
@@ -497,14 +504,14 @@ def ctl_trajectory(ctl_now: float, race_date: Optional[date], target_ctl: float,
     if race_date is None:
         return {
             "has_target": False,
-            "message": "Ingen A-tävling schemalagd. Kör generell uppbyggnad.",
+            "message": "No A-race scheduled. Doing general build.",
             "required_weekly_tss": None,
             "ctl_gap": None,
         }
     today = date.today()
     days_to_race = (race_date - today).days
     if days_to_race <= 0:
-        return {"has_target": False, "message": "Tävlingen har passerat.", "required_weekly_tss": None, "ctl_gap": None}
+        return {"has_target": False, "message": "The race has passed.", "required_weekly_tss": None, "ctl_gap": None}
     build_days = max(days_to_race - taper_days, 1)
     pre_taper_target = target_ctl + 4
     decay = 41 / 42
@@ -539,11 +546,11 @@ def ctl_trajectory(ctl_now: float, race_date: Optional[date], target_ctl: float,
         "build_days":          build_days,
         "taper_start":         (race_date - timedelta(days=taper_days)).isoformat(),
         "message": (
-            f"Mål: CTL {target_ctl} till {race_date.isoformat()} ({days_to_race}d kvar). "
-            f"Nu: CTL {round(ctl_now)}. Gap: {ctl_gap}. "
-            f"Kräver ~{required_weekly} TSS/vecka ({round(required_daily)} TSS/dag). "
-            f"Ramp: +{ramp_per_week} CTL/vecka. "
-            + ("✅ Uppnåeligt." if is_achievable else "⚠️ Aggressiv ramp – överväg att sänka mål-CTL.")
+            f"Goal: CTL {target_ctl} by {race_date.isoformat()} ({days_to_race}d left). "
+            f"Now: CTL {round(ctl_now)}. Gap: {ctl_gap}. "
+            f"Requires ~{required_weekly} TSS/week ({round(required_daily)} TSS/day). "
+            f"Ramp: +{ramp_per_week} CTL/week. "
+            + ("✅ Achievable." if is_achievable else "⚠️ Aggressive ramp – consider lowering target CTL.")
         ),
     }
 
@@ -558,15 +565,15 @@ def ctl_ontrack_check(trajectory: dict, ctl_now: float, fitness_history: list) -
     if len(fitness_history) >= 14:
         ctl_2w_ago = fitness_history[-14].get("ctl", ctl_now)
         actual_ramp = round((ctl_now - ctl_2w_ago) / 2, 1)
-        ramp_status = f" (faktisk ramp: +{actual_ramp} CTL/v, behövs: +{ramp})"
+        ramp_status = f" (actual ramp: +{actual_ramp} CTL/w, needed: +{ramp})"
     else:
         ramp_status = ""
     if gap <= 2:
-        return f"✅ ON TRACK – CTL inom {gap} poäng av Vätternrundan-målet{ramp_status}"
+        return f"✅ ON TRACK – CTL within {gap} points of target{ramp_status}"
     elif gap <= 8:
-        return f"🟡 LITE EFTER – {gap} CTL-poäng kvar, behöver +{ramp} CTL/vecka{ramp_status}"
+        return f"🟡 SLIGHTLY BEHIND – {gap} CTL points left, needs +{ramp} CTL/week{ramp_status}"
     else:
-        return f"🔴 EFTER SCHEMA – {gap} CTL-poäng kvar, öka veckovolym nu{ramp_status}"
+        return f"🔴 BEHIND SCHEDULE – {gap} CTL points left, increase weekly volume now{ramp_status}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -635,25 +642,25 @@ def compliance_analysis(planned_events: list, activities: list, days: int = 28) 
     key_completion_rate = round(key_done / key_total * 100) if key_total > 0 else 100
     patterns = []
     if completion_rate < 70:
-        patterns.append(f"⚠️ Låg compliance ({completion_rate}%) – atleten hoppar över för många pass.")
+        patterns.append(f"⚠️ Low compliance ({completion_rate}%) – athlete skips too many sessions.")
     elif completion_rate < 85:
-        patterns.append(f"Medel compliance ({completion_rate}%) – rum för förbättring.")
+        patterns.append(f"Medium compliance ({completion_rate}%) – room for improvement.")
     if weighted_completion_rate < completion_rate - 10:
         patterns.append(
-            f"⚠️ Nyckelpassen faller oftare än totalen ({weighted_completion_rate}% viktad compliance)."
+            f"⚠️ Key sessions missed more often than total ({weighted_completion_rate}% weighted compliance)."
         )
     if intensity_planned > 0 and intensity_missed / intensity_planned > 0.4:
         patterns.append(
-            f"⚠️ Atleten hoppar ofta över intensitetspass "
-            f"({intensity_missed}/{intensity_planned} missade). "
-            f"Överväg kortare/roligare intervaller."
+            f"⚠️ Athlete often skips intensity sessions "
+            f"({intensity_missed}/{intensity_planned} missed). "
+            f"Consider shorter/more fun intervals."
         )
     for sport, count in missed_by_type.items():
         sport_total = count + completed_by_type.get(sport, 0)
         if sport_total > 0 and count / sport_total > 0.5:
             patterns.append(
-                f"Atleten undviker {sport} ({count}/{sport_total} missade). "
-                f"Byt till alternativ sport eller sänk volym."
+                f"Athlete avoids {sport} ({count}/{sport_total} missed). "
+                f"Switch to alternative sport or lower volume."
             )
     return {
         "period_days":          days,
@@ -668,9 +675,9 @@ def compliance_analysis(planned_events: list, activities: list, days: int = 28) 
         "key_completion_rate": key_completion_rate,
         "patterns":             patterns,
         "summary": (
-            f"Compliance senaste {days}d: {total_completed}/{total_planned} pass genomförda "
-            f"({completion_rate}%). Viktad compliance: {weighted_completion_rate}%. Nyckelpass: {key_completion_rate}%. "
-            + (f"Missade intensitetspass: {intensity_missed}/{intensity_planned}. " if intensity_planned > 0 else "")
+            f"Compliance last {days}d: {total_completed}/{total_planned} sessions completed "
+            f"({completion_rate}%). Weighted compliance: {weighted_completion_rate}%. Key sessions: {key_completion_rate}%. "
+            + (f"Missed intensity sessions: {intensity_missed}/{intensity_planned}. " if intensity_planned > 0 else "")
             + " ".join(patterns)
         ),
     }
@@ -727,21 +734,21 @@ def format_learned_patterns(patterns: dict) -> str:
     """Formaterar lärda mönster för AI-prompten – visar bara signifikanta fynd."""
     if not patterns:
         return ""
-    days_sv = ["mån", "tis", "ons", "tor", "fre", "lör", "sön"]
+    days_en = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     lines = []
     for key, v in patterns.get("skip_by_sport_dow", {}).items():
         if v["planned"] >= 3 and v["skipped"] / v["planned"] > 0.5:
             sport, dow = key.rsplit("_", 1)
-            lines.append(f"  Atleten hoppar ofta {sport} på {days_sv[int(dow)]} ({v['skipped']}/{v['planned']} missade)")
+            lines.append(f"  Athlete often skips {sport} on {days_en[int(dow)]} ({v['skipped']}/{v['planned']} missed)")
     for sport, v in patterns.get("high_rpe_by_type", {}).items():
         if v["count"] >= 3 and v["high_rpe_count"] / v["count"] > 0.5:
-            lines.append(f"  {sport} ger ofta hög RPE ({v['high_rpe_count']}/{v['count']} pass RPE>7)")
+            lines.append(f"  {sport} often results in high RPE ({v['high_rpe_count']}/{v['count']} sessions RPE>7)")
     for slot, v in patterns.get("time_of_day", {}).items():
         if v["count"] >= 5 and slot == "AM" and v["completed"] / v["count"] < 0.70:
-            lines.append(f"  AM-pass genomförs sällan ({round(v['completed']/v['count']*100)}%) – undvik AM")
+            lines.append(f"  AM sessions are rarely completed ({round(v['completed']/v['count']*100)}%) – avoid AM")
     if not lines:
         return ""
-    return "LÄRDA MÖNSTER (historik):\n" + "\n".join(lines)
+    return "LEARNED PATTERNS (history):\n" + "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -750,243 +757,243 @@ def format_learned_patterns(patterns: dict) -> str:
 
 WORKOUT_LIBRARY = {
     "threshold_intervals": {
-        "name":  "Tröskelintervaller (Z4)",
+        "name":  "Threshold intervals (Z4)",
         "sport": ["VirtualRide", "Ride"],
         "phase": ["Base", "Build", "Grundtraning"],
         "levels": [
-            {"level": 1, "label": "4×4min Z4 / 3min vila",   "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 4, "z": "Z4", "desc": "Intervall 1 @ FTP"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z4", "desc": "Intervall 2"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z4", "desc": "Intervall 3"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z4", "desc": "Intervall 4"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 1, "label": "4×4min Z4 / 3min rest",   "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 4, "z": "Z4", "desc": "Interval 1 @ FTP"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z4", "desc": "Interval 2"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z4", "desc": "Interval 3"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z4", "desc": "Interval 4"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 50},
-            {"level": 2, "label": "4×5min Z4 / 3min vila",   "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 1 @ FTP"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 2"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 3"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 4"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 2, "label": "4×5min Z4 / 3min rest",   "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 5, "z": "Z4", "desc": "Interval 1 @ FTP"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 2"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 3"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 4"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 54},
-            {"level": 3, "label": "5×5min Z4 / 2.5min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 1"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 2"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 3"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 4"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Intervall 5"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 3, "label": "5×5min Z4 / 2.5min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 5, "z": "Z4", "desc": "Interval 1"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 2"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 3"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 4"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Interval 5"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 62},
-            {"level": 4, "label": "4×8min Z4 / 3min vila",   "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 8, "z": "Z4", "desc": "Intervall 1 – håll jämn effekt"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 8, "z": "Z4", "desc": "Intervall 2"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 8, "z": "Z4", "desc": "Intervall 3"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 8, "z": "Z4", "desc": "Intervall 4"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 4, "label": "4×8min Z4 / 3min rest",   "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 8, "z": "Z4", "desc": "Interval 1 - keep even power"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 8, "z": "Z4", "desc": "Interval 2"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 8, "z": "Z4", "desc": "Interval 3"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 8, "z": "Z4", "desc": "Interval 4"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 66},
-            {"level": 5, "label": "3×12min Z4 / 4min vila",  "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 12, "z": "Z4", "desc": "Intervall 1 – tänk tävlingstempo"},
-                {"d": 4, "z": "Z1", "desc": "Vila"},
-                {"d": 12, "z": "Z4", "desc": "Intervall 2"},
-                {"d": 4, "z": "Z1", "desc": "Vila"},
-                {"d": 12, "z": "Z4", "desc": "Intervall 3"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 5, "label": "3×12min Z4 / 4min rest",  "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 12, "z": "Z4", "desc": "Interval 1 - think race pace"},
+                {"d": 4, "z": "Z1", "desc": "Rest"},
+                {"d": 12, "z": "Z4", "desc": "Interval 2"},
+                {"d": 4, "z": "Z1", "desc": "Rest"},
+                {"d": 12, "z": "Z4", "desc": "Interval 3"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 69},
         ],
     },
     "vo2max_intervals": {
-        "name":  "VO2max-intervaller (Z5)",
+        "name":  "VO2max intervals (Z5)",
         "sport": ["VirtualRide"],
         "phase": ["Build", "Base", "Grundtraning"],
         "levels": [
-            {"level": 1, "label": "5×3min Z5 / 3min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning inkl 2x30s högt"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 1"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 2"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 3"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 4"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 5"}, {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 1, "label": "5×3min Z5 / 3min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up incl 2x30s hard"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 1"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 2"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 3"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 4"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 5"}, {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 55},
-            {"level": 2, "label": "6×3min Z5 / 3min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 1"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 2"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 3"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 4"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 5"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z5", "desc": "VO2max 6"}, {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 2, "label": "6×3min Z5 / 3min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 1"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 2"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 3"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 4"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 5"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z5", "desc": "VO2max 6"}, {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 61},
-            {"level": 3, "label": "5×4min Z5 / 3min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 4, "z": "Z5", "desc": "VO2max 1"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z5", "desc": "VO2max 2"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z5", "desc": "VO2max 3"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z5", "desc": "VO2max 4"}, {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 4, "z": "Z5", "desc": "VO2max 5"}, {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 3, "label": "5×4min Z5 / 3min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 4, "z": "Z5", "desc": "VO2max 1"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z5", "desc": "VO2max 2"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z5", "desc": "VO2max 3"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z5", "desc": "VO2max 4"}, {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 4, "z": "Z5", "desc": "VO2max 5"}, {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 60},
-            {"level": 4, "label": "4×5min Z5 / 4min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 5, "z": "Z5", "desc": "VO2max 1"}, {"d": 4, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z5", "desc": "VO2max 2"}, {"d": 4, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z5", "desc": "VO2max 3"}, {"d": 4, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z5", "desc": "VO2max 4"}, {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 4, "label": "4×5min Z5 / 4min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 5, "z": "Z5", "desc": "VO2max 1"}, {"d": 4, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z5", "desc": "VO2max 2"}, {"d": 4, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z5", "desc": "VO2max 3"}, {"d": 4, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z5", "desc": "VO2max 4"}, {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 61},
         ],
     },
     "tempo_sustained": {
-        "name":  "Tempopass (Z3)",
+        "name":  "Tempo session (Z3)",
         "sport": ["VirtualRide", "Ride"],
         "phase": ["Base", "Build", "Grundtraning"],
         "levels": [
-            {"level": 1, "label": "2×15min Z3 / 5min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
+            {"level": 1, "label": "2×15min Z3 / 5min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
                 {"d": 15, "z": "Z3", "desc": "Tempo block 1"},
-                {"d": 5, "z": "Z1", "desc": "Vila"},
+                {"d": 5, "z": "Z1", "desc": "Rest"},
                 {"d": 15, "z": "Z3", "desc": "Tempo block 2"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 60},
-            {"level": 2, "label": "2×20min Z3 / 5min vila", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
+            {"level": 2, "label": "2×20min Z3 / 5min rest", "steps": [
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
                 {"d": 20, "z": "Z3", "desc": "Tempo block 1"},
-                {"d": 5, "z": "Z1", "desc": "Vila"},
+                {"d": 5, "z": "Z1", "desc": "Rest"},
                 {"d": 20, "z": "Z3", "desc": "Tempo block 2"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 70},
             {"level": 3, "label": "1×40min Z3", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 40, "z": "Z3", "desc": "Tempo – konstant tryck"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 40, "z": "Z3", "desc": "Tempo - constant pressure"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 65},
             {"level": 4, "label": "1×60min Z3 (race sim)", "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 60, "z": "Z3", "desc": "Tempo – tävlingssimulering"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 60, "z": "Z3", "desc": "Tempo - race simulation"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 85},
         ],
     },
     "long_ride_progression": {
-        "name":  "Progressivt långpass (Vätternrundan-specifikt)",
+        "name":  "Progressive long ride (Event specific)",
         "sport": ["Ride", "VirtualRide"],
         "phase": ["Base", "Build", "Grundtraning"],
         "levels": [
-            {"level": 1, "label": "3h Z2 långpass",   "steps": [
-                {"d": 180, "z": "Z2", "desc": "Uthållighetsbas – jämnt tempo"},
+            {"level": 1, "label": "3h Z2 long ride",   "steps": [
+                {"d": 180, "z": "Z2", "desc": "Endurance base - even pace"},
             ], "total_min": 180},
-            {"level": 2, "label": "3.5h Z2 långpass",  "steps": [
-                {"d": 210, "z": "Z2", "desc": "Uthållighetsbas – fokus på nutrition"},
+            {"level": 2, "label": "3.5h Z2 long ride",  "steps": [
+                {"d": 210, "z": "Z2", "desc": "Endurance base - focus on nutrition"},
             ], "total_min": 210},
-            {"level": 3, "label": "4h Z2 långpass + tempo", "steps": [
-                {"d": 60,  "z": "Z2", "desc": "Uppvärmning – hitta rytmen"},
-                {"d": 20,  "z": "Z3", "desc": "Tempo-insats mitt i passet"},
-                {"d": 100, "z": "Z2", "desc": "Tillbaka till uthållighetszon"},
-                {"d": 60,  "z": "Z2", "desc": "Slutblock – håll formen"},
+            {"level": 3, "label": "4h Z2 long ride + tempo", "steps": [
+                {"d": 60,  "z": "Z2", "desc": "Warm-up - find the rhythm"},
+                {"d": 20,  "z": "Z3", "desc": "Tempo effort in the middle"},
+                {"d": 100, "z": "Z2", "desc": "Back to endurance zone"},
+                {"d": 60,  "z": "Z2", "desc": "Final block - keep form"},
             ], "total_min": 240},
-            {"level": 4, "label": "4.5h simulering", "steps": [
-                {"d": 90,  "z": "Z2", "desc": "Block 1 – hitta Vätternrundan-tempo"},
-                {"d": 10,  "z": "Z3", "desc": "Tempo-stomp (simulerar backe)"},
+            {"level": 4, "label": "4.5h simulation", "steps": [
+                {"d": 90,  "z": "Z2", "desc": "Block 1 - find race pace"},
+                {"d": 10,  "z": "Z3", "desc": "Tempo stomp (simulates hill)"},
                 {"d": 80,  "z": "Z2", "desc": "Block 2"},
-                {"d": 10,  "z": "Z3", "desc": "Tempo-stomp"},
-                {"d": 80,  "z": "Z2", "desc": "Block 3 – trötthetssimulering"},
+                {"d": 10,  "z": "Z3", "desc": "Tempo stomp"},
+                {"d": 80,  "z": "Z2", "desc": "Block 3 - fatigue simulation"},
             ], "total_min": 270},
             {"level": 5, "label": "5h+ race simulation", "steps": [
-                {"d": 120, "z": "Z2", "desc": "Etapp 1 – full race nutrition (90g CHO/h)"},
-                {"d": 15,  "z": "Z3", "desc": "Tempo – simulerar Omberg"},
-                {"d": 90,  "z": "Z2", "desc": "Etapp 2 – mental uthållighet"},
-                {"d": 15,  "z": "Z3", "desc": "Slutpush – simulerar sista 30km"},
-                {"d": 60,  "z": "Z2", "desc": "Utåkning – lugnt till mål"},
+                {"d": 120, "z": "Z2", "desc": "Stage 1 - full race nutrition (90g CHO/h)"},
+                {"d": 15,  "z": "Z3", "desc": "Tempo - simulates main climb"},
+                {"d": 90,  "z": "Z2", "desc": "Stage 2 - mental endurance"},
+                {"d": 15,  "z": "Z3", "desc": "Final push - simulates last 30km"},
+                {"d": 60,  "z": "Z2", "desc": "Roll out - easy to finish"},
             ], "total_min": 300},
         ],
     },
 
     # ── Tävlingsförberedelse: Vätternrundan-specifika pass ─────────────────
     "race_simulation": {
-        "name":  "Tävlingssimulering (Vätternrundan-specifik)",
+        "name":  "Race simulation (Event specific)",
         "sport": ["Ride", "VirtualRide"],
         "phase": ["Build", "Taper"],
         "levels": [
             {"level": 1, "label": "2h Z2 + 30min Z3 + 15min Z4", "steps": [
-                {"d": 120, "z": "Z2", "desc": "Race-tempo – öva nutrition (60g CHO/h)"},
-                {"d": 30,  "z": "Z3", "desc": "Tempohöjning – simulerar kuperat avsnitt"},
-                {"d": 15,  "z": "Z4", "desc": "Race-insats – håll jämn effekt"},
-                {"d": 15,  "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 120, "z": "Z2", "desc": "Race pace - practice nutrition (60g CHO/h)"},
+                {"d": 30,  "z": "Z3", "desc": "Tempo increase - simulates hilly section"},
+                {"d": 15,  "z": "Z4", "desc": "Race effort - keep even power"},
+                {"d": 15,  "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 180},
             {"level": 2, "label": "3h Z2 + 45min Z3 + 20min Z4", "steps": [
-                {"d": 180, "z": "Z2", "desc": "Lång bas – fokus på pacing och nutrition"},
-                {"d": 45,  "z": "Z3", "desc": "Tempoblocket – simulerar kupor"},
-                {"d": 20,  "z": "Z4", "desc": "Slutinsats – avsluta starkt"},
-                {"d": 15,  "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 180, "z": "Z2", "desc": "Long base - focus on pacing and nutrition"},
+                {"d": 45,  "z": "Z3", "desc": "Tempo block - simulates hills"},
+                {"d": 20,  "z": "Z4", "desc": "Final effort - finish strong"},
+                {"d": 15,  "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 260},
             {"level": 3, "label": "4h Z2 + 60min Z3 + 20min Z4", "steps": [
-                {"d": 240, "z": "Z2", "desc": "Full tävlingsbas – 90g CHO/h, testa hela race-dag-nutritionen"},
-                {"d": 60,  "z": "Z3", "desc": "Trötthetssimulering – kupor efter 4h"},
-                {"d": 20,  "z": "Z4", "desc": "Slutkick – simulera Omberg-insats"},
-                {"d": 20,  "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 240, "z": "Z2", "desc": "Full race base - 90g CHO/h, test all race day nutrition"},
+                {"d": 60,  "z": "Z3", "desc": "Fatigue simulation - hills after 4h"},
+                {"d": 20,  "z": "Z4", "desc": "Final kick - simulate main climb effort"},
+                {"d": 20,  "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 340},
         ],
     },
     "climb_simulation": {
-        "name":  "Omberg-simulering (backspecifik Z4)",
+        "name":  "Climb simulation (hill specific Z4)",
         "sport": ["VirtualRide", "Ride"],
         "phase": ["Build", "Taper"],
         "levels": [
-            {"level": 1, "label": "4×8min Z4 Omberg-simulering", "steps": [
-                {"d": 20, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 8,  "z": "Z4", "desc": "Omberg-intervall 1 – 5% lutningskänsla, jämn effekt"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 8,  "z": "Z4", "desc": "Omberg-intervall 2"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 8,  "z": "Z4", "desc": "Omberg-intervall 3"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 8,  "z": "Z4", "desc": "Omberg-intervall 4 – avsluta starkt"},
-                {"d": 15, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 1, "label": "4×8min Z4 Climb simulation", "steps": [
+                {"d": 20, "z": "Z2", "desc": "Warm-up"},
+                {"d": 8,  "z": "Z4", "desc": "Climb interval 1 - 5% incline feel, even power"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 8,  "z": "Z4", "desc": "Climb interval 2"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 8,  "z": "Z4", "desc": "Climb interval 3"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 8,  "z": "Z4", "desc": "Climb interval 4 - finish strong"},
+                {"d": 15, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 79},
-            {"level": 2, "label": "5×10min Z4 Omberg-simulering", "steps": [
-                {"d": 20, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 10, "z": "Z4", "desc": "Intervall 1"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 10, "z": "Z4", "desc": "Intervall 2"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 10, "z": "Z4", "desc": "Intervall 3"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 10, "z": "Z4", "desc": "Intervall 4"},
-                {"d": 4,  "z": "Z1", "desc": "Vila"},
-                {"d": 10, "z": "Z4", "desc": "Intervall 5 – simulera topp av Omberg"},
-                {"d": 15, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 2, "label": "5×10min Z4 Climb simulation", "steps": [
+                {"d": 20, "z": "Z2", "desc": "Warm-up"},
+                {"d": 10, "z": "Z4", "desc": "Interval 1"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 10, "z": "Z4", "desc": "Interval 2"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 10, "z": "Z4", "desc": "Interval 3"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 10, "z": "Z4", "desc": "Interval 4"},
+                {"d": 4,  "z": "Z1", "desc": "Rest"},
+                {"d": 10, "z": "Z4", "desc": "Interval 5 - simulate top of climb"},
+                {"d": 15, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 101},
         ],
     },
     "pacing_practice": {
-        "name":  "Pacingträning – negativ split",
+        "name":  "Pacing practice - negative split",
         "sport": ["Ride", "VirtualRide"],
         "phase": ["Build", "Taper"],
         "levels": [
-            {"level": 1, "label": "2h negativ split (Z2 → Z3)", "steps": [
-                {"d": 60, "z": "Z2", "desc": "Första timmen – håll igen, spara energi"},
-                {"d": 50, "z": "Z3", "desc": "Andra timmen – öka gradvis till tempofart"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 1, "label": "2h negative split (Z2 → Z3)", "steps": [
+                {"d": 60, "z": "Z2", "desc": "First hour - hold back, save energy"},
+                {"d": 50, "z": "Z3", "desc": "Second hour - increase gradually to tempo pace"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 120},
-            {"level": 2, "label": "3h negativ split (Z2 → Z3 → Z4)", "steps": [
-                {"d": 90, "z": "Z2", "desc": "Uthållighetsbas – håll effekten låg"},
-                {"d": 60, "z": "Z3", "desc": "Tempo-bygg – öka gradvis"},
-                {"d": 20, "z": "Z4", "desc": "Avslutande push – simulerar finalen"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+            {"level": 2, "label": "3h negative split (Z2 → Z3 → Z4)", "steps": [
+                {"d": 90, "z": "Z2", "desc": "Endurance base - keep power low"},
+                {"d": 60, "z": "Z3", "desc": "Tempo build - increase gradually"},
+                {"d": 20, "z": "Z4", "desc": "Final push - simulates the finale"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ], "total_min": 180},
         ],
     },
@@ -996,9 +1003,9 @@ WORKOUT_LIBRARY = {
 def recommend_prehab(injury_note: str, dominant_sport: str) -> dict:
     """Väljer rätt prehab-rutin baserat på skada och dominant sport."""
     inj = (injury_note or "").lower()
-    if any(k in inj for k in ["knä", "höft", "lår", "rygg", "it-band", "piriformis", "ischiasnerv"]):
+    if any(k in inj for k in ["knee", "knä", "hip", "höft", "thigh", "lår", "back", "rygg", "it-band", "piriformis", "ischiasnerv"]):
         key = "cyclist"
-    elif any(k in inj for k in ["vad", "hälsena", "fot", "ankel", "shin", "skena", "plantar"]):
+    elif any(k in inj for k in ["calf", "vad", "achilles", "hälsena", "foot", "fot", "ankle", "ankel", "shin", "skena", "plantar"]):
         key = "runner"
     elif dominant_sport in ("Ride", "VirtualRide"):
         key = "cyclist"
@@ -1015,15 +1022,15 @@ def pre_race_logistics_advice(days_to_race: int) -> str:
         return ""
     advice = []
     if days_to_race == 14:
-        advice.append("2 veckor till start: Bekräfta boende, packlista klar, hjälm/skor kontrollerade.")
+        advice.append("2 weeks to start: Confirm accommodation, packing list ready, helmet/shoes checked.")
     elif days_to_race == 7:
-        advice.append("1 vecka: Cykelservice (däck, vajrar, bromsbelägg). Testa race-nutrition i träning. Ladda Garmin.")
+        advice.append("1 week: Bike service (tires, cables, brake pads). Test race nutrition in training. Charge Garmin.")
     elif days_to_race == 3:
-        advice.append("3 dagar: Inregistrering. Starta kolhydratladning. Sov 8h+. Minimal resestress.")
+        advice.append("3 days: Registration. Start carb loading. Sleep 8h+. Minimal travel stress.")
     elif days_to_race == 2:
-        advice.append("Fördag: Vila och förbered. Fixa nummerlapp/chip. Packad väska kvällen innan. Sov 9h om möjligt.")
+        advice.append("Day before: Rest and prepare. Fix bib/chip. Pack bag the night before. Sleep 9h if possible.")
     elif days_to_race == 1:
-        advice.append("IMORGON ÄR DET RACE: Frukost: ris/havregryn + banan. Packad kväll. 9h sömn. Ingen ny mat.")
+        advice.append("TOMORROW IS RACE DAY: Breakfast: rice/oatmeal + banana. Pack bag. 9h sleep. No new foods.")
     return " | ".join(advice)
 
 
@@ -1045,7 +1052,7 @@ def get_strength_workout_for_phase(mesocycle: dict) -> dict:
 
 
 def get_next_workouts(levels: dict, phase: str) -> str:
-    lines = ["PASSBIBLIOTEK – Nästa progression per typ:"]
+    lines = ["WORKOUT LIBRARY – Next progression per type:"]
     for wk_key, wk_def in WORKOUT_LIBRARY.items():
         if phase not in wk_def.get("phase", []):
             continue
@@ -1054,13 +1061,13 @@ def get_next_workouts(levels: dict, phase: str) -> str:
         lvl = wk_def["levels"][rec_level - 1]
         steps_text = " → ".join(f"{s['d']}min {s['z']}" for s in lvl["steps"])
         lines.append(
-            f"  [{wk_key}] {wk_def['name']} — Nivå {rec_level}: {lvl['label']}"
-            f"\n    Steg: {steps_text} (Totalt: {lvl['total_min']}min)"
+            f"  [{wk_key}] {wk_def['name']} — Level {rec_level}: {lvl['label']}"
+            f"\n    Steps: {steps_text} (Total: {lvl['total_min']}min)"
             f"\n    Sport: {', '.join(wk_def['sport'])}"
         )
         if rec_level < len(wk_def["levels"]):
             nxt = wk_def["levels"][rec_level]
-            lines.append(f"    → NÄSTA NIVÅ ({rec_level+1}): {nxt['label']} ({nxt['total_min']}min)")
+            lines.append(f"    → NEXT LEVEL ({rec_level+1}): {nxt['label']} ({nxt['total_min']}min)")
     return "\n".join(lines)
 
 
@@ -1105,10 +1112,10 @@ def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yes
     is_mastered = (rpe is None and feel is None) or (rpe is not None and rpe <= 7 and feel is not None and feel >= 3)
 
     if is_mastered:
-        log.info(f"✅ Passet '{wk_key}' bemästrat (RPE: {rpe or 'N/A'}, Känsla: {feel or 'N/A'}).")
+        log.info(f"✅ Session '{wk_key}' mastered (RPE: {rpe or 'N/A'}, Feel: {feel or 'N/A'}).")
         advance_workout_level(wk_key, state) # Denna funktion sparar state
     elif rpe is not None or feel is not None:
-        log.info(f"🟡 Passet '{wk_key}' genomfört men ej bemästrat (RPE: {rpe}, Känsla: {feel}). Avancerar ej.")
+        log.info(f"🟡 Session '{wk_key}' completed but not mastered (RPE: {rpe}, Feel: {feel}). Not advancing.")
 
 
 def advance_workout_level(wk_key: str, state: dict):
@@ -1119,7 +1126,7 @@ def advance_workout_level(wk_key: str, state: dict):
         levels[wk_key] = current + 1
         state["workout_levels"] = levels
         save_state(state)
-        log.info(f"📈 Passbibliotek: {wk_key} avancerade till nivå {current + 1}")
+        log.info(f"📈 Workout library: {wk_key} advanced to level {current + 1}")
 
 
 def autoregulate_from_yesterday(yesterday_raw: dict, state: dict) -> list:
@@ -1148,17 +1155,17 @@ def autoregulate_from_yesterday(yesterday_raw: dict, state: dict) -> list:
             levels[wk_key] = current + steps
             state["workout_levels"] = levels
             save_state(state)
-            log.info(f"⚡ AUTOREGULERING: {wk_key} +{steps} nivåer (RPE {rpe}, Känsla {feel})")
+            log.info(f"⚡ AUTOREGULATION: {wk_key} +{steps} levels (RPE {rpe}, Feel {feel})")
             signals.append(
-                f"AUTOREGULERING: Atleten presterade exceptionellt igår (RPE {rpe}/10, Känsla {feel}/5). "
-                f"Passprogressionen {wk_key} avancerad {steps} steg. "
-                f"Överväg FTP-test inom 7 dagar – nuvarande FTP kan vara underskattad."
+                f"AUTOREGULATION: Athlete performed exceptionally well yesterday (RPE {rpe}/10, Feel {feel}/5). "
+                f"Workout progression {wk_key} advanced {steps} steps. "
+                f"Consider an FTP test within 7 days – current FTP may be underestimated."
             )
 
     if missed:
         signals.append(
-            "MISSAT PASS IGÅR: Kompensera INTE med extra volym idag. "
-            "Behåll planerat TSS-tak. Närmaste lätta dag prioriterar maximal återhämtning."
+            "MISSED SESSION YESTERDAY: Do NOT compensate with extra volume today. "
+            "Keep planned TSS limit. Nearest easy day prioritizes maximum recovery."
         )
 
     return signals
@@ -1188,7 +1195,7 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
                     "needs_test": False,
                     "current_ftp": current_ftp,
                     "if_suggests_update": False,
-                    "recommendation": f"FTP-test redan schemalagt ({p.get('start_date_local', '')[:10]}).",
+                    "recommendation": f"FTP test already scheduled ({p.get('start_date_local', '')[:10]}).",
                     "reasons": [],
                     "suggested_protocol": ""
                 }
@@ -1223,18 +1230,18 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
     reasons = []
     if days_since is None:
         needs_test = True
-        reasons.append("Inget FTP-test hittat i historiken")
+        reasons.append("No FTP test found in history")
     elif days_since > 42:
         needs_test = True
-        reasons.append(f"{days_since} dagar sedan senaste test (rekommenderat: var 6:e vecka)")
+        reasons.append(f"{days_since} days since last test (recommended: every 6th week)")
     if if_suggests_update:
         needs_test = True
-        reasons.append(f"{high_if_count} av senaste {len(recent_ifs)} pass hade IF > 1.05 – FTP kan vara för låg")
+        reasons.append(f"{high_if_count} of last {len(recent_ifs)} sessions had IF > 1.05 – FTP may be too low")
     recommendation = ""
     if needs_test:
-        recommendation = "🔬 DAGS FÖR FTP-TEST! " + ". ".join(reasons) + "."
+        recommendation = "🔬 TIME FOR FTP TEST! " + ". ".join(reasons) + "."
     else:
-        recommendation = f"FTP-test OK (senast {days_since}d sedan)."
+        recommendation = f"FTP test OK (last {days_since}d ago)."
     return {
         "days_since_test":    days_since,
         "needs_test":         needs_test,
@@ -1243,19 +1250,19 @@ def ftp_test_check(activities: list, planned: list, athlete: dict) -> dict:
         "recommendation":     recommendation,
         "reasons":            reasons,
         "suggested_protocol": (
-            "Rekommenderat protokoll – välj ETT av dessa:\n"
+            "Recommended protocol - choose ONE of these:\n"
             "\n"
-            "  A) RAMPTEST (rekommenderas för nybörjare/inomhus):\n"
-            "     Uppvärmning 10min Z1 → Ramp: höj watt 20W var 1min tills utmattning.\n"
-            "     Startwatt: ca 50% FTP. FTP = 75% av högsta genomförda minuts snittpuls.\n"
-            "     Total tid ca 25-35min. Enkelt att genomföra maximalt.\n"
+            "  A) RAMP TEST (recommended for beginners/indoors):\n"
+            "     Warm-up 10min Z1 → Ramp: increase power 20W every 1min until exhaustion.\n"
+            "     Starting watts: approx 50% FTP. FTP = 75% of highest completed minute average power.\n"
+            "     Total time approx 25-35min. Easy to perform to max.\n"
             "\n"
-            "  B) 20-MINUTERSTEST (klassisk):\n"
-            "     Uppvärmning 15min Z2 + 2×3min Z4 + 5min Z1 →\n"
-            "     20min all-out ansträngning → FTP = snittwatt × 0.95\n"
-            "     Total tid ca 50-60min. Kräver erfarenhet av jämn ansträngning.\n"
+            "  B) 20-MINUTE TEST (classic):\n"
+            "     Warm-up 15min Z2 + 2×3min Z4 + 5min Z1 →\n"
+            "     20min all-out effort → FTP = average power × 0.95\n"
+            "     Total time approx 50-60min. Requires experience with even pacing.\n"
             "\n"
-            "  Kör på utvilad dag (TSB > 5). Full gas. Zwift/Garmin mäter automatiskt."
+            "  Do on a rested day (TSB > 5). Full gas. Zwift/Garmin measures automatically."
         ) if needs_test else "",
     }
 

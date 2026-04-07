@@ -63,4 +63,4 @@ args = None
 
 def ensure_required_config():
     if not ATHLETE_ID or not INTERVALS_KEY:
-        sys.exit("Satt INTERVALS_ATHLETE_ID och INTERVALS_API_KEY i din .env.")
+        sys.exit("Set INTERVALS_ATHLETE_ID and INTERVALS_API_KEY in your .env.")

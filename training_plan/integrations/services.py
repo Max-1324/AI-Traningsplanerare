@@ -89,9 +89,9 @@ def save_morning_wellness(morning, today_wellness=None):
             timeout=15,
             json=payload,
         ).raise_for_status()
-        log.info("Wellness uppdaterad med morgonsvar.")
+        log.info("Wellness updated with morning responses.")
     except Exception as e:
-        log.warning(f"Kunde inte spara morgon-wellness: {e}")
+        log.warning(f"Could not save morning wellness: {e}")
 
 def save_daily_note_to_icu(plan, changes, planner_insights=None):
     """
@@ -104,7 +104,7 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
     yesterday_str = (today_date - timedelta(days=1)).isoformat()
     
     # --- Bygg innehåll för IDAG ---
-    lines_today = ["🤖 DAGENS SAMMANFATTNING:"]
+    lines_today = ["🤖 DAILY SUMMARY:"]
     lines_today.append(plan.summary)
 
     if planner_insights:
@@ -141,34 +141,34 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
         lines_today.append("")
         lines_today.append("🧪 PLAN REVIEW:")
         lines_today.append(
-            f"Beslut: {trace.action}"
-            + (" (override efter max varv)" if trace.used_with_override else "")
+            f"Decision: {trace.action}"
+            + (" (override after max iterations)" if trace.used_with_override else "")
         )
         if trace.selected_candidate:
-            lines_today.append(f"Vald kandidat: {trace.selected_candidate}")
+            lines_today.append(f"Selected candidate: {trace.selected_candidate}")
         lines_today.append(
-            f"Scores: Effekt {scores.effectiveness}/10 | Risk {scores.risk}/10 | "
+            f"Scores: Effect {scores.effectiveness}/10 | Risk {scores.risk}/10 | "
             f"Specificitet {scores.specificity}/10 | Enkelhet {scores.simplicity}/10 | "
             f"Confidence {scores.confidence}/10"
         )
         if trace.review and trace.review.summary:
             lines_today.append(f"Review: {trace.review.summary}")
         if trace.rationale:
-            lines_today.append(f"Varfor vald: {trace.rationale}")
+            lines_today.append(f"Why selected: {trace.rationale}")
         if trace.review and trace.review.must_fix:
             lines_today.append("Must-fix: " + " | ".join(trace.review.must_fix[:3]))
         if trace.candidate_pool_summary:
-            lines_today.append("Kandidatpool:")
+            lines_today.append("Candidate pool:")
             for line in trace.candidate_pool_summary[:5]:
                 lines_today.append(f"  - {line}")
         if trace.outcome_tracking_summary:
             lines_today.append(f"Outcome: {trace.outcome_tracking_summary}")
         if trace.historical_validation_summary:
-            lines_today.append(f"Historik: {trace.historical_validation_summary}")
+            lines_today.append(f"History: {trace.historical_validation_summary}")
         
     if changes:
         lines_today.append("")
-        lines_today.append("🔧 JUSTERINGAR (Post-processing):")
+        lines_today.append("🔧 ADJUSTMENTS (Post-processing):")
         for c in changes:
             lines_today.append(f"  • {c}")
     note_today = "\n".join(lines_today)
@@ -176,7 +176,7 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
     # --- Bygg innehåll för IGÅR ---
     note_yesterday = None
     if plan.yesterday_feedback:
-            note_yesterday = f"📝 COACH-FEEDBACK:\n{plan.yesterday_feedback}"
+            note_yesterday = f"📝 COACH FEEDBACK:\n{plan.yesterday_feedback}"
     
     try:
         # Rensa tidigare skapade loggar från idag OCH igår (för att undvika dubbletter)
@@ -189,13 +189,13 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
             if e.get("category") == "NOTE":
                 date_local = e.get("start_date_local", "")[:10]
                 
-                if e.get("name") == "🤖 AI Coach Logg" and date_local == today_str:
+                if e.get("name") == "🤖 AI Coach Log" and date_local == today_str:
                     requests.put(
                         f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
                         auth=AUTH, timeout=15, json=[{"id": e["id"]}],
                     ).raise_for_status()
                 
-                if e.get("name") == "📝 Coach-feedback" and date_local == yesterday_str:
+                if e.get("name") == "📝 Coach Feedback" and date_local == yesterday_str:
                     requests.put(
                         f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
                         auth=AUTH, timeout=15, json=[{"id": e["id"]}],
@@ -205,7 +205,7 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
         requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
             "category": "NOTE",
             "start_date_local": today_str + "T05:00:00",
-            "name": "🤖 AI Coach Logg",
+            "name": "🤖 AI Coach Log",
             "description": note_today + f"\n\n{AI_TAG}",
             "color": "#8E44AD"  # Lila färg
         }).raise_for_status()
@@ -215,14 +215,14 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
             requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
                 "category": "NOTE",
                 "start_date_local": yesterday_str + "T18:00:00",
-                "name": "📝 Coach-feedback",
+                "name": "📝 Coach Feedback",
                 "description": note_yesterday + f"\n\n{AI_TAG}",
                 "color": "#8E44AD"  # Lila färg
             }).raise_for_status()
             
-        log.info("📝 Daglig coach-logg och feedback sparad uppdelat i intervals.icu")
+        log.info("📝 Daily coach log and feedback saved separately in intervals.icu")
     except Exception as e:
-        log.warning(f"Kunde inte spara daglig coach-logg: {e}")
+        log.warning(f"Could not save daily coach log: {e}")
 
 def generate_weekly_report(activities: list, wellness: list, fitness: list,
                            mesocycle: dict, trajectory: dict,
@@ -267,11 +267,11 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
     mid_pct  = zone_pct[2] if len(zone_pct) > 2 else 0
     high_pct = sum(zone_pct[3:]) if len(zone_pct) > 3 else 0
     if low_pct >= 75 and mid_pct <= 15:
-        polar_verdict = "✅ Bra polariserad fördelning"
+        polar_verdict = "✅ Good polarized distribution"
     elif mid_pct > 20:
-        polar_verdict = "⚠️ För mycket Z3 (svartzon) – mer ren Z2 eller ren Z4+"
+        polar_verdict = "⚠️ Too much Z3 (gray zone) – more pure Z2 or pure Z4+"
     else:
-        polar_verdict = "Neutral fördelning"
+        polar_verdict = "Neutral distribution"
     ctl_values = [f.get("ctl", 0) for f in fitness[-14:] if f.get("ctl") is not None]
     ctl_delta = round(ctl_values[-1] - ctl_values[-8], 1) if len(ctl_values) >= 8 else 0
     sport_min = {}
@@ -288,46 +288,46 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
     avg_sleep = round(sum(sleep_vals) / len(sleep_vals), 1) if sleep_vals else "N/A"
     hrv_vals = [w.get("hrv") for w in week_wellness if w.get("hrv")]
     avg_hrv = round(sum(hrv_vals) / len(hrv_vals)) if hrv_vals else "N/A"
-    report = f"""━━━ VECKORAPPORT {week_start.isoformat()} → {week_end_incl.isoformat()} ━━━
+    report = f"""━━━ WEEKLY REPORT {week_start.isoformat()} → {week_end_incl.isoformat()} ━━━
 
-📊 SAMMANFATTNING
-  Tid:      {round(total_min)}min ({round(total_min/60, 1)}h)
+📊 SUMMARY
+  Time:     {round(total_min)}min ({round(total_min/60, 1)}h)
   TSS:      {round(total_tss)}
-  Distans:  {round(total_dist, 1)}km
-  Pass:     {len(week_acts)}st
-  CTL:      {round(ctl_values[-1]) if ctl_values else 'N/A'} (Δ{ctl_delta:+.1f} senaste veckan)"""
+  Distance: {round(total_dist, 1)}km
+  Sessions: {len(week_acts)}st
+  CTL:      {round(ctl_values[-1]) if ctl_values else 'N/A'} (Δ{ctl_delta:+.1f} past week)"""
 
     if ai_feedback:
-        report += f"\n\n🤖 COACH-FEEDBACK\n  {ai_feedback}"
+        report += f"\n\n🤖 COACH FEEDBACK\n  {ai_feedback}"
 
     report += f"""
 
-🏋️ SPORTFÖRDELNING
-  {sport_lines or 'Ingen data'}
+🏋️ SPORT DISTRIBUTION
+  {sport_lines or 'No data'}
 
-📈 ZONDISTRIBUTION
-  Z1-Z2 (låg): {low_pct}% | Z3 (medel): {mid_pct}% | Z4+ (hög): {high_pct}%
+📈 ZONE DISTRIBUTION
+  Z1-Z2 (low): {low_pct}% | Z3 (mid): {mid_pct}% | Z4+ (high): {high_pct}%
   {polar_verdict}
 
-💤 ÅTERHÄMTNING
-  Sömn-snitt: {avg_sleep}h | HRV-snitt: {avg_hrv}ms
+💤 RECOVERY
+  Sleep avg: {avg_sleep}h | HRV avg: {avg_hrv}ms
 
-🔄 MESOCYKEL
-  Block {mesocycle['block_number']}, Vecka {mesocycle['week_in_block']}/4
-  {'🟡 DELOAD-VECKA' if mesocycle['is_deload'] else f'Laddningsvecka ({mesocycle["load_factor"]:.0%})'}
+🔄 MESOCYCLE
+  Block {mesocycle['block_number']}, Week {mesocycle['week_in_block']}/4
+  {'🟡 DELOAD WEEK' if mesocycle['is_deload'] else f'Loading week ({mesocycle["load_factor"]:.0%})'}
   {mesocycle['deload_reason'] if mesocycle['deload_reason'] else ''}
 
-🎯 CTL-TRAJEKTORIA
-  {trajectory['message'] if trajectory.get('has_target') else 'Ingen A-tävling schemalagd.'}
+🎯 CTL TRAJECTORY
+  {trajectory['message'] if trajectory.get('has_target') else 'No A-race scheduled.'}
 """
     if trajectory.get("milestones"):
-        report += "  Milstolpar:\n"
+        report += "  Milestones:\n"
         for m in trajectory["milestones"]:
             report += f"    +{m['weeks']}v: CTL {m['projected_ctl']}\n"
 
     if acwr_trend and acwr_trend.get("summary"):
         report += f"""
-📈 ACWR-TREND
+📈 ACWR TREND
   {acwr_trend['summary']}
 """
 
@@ -337,11 +337,11 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
         filled_length = int(length * score / 100)
         bar = '█' * filled_length + '░' * (length - filled_length)
         report += f"""
-📉 TAPER-KVALITET (Dag {taper_score['taper_day']}/{taper_score['taper_days']})
-  Poäng: {score}/100 {bar}
+📉 TAPER QUALITY (Day {taper_score['taper_day']}/{taper_score['taper_days']})
+  Score: {score}/100 {bar}
   {taper_score.get('verdict', '')}
-  Detaljer: CTL {taper_score.get('ctl_drop_pct'):+.1f}%, ATL {taper_score.get('atl_drop_pct'):+.1f}%, TSB Δ{taper_score.get('tsb_rise'):+.1f}
-  Justeringar: {' '.join(taper_score.get('adjustments', [])) or 'Inga, allt ser bra ut.'}
+  Details: CTL {taper_score.get('ctl_drop_pct'):+.1f}%, ATL {taper_score.get('atl_drop_pct'):+.1f}%, TSB Δ{taper_score.get('tsb_rise'):+.1f}
+  Adjustments: {' '.join(taper_score.get('adjustments', [])) or 'None, everything looks good.'}
 """
 
     report += f"""
@@ -354,34 +354,34 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
   {motivation['summary']}
 """
         if motivation["state"] in ("BURNOUT_RISK", "FATIGUED"):
-            report += f"  ⚠️ Prioritera återhämtning och variation nästa vecka.\n"
+            report += f"  ⚠️ Prioritize recovery and variation next week.\n"
 
     if block_objective:
         report += f"""
-🎯 BLOCKMÅL
-  Primärt fokus: {block_objective.get('primary_focus', '?')}
-  Sekundärt fokus: {block_objective.get('secondary_focus') or 'Inget sekundärt fokus'}
+🎯 BLOCK OBJECTIVE
+  Primary focus: {block_objective.get('primary_focus', '?')}
+  Secondary focus: {block_objective.get('secondary_focus') or 'No secondary focus'}
   Objective: {block_objective.get('objective', '')}
-  Must-hit: {' | '.join(block_objective.get('must_hit_sessions', [])) or 'Inga definierade'}
+  Must-hit: {' | '.join(block_objective.get('must_hit_sessions', [])) or 'None defined'}
 """
 
     if development_needs:
         prio_lines = []
         for p in development_needs.get("priorities", [])[:3]:
             prio_lines.append(f"  - {p['area']} ({p['score']}): {p['why']}")
-        report += "\n📌 UTVECKLINGSBEHOV\n" + ("\n".join(prio_lines) if prio_lines else "  Inga tydliga utvecklingsbehov identifierade.")
+        report += "\n📌 DEVELOPMENT NEEDS\n" + ("\n".join(prio_lines) if prio_lines else "  No clear development needs identified.")
 
     if race_demands:
         report += f"""
 
 🏁 RACE DEMANDS
   {race_demands.get('summary', '')}
-  {' | '.join(race_demands.get('markers', [])[:4]) if race_demands.get('markers') else 'Inga markörer'}
+  {' | '.join(race_demands.get('markers', [])[:4]) if race_demands.get('markers') else 'No markers'}
 """
 
     if session_quality:
         report += f"""
-🛠️ PASSKVALITET
+🛠️ SESSION QUALITY
   {session_quality.get('summary', '')}
 """
         if session_quality.get("recent_sessions"):
@@ -467,18 +467,18 @@ def save_weekly_report_to_icu(report: str):
         })
         for e in existing:
             if REPORT_TAG in (e.get("description") or ""):
-                log.info("📊 Veckorapport finns redan för denna vecka, hoppar över.")
+                log.info("📊 Weekly report already exists for this week, skipping.")
                 return
         requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
             "category": "NOTE",
             "start_date_local": last_sunday.isoformat() + "T23:50:00",
-            "name": f"📊 Veckorapport v{week_num}",
+            "name": f"📊 Weekly report w{week_num}",
             "description": report + f"\n\n{REPORT_TAG}",
             "color": "#4A90D9",
         }).raise_for_status()
-        log.info(f"📊 Veckorapport sparad i intervals.icu ({last_sunday.isoformat()})")
+        log.info(f"📊 Weekly report saved in intervals.icu ({last_sunday.isoformat()})")
     except Exception as e:
-        log.warning(f"Kunde inte spara veckorapport: {e}")
+        log.warning(f"Could not save weekly report: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -613,7 +613,7 @@ def delete_ai_workouts(workouts, now: Optional[datetime] = None):
                 ).raise_for_status()
                 n += 1
             except Exception as e:
-                log.warning(f"Kunde inte ta bort {w.get('id')}: {e}")
+                log.warning(f"Could not delete {w.get('id')}: {e}")
     return n
 
 def update_manual_nutrition(workout, nutrition):
@@ -624,14 +624,14 @@ def update_manual_nutrition(workout, nutrition):
         requests.put(f"{BASE}/athlete/{ATHLETE_ID}/events/{workout['id']}",
                      auth=AUTH, json={"description": new.strip()}, timeout=10).raise_for_status()
     except Exception as e:
-        log.warning(f"Kunde inte uppdatera nutrition: {e}")
+        log.warning(f"Could not update nutrition: {e}")
 
 def _slot_time(slot: str) -> str:
     """AM→07:00, PM→17:00, MAIN→16:00 (eftermiddag som default)."""
     return {"AM": "T07:00:00", "PM": "T17:00:00"}.get(slot, "T16:00:00")
 
 def save_event(day: PlanDay):
-    name = day.title if day.title and day.title != "Vila" else "🛌 Vila"
+    name = day.title if day.title and day.title != "Rest" else "🛌 Rest"
     requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
         "category": "NOTE",
         "start_date_local": day.date + _slot_time(day.slot),
@@ -734,7 +734,7 @@ def _workout_color(day: PlanDay) -> str:
 def save_workout(day: PlanDay, athlete: dict | None = None):
     if day.strength_steps:
         step_text = "\n".join(
-            f"{s.exercise}: {s.sets}x{s.reps}" + (f", vila {s.rest_sec}s" if s.rest_sec else "") + (f" - {s.notes}" if s.notes else "")
+            f"{s.exercise}: {s.sets}x{s.reps}" + (f", rest {s.rest_sec}s" if s.rest_sec else "") + (f" - {s.notes}" if s.notes else "")
             for s in day.strength_steps)
     elif day.workout_steps and day.intervals_type not in ("WeightTraining", "Rest"):
         step_text = build_workout_step_text(day.workout_steps, day.intervals_type)
@@ -766,7 +766,7 @@ def save_workout(day: PlanDay, athlete: dict | None = None):
 
     resp = requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json=payload)
     resp.raise_for_status()
-    log.debug(f"Sparat {day.date} – event id: {resp.json().get('id')}")
+    log.debug(f"Saved {day.date} – event id: {resp.json().get('id')}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VÄDER (utökade WMO-koder, timdata för eftermiddag)
@@ -857,9 +857,9 @@ def fetch_weather(days):
                 am_code = Counter(am_codes).most_common(1)[0][0]
             else:
                 am_code = "unknown"
-            am_desc = YR_CODES.get(am_code, am_code.capitalize() or "Okänt")
+            am_desc = YR_CODES.get(am_code, am_code.capitalize() or "Unknown")
             if am_temp > 3 and "snow" in am_code and "sleet" not in am_code:
-                am_desc = "Regn"
+                am_desc = "Rain"
 
             pm_temps = day_data.get("pm_temps", [])
             pm_temp = round(sum(pm_temps) / len(pm_temps), 1) if pm_temps else temp_max
@@ -871,13 +871,12 @@ def fetch_weather(days):
                 pm_code = Counter(pm_codes).most_common(1)[0][0]
             else: 
                 pm_code = "unknown"
-            pm_desc = YR_CODES.get(pm_code, pm_code.capitalize() or "Okänt")
+            pm_desc = YR_CODES.get(pm_code, pm_code.capitalize() or "Unknown")
             if pm_temp > 3 and "snow" in pm_code and "sleet" not in pm_code:
-                pm_desc = "Regn"
+                pm_desc = "Rain"
 
             if pm_temp > 3 and "snow" in pm_desc.lower():
-                # Fel i prognosen – temp för hög för snö, tolka som regn istället
-                pm_desc = "Regn"
+                pm_desc = "Rain"
 
             result.append({
                 "date": dt,
@@ -896,10 +895,10 @@ def fetch_weather(days):
         CACHE_FILE.write_text(json.dumps({"fetched": date.today().isoformat(), "data": result}))
         return result
     except Exception as e:
-        log.warning(f"Väder-API (Yr) misslyckades: {e}. Försöker cache...")
+        log.warning(f"Weather API (Yr) failed: {e}. Trying cache...")
         if CACHE_FILE.exists():
             cached = json.loads(CACHE_FILE.read_text())
-            log.info(f"Använder väder-cache från {cached.get('fetched','?')}")
+            log.info(f"Using weather cache from {cached.get('fetched','?')}")
             return cached.get("data", [])
-        log.warning("Ingen väder-cache. Fortsätter utan väderdata.")
+        log.warning("No weather cache. Continuing without weather data.")
         return []

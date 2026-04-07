@@ -1,9 +1,10 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
+from training_plan.engine.planning import _safe_date_str
 
 def validate_data_quality(activities: list, wellness: list) -> dict:
-    """Identifierar och filtrerar bort datapunkter som troligen är mätfel."""
+    """Identifies and filters out data points that are likely measurement errors."""
     warnings: list = []
     filtered_activity_ids: set = set()
     bad_wellness_dates: set = set()
@@ -12,17 +13,17 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
         aid = a.get("id") or a.get("start_date_local", "")
         tss = a.get("icu_training_load") or 0
         dur = (a.get("moving_time") or a.get("elapsed_time") or 0) / 60
-        intf = a.get("icu_intensity") or 0
+        intf = session_intensity(a) or 0.0
         name_lower = (a.get("name") or "").lower()
-        is_race = "race" in name_lower or "tävling" in name_lower or a.get("workout_type") == "race"
+        is_race = "race" in name_lower or a.get("workout_type") == "race"
         if intf > 1.8 and not is_race:
-            warnings.append(f"Högt IF {intf:.2f} på {_safe_date_str(a)} – troligen felaktig FTP, filtreras från analys")
+            warnings.append(f"High IF {intf:.2f} on {_safe_date_str(a)} – likely incorrect FTP, filtered from analysis")
             filtered_activity_ids.add(aid)
         elif tss > 600:
-            warnings.append(f"Orimlig TSS {tss} på {_safe_date_str(a)} – filtreras")
+            warnings.append(f"Unreasonable TSS {tss} on {_safe_date_str(a)} – filtered")
             filtered_activity_ids.add(aid)
         elif 0 < dur < 5 and tss > 10:
-            warnings.append(f"Kort aktivitet ({dur:.0f}min) med TSS {tss} på {_safe_date_str(a)} – filtreras")
+            warnings.append(f"Short activity ({dur:.0f}min) with TSS {tss} on {_safe_date_str(a)} – filtered")
             filtered_activity_ids.add(aid)
 
     for w in wellness:
@@ -31,15 +32,19 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
         sleep = w.get("sleepSecs") or 0
         if hrv is None or hrv == 0:
             bad_wellness_dates.add(d)
-            warnings.append(f"HRV saknas/noll {d} – exkluderas från HRV-analys")
+            warnings.append(f"HRV missing/zero {d} – excluded from HRV analysis")
         elif hrv > 200:
             bad_wellness_dates.add(d)
-            warnings.append(f"Orimlig HRV {hrv}ms {d} – troligen mätfel, filtreras")
+            warnings.append(f"Unreasonable HRV {hrv}ms {d} – likely measurement error, filtered")
         if 0 < sleep < 7200:
-            warnings.append(f"Mycket kort sömn {sleep/3600:.1f}h {d} – kolla klockinställning")
+            warnings.append(f"Very short sleep {sleep/3600:.1f}h {d} – check watch settings")
         elif sleep > 57600:
             bad_wellness_dates.add(d)
-            warnings.append(f"Orimlig sömn {sleep/3600:.1f}h {d} – troligen klockreset, filtreras")
+            warnings.append(f"Unreasonable sleep {sleep/3600:.1f}h {d} – likely watch reset, filtered")
+
+    if warnings:
+        for w in warnings:
+            log.info(f"⚠️ Data quality: {w}")
 
     return {
         "warnings": warnings,
@@ -49,11 +54,11 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MOTIVATIONSANALYS & PSYKOLOGISK COACHING
+# MOTIVATION ANALYSIS & PSYCHOLOGICAL COACHING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def analyze_motivation(wellness: list, activities: list) -> dict:
-    """Analyserar 14-dagars känslotrend för att tidigt identifiera utbrändningsrisk."""
+    """Analyzes 14-day feel trend to early identify burnout risk."""
     cutoff = (date.today() - timedelta(days=14)).isoformat()
     week2_cutoff = (date.today() - timedelta(days=7)).isoformat()
 
@@ -74,7 +79,7 @@ def analyze_motivation(wellness: list, activities: list) -> dict:
     else:
         trend = "STABLE"
 
-    # Räkna veckor med sjunkande känsla (jämför med ännu äldre data)
+    # Count weeks with declining feel (compare with even older data)
     weeks_declining = 0
     if trend == "DECLINING":
         weeks_declining = 1
@@ -99,7 +104,7 @@ def analyze_motivation(wellness: list, activities: list) -> dict:
         "avg_feel": round(avg_feel, 2),
         "weeks_declining": weeks_declining,
         "n_activities": len(feel_vals),
-        "summary": f"Motivation: {state} | Trend: {trend} | Snittkänsla: {avg_feel:.1f}/5 ({len(feel_vals)} pass senaste 14d)",
+        "summary": f"Motivation: {state} | Trend: {trend} | Avg feel: {avg_feel:.1f}/5 ({len(feel_vals)} sessions last 14d)",
     }
 
 def calculate_hrv(wellness):
@@ -130,19 +135,19 @@ def calculate_hrv(wellness):
             "deviation_pct": round(dev_today*100,1)}
 
 def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> dict:
-    """Sammansatt formpoäng 0–100 baserat på HRV, sömn, viloHR-trend, RPE och känsla."""
+    """Composite readiness score 0-100 based on HRV, sleep, resting HR trend, RPE, and feel."""
     def clamp(v, lo=0, hi=100): return max(lo, min(hi, v))
 
-    # HRV (35%) – deviation_pct: -30..+15 → 0..100
+    # HRV (35%) – deviation_pct: -30..+15 -> 0..100
     dev = hrv.get("deviation_pct", 0)
     hrv_sc = clamp(int((dev + 30) / 45 * 100))
 
-    # Sömn (25%) – senaste natten, 4..9h → 0..100
+    # Sleep (25%) – last night, 4..9h -> 0..100
     recent_sleep = next((w.get("sleepSecs") for w in reversed(wellness) if w.get("sleepSecs")), None)
     sleep_h = (recent_sleep / 3600) if recent_sleep else 7.0
     sleep_sc = clamp(int((sleep_h - 4) / 5 * 100))
 
-    # Vilopuls-trend (15%) – slope sista 7 dagar
+    # Resting HR trend (15%) – slope last 7 days
     rhr_vals = [w.get("restingHR") for w in wellness[-7:] if w.get("restingHR")]
     if len(rhr_vals) >= 3:
         slope = (rhr_vals[-1] - rhr_vals[0]) / (len(rhr_vals) - 1)
@@ -150,23 +155,23 @@ def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> di
     else:
         rhr_sc = 70
 
-    # RPE (15%) – snitt sista 5 pass, 4..9 inverterat → 0..100
+    # RPE (15%) – avg last 5 sessions, 4..9 inverted -> 0..100
     rpes = [a["perceived_exertion"] for a in activities[-5:] if a.get("perceived_exertion")]
     mean_rpe = sum(rpes) / len(rpes) if rpes else 6.0
     rpe_sc = clamp(int((9 - mean_rpe) / 5 * 100))
 
-    # Känsla (10%) – snitt sista 5 pass, 1..5 → 0..100
+    # Feel (10%) – avg last 5 sessions, 1..5 -> 0..100
     feels = [a["feel"] for a in activities[-5:] if a.get("feel")]
     mean_feel = sum(feels) / len(feels) if feels else 3.0
     feel_sc = clamp(int((mean_feel - 1) / 4 * 100))
 
     score = int(hrv_sc*0.35 + sleep_sc*0.25 + rhr_sc*0.15 + rpe_sc*0.15 + feel_sc*0.10)
-    label = "TOPP" if score >= 80 else ("BRA" if score >= 65 else ("NORMAL" if score >= 50 else ("LAG" if score >= 35 else "KRITISK")))
+    label = "PEAK" if score >= 80 else ("GOOD" if score >= 65 else ("NORMAL" if score >= 50 else ("LOW" if score >= 35 else "CRITICAL")))
 
     return {
         "score": score, "label": label,
         "components": {"hrv": hrv_sc, "sleep": sleep_sc, "rhr": rhr_sc, "rpe": rpe_sc, "feel": feel_sc},
-        "summary": f"Readiness: {score}/100 ({label}) | HRV:{hrv_sc} Sömn:{sleep_sc} ViloHR:{rhr_sc} RPE:{rpe_sc} Känsla:{feel_sc}",
+        "summary": f"Readiness: {score}/100 ({label}) | HRV:{hrv_sc} Sleep:{sleep_sc} RHR:{rhr_sc} RPE:{rpe_sc} Feel:{feel_sc}",
     }
 
 
@@ -174,36 +179,36 @@ def rpe_trend(activities) -> str:
     rpes  = [a["perceived_exertion"] for a in activities[-10:] if a.get("perceived_exertion")]
     feels = [a["feel"]               for a in activities[-10:] if a.get("feel")]
     if len(rpes) < 4:
-        return "Otillräcklig RPE-data (< 4 pass)."
+        return "Insufficient RPE data (< 4 sessions)."
     slope = (rpes[-1] - rpes[0]) / (len(rpes) - 1)
     mean_rpe = sum(rpes) / len(rpes)
     cv = (sum((r - mean_rpe)**2 for r in rpes) / len(rpes))**0.5 / mean_rpe if mean_rpe else 0
-    lines = [f"RPE senaste {len(rpes)} pass: {[round(r,1) for r in rpes]}"]
-    lines.append(f"  Slope: {slope:+.2f}/pass | CV: {cv:.2f} | Snitt: {mean_rpe:.1f}")
+    lines = [f"RPE last {len(rpes)} sessions: {[round(r,1) for r in rpes]}"]
+    lines.append(f"  Slope: {slope:+.2f}/session | CV: {cv:.2f} | Avg: {mean_rpe:.1f}")
     if slope > 0.3:
-        lines.append(f"  ⚠️  RPE STIGANDE (+{slope:.2f}/pass) – risk för överträning")
+        lines.append(f"  ⚠️  RPE RISING (+{slope:.2f}/session) – overtraining risk")
     elif slope < -0.3:
-        lines.append(f"  ✅ RPE SJUNKANDE ({slope:.2f}/pass) – god adaptation")
+        lines.append(f"  ✅ RPE FALLING ({slope:.2f}/session) – good adaptation")
     else:
-        lines.append("  RPE stabil – normal variation")
+        lines.append("  RPE stable – normal variation")
     if cv > 0.25:
-        lines.append(f"  ⚠️  RPE VOLATIL (CV={cv:.2f}) – oregelbunden återhämtning")
+        lines.append(f"  ⚠️  RPE VOLATILE (CV={cv:.2f}) – irregular recovery")
     if len(feels) >= 4:
         feel_slope = (feels[-1] - feels[0]) / (len(feels) - 1)
         if feel_slope < -0.3:
-            lines.append(f"  ⚠️  KÄNSLA SJUNKER ({feel_slope:.2f}/pass) – tecken på utmattning")
+            lines.append(f"  ⚠️  FEEL DECLINING ({feel_slope:.2f}/session) – signs of fatigue")
     return "\n".join(lines)
 
 def analyze_np_if(activities: list) -> dict:
-    """Analyserar NP/IF-mönster för cykelsporter – pacing-kvalitet och belastningstrend."""
+    """Analyzes NP/IF patterns for cycling sports – pacing quality and load trend."""
     cycling = [a for a in activities
                if a.get("type") in ("Ride", "VirtualRide")
                and a.get("icu_weighted_avg_watts")
                and a.get("icu_intensity")][-15:]
     if len(cycling) < 4:
-        return {"summary": "Otillräcklig NP/IF-data (< 4 cykelpass).", "flags": []}
+        return {"summary": "Insufficient NP/IF data (< 4 cycling sessions).", "flags": []}
 
-    ifs = [a["icu_intensity"] for a in cycling]
+    ifs = [session_intensity(a) or 0.0 for a in cycling]
     nps = [a["icu_weighted_avg_watts"] for a in cycling]
     mean_if = sum(ifs) / len(ifs)
     np_mean = sum(nps) / len(nps)
@@ -211,17 +216,17 @@ def analyze_np_if(activities: list) -> dict:
 
     flags = []
     if mean_if > 0.82:
-        flags.append(f"IF KONSEKVENT HÖG: snitt {mean_if:.2f} – kör hårdare än planerat zon (Z3/Z4)")
+        flags.append(f"IF CONSISTENTLY HIGH: avg {mean_if:.2f} – riding harder than planned zone (Z3/Z4)")
     if np_cv > 0.20:
-        flags.append(f"NP-VARIATION HÖG (CV={np_cv:.2f}) – ojämn belastning vecka-till-vecka")
+        flags.append(f"NP VARIATION HIGH (CV={np_cv:.2f}) – uneven week-to-week load")
     if len(cycling) >= 6:
         early_np = sum(a["icu_weighted_avg_watts"] for a in cycling[:3]) / 3
         late_np  = sum(a["icu_weighted_avg_watts"] for a in cycling[-3:]) / 3
         if late_np < early_np * 0.90:
-            flags.append(f"FRONT-LOADING TREND: NP tidigt {round(early_np)}W → sent {round(late_np)}W – mattning i blocket")
+            flags.append(f"FRONT-LOADING TREND: NP early {round(early_np)}W -> late {round(late_np)}W – fading in the block")
 
-    parts = [f"NP/IF ({len(cycling)} cykelpass): snitt NP {round(np_mean)}W | IF {mean_if:.2f}"]
-    parts += flags if flags else ["Pacing OK – ingen uppenbar IF-drift eller front-loading"]
+    parts = [f"NP/IF ({len(cycling)} cycling sessions): avg NP {round(np_mean)}W | IF {mean_if:.2f}"]
+    parts += flags if flags else ["Pacing OK – no obvious IF drift or front-loading"]
     return {"summary": "\n  ".join(parts), "flags": flags, "mean_if": mean_if, "mean_np": round(np_mean)}
 
 
@@ -243,14 +248,14 @@ def acwr(atl, ctl, fitness_history=None) -> dict:
         elif rate < -0.02: trend = "DECREASING"
         else:             trend = "STABLE"
     if ratio > limit:
-        action = "REDUCE_LOAD – ratio i farlig zon"
+        action = "REDUCE_LOAD – ratio in danger zone"
     elif ratio > 1.3 and trend == "RAPID_INCREASE":
-        action = "REDUCE_LOAD – snabb ökning mot farlig zon"
+        action = "REDUCE_LOAD – rapid increase towards danger zone"
     elif ratio > 1.3 or trend in ("RAPID_INCREASE",):
-        action = "MONITOR – övervaka noga"
+        action = "MONITOR – monitor closely"
     elif ratio < 0.75 or (ratio < 0.85 and trend == "DECREASING"):
-        # Detraining-risk: träningsbelastning sjunker under CTL-underhållsnivå
-        action = "INCREASE_LOAD – risk för detraining, öka träningen gradvis"
+        # Detraining risk: training load dropping below CTL maintenance level
+        action = "INCREASE_LOAD – risk of detraining, increase training gradually"
     else:
         action = "SAFE_TO_PROGRESS"
     return {"ratio": round(ratio, 2), "rate": round(rate, 3),
@@ -259,34 +264,34 @@ def acwr(atl, ctl, fitness_history=None) -> dict:
 
 def acwr_trend_analysis(fitness_history: list) -> dict:
     """
-    Detaljerad ACWR-trendanalys med rullande 7d vs 28d belastningskvot,
-    varningsnivåer och riskvärdering.
+    Detailed ACWR trend analysis with rolling 7d vs 28d load ratio,
+    warning levels and risk assessment.
 
-    Returnerar:
-      weekly_ratios: lista med senaste 6 veckors ACWR
+    Returns:
+      weekly_ratios: list of last 6 weeks ACWR
       current_zone: SAFE / MODERATE / HIGH / DANGER
       trend_direction: RISING / FALLING / STABLE
-      warning: varningstext om relevant
-      sparkline: ASCII-sparkline av trenden
+      warning: warning text if relevant
+      sparkline: ASCII sparkline of the trend
     """
     if not fitness_history or len(fitness_history) < 28:
         return {
             "weekly_ratios": [],
             "current_zone": "UNKNOWN",
             "trend_direction": "UNKNOWN",
-            "warning": "Otillräcklig data (< 28 dagar).",
+            "warning": "Insufficient data (< 28 days).",
             "sparkline": "",
-            "summary": "Otillräcklig data för ACWR-trendanalys.",
+            "summary": "Insufficient data for ACWR trend analysis.",
         }
 
-    # Beräkna daglig ACWR för senaste 42 dagar
+    # Calculate daily ACWR for the last 42 days
     daily_ratios = []
     for f in fitness_history[-42:]:
         atl = f.get("atl", 0)
         ctl = max(f.get("ctl", 1), 1)
         daily_ratios.append(round(atl / ctl, 3))
 
-    # Veckosnitt (senaste 6 veckor)
+    # Weekly average (last 6 weeks)
     weekly_ratios = []
     for i in range(0, min(len(daily_ratios), 42), 7):
         week_slice = daily_ratios[i:i+7]
@@ -295,7 +300,7 @@ def acwr_trend_analysis(fitness_history: list) -> dict:
 
     current_ratio = daily_ratios[-1] if daily_ratios else 0
 
-    # Zonklassificering
+    # Zone classification
     if current_ratio < 0.8:
         zone = "UNDERTRAINED"
         zone_emoji = "🔵"
@@ -312,7 +317,7 @@ def acwr_trend_analysis(fitness_history: list) -> dict:
         zone = "DANGER"
         zone_emoji = "🔴"
 
-    # Trendriktning (senaste 14 dagars slope)
+    # Trend direction (last 14 days slope)
     if len(daily_ratios) >= 14:
         recent = daily_ratios[-14:]
         slope = (recent[-1] - recent[0]) / 14
@@ -338,23 +343,23 @@ def acwr_trend_analysis(fitness_history: list) -> dict:
     else:
         sparkline = ""
 
-    # Varning
+    # Warning
     warning = ""
     if zone == "DANGER":
-        warning = f"🔴 ACWR {current_ratio:.2f} i farozonen (>1.5)! Sänk belastningen omedelbart."
+        warning = f"🔴 ACWR {current_ratio:.2f} in danger zone (>1.5)! Reduce load immediately."
     elif zone == "HIGH" and direction == "RISING":
-        warning = f"🟠 ACWR {current_ratio:.2f} stigande mot farozonen. Bromsa volymökningen."
+        warning = f"🟠 ACWR {current_ratio:.2f} rising towards danger zone. Slow down volume increase."
     elif zone == "UNDERTRAINED" and direction == "FALLING":
-        warning = f"🔵 ACWR {current_ratio:.2f} sjunker – risk för detraining. Öka gradvis."
+        warning = f"🔵 ACWR {current_ratio:.2f} falling – risk of detraining. Increase gradually."
     elif zone == "HIGH":
-        warning = f"🟡 ACWR {current_ratio:.2f} högt men stabilt. Övervaka noga."
+        warning = f"🟡 ACWR {current_ratio:.2f} high but stable. Monitor closely."
 
     summary = (
         f"ACWR {current_ratio:.2f} {zone_emoji} {zone} | "
-        f"Trend: {direction} ({slope:+.3f}/dag) | "
+        f"Trend: {direction} ({slope:+.3f}/day) | "
         f"Sparkline: [{sparkline}] | "
         f"{warning}" if warning else
-        f"ACWR {current_ratio:.2f} {zone_emoji} {zone} | Trend: {direction} ({slope:+.3f}/dag) | [{sparkline}]"
+        f"ACWR {current_ratio:.2f} {zone_emoji} {zone} | Trend: {direction} ({slope:+.3f}/day) | [{sparkline}]"
     )
 
     return {
@@ -371,13 +376,13 @@ def acwr_trend_analysis(fitness_history: list) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SPORT-SPECIFIK ACWR (per sporttyp)
+# SPORT-SPECIFIC ACWR (per sport type)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def per_sport_acwr(activities: list) -> dict:
     """
-    Beräknar ATL, CTL och ACWR separat per sporttyp.
-    Viktigt för att fånga löpnings- eller rullskidbelastning som döljs i total-ACWR.
+    Calculates ATL, CTL and ACWR separately per sport type.
+    Important for capturing running or roller skiing load that is hidden in total ACWR.
     """
     today = date.today()
     sports = set(a.get("type") for a in activities if a.get("type") and a.get("type") != "Rest")
@@ -395,6 +400,10 @@ def per_sport_acwr(activities: list) -> dict:
                 days_ago = (today - datetime.strptime(ds, "%Y-%m-%d").date()).days
             except Exception:
                 continue
+            
+            if days_ago < 0:
+                continue
+                
             tss = a.get("icu_training_load") or 0
             if days_ago <= 7:
                 atl += tss * (1 - days_ago / 7)
@@ -404,10 +413,10 @@ def per_sport_acwr(activities: list) -> dict:
         ratio = round(atl / ctl, 2) if ctl > 0 else 0.0
         if ratio > 1.5:
             zone = "DANGER"
-            warning = f"ACWR {ratio:.2f} > 1.5 för {sport} – hög skaderisk!"
+            warning = f"ACWR {ratio:.2f} > 1.5 for {sport} – high injury risk!"
         elif ratio > 1.3:
             zone = "HIGH"
-            warning = f"ACWR {ratio:.2f} för {sport} – övervaka noga"
+            warning = f"ACWR {ratio:.2f} for {sport} – monitor closely"
         elif ctl > 0 and ratio < 0.8:
             zone = "UNDERTRAINED"
             warning = ""
@@ -435,10 +444,10 @@ def tsb_zone(tsb, ctl, fitness_history):
     else:
         low_t = -0.30 * ctl; high_t = 0.10 * ctl
     pct = (tsb/ctl)*100
-    if   tsb > high_t: return f"PEAKING ({pct:+.0f}% av CTL)"
+    if   tsb > high_t: return f"PEAKING ({pct:+.0f}% of CTL)"
     elif tsb > 0:      return f"FRESH ({pct:+.0f}%)"
-    elif tsb > low_t:  return f"OPTIMAL TRANING ({pct:+.0f}%)"
-    else:              return f"HÖG TRÖTTHET ({pct:+.0f}%) - vila rekommenderas"
+    elif tsb > low_t:  return f"OPTIMAL TRAINING ({pct:+.0f}%)"
+    else:              return f"HIGH FATIGUE ({pct:+.0f}%) - rest recommended"
 
 def sport_volumes(activities):
     cutoff = datetime.now() - timedelta(days=7)
@@ -452,9 +461,9 @@ def sport_volumes(activities):
     return vols
 
 def sport_budget(sport_type, activities, manual_workouts) -> dict:
-    RISK_GROWTH = {"låg": 1.20, "medel": 1.15, "hög": 1.10}
+    RISK_GROWTH = {"low": 1.20, "medium": 1.15, "high": 1.10}
     sport_info  = next((s for s in SPORTS if s["intervals_type"] == sport_type), {})
-    risk_level  = sport_info.get("skaderisk", "medel")
+    risk_level  = sport_info.get("injury_risk", "medium")
     growth      = RISK_GROWTH.get(risk_level, 1.15)
     cutoff_14d = datetime.now() - timedelta(days=14)
     cutoff_7d  = datetime.now() - timedelta(days=7)
@@ -499,7 +508,7 @@ def _safe_date(activity) -> datetime:
 
 
 def ctl_ramp_from_daily_tss(ctl: float, daily_tss: float) -> float:
-    """Approximerad CTL-ramp/vecka från daglig TSS enligt 42-dagarsmodellen."""
+    """Approximated CTL ramp/week from daily TSS according to the 42-day model."""
     return round((daily_tss - ctl) / 6.0, 1)
 
 
@@ -507,14 +516,14 @@ def choose_target_ramp(ctl: float, mesocycle_factor: float = 1.0,
                        required_weekly_tss: float | None = None,
                        actual_weekly_ramp: float | None = None) -> float:
     """
-    Välj mål-ramp för normal uppbyggnad.
+    Choose target ramp for normal build.
 
-    Filosofi:
-      - Normalt spann: +5–7 CTL/vecka
-      - Bias runt +6 CTL/vecka
-      - Byggveckor får gärna nudga uppåt, men inte per automatik maxa allt
-      - Detraining återgår aggressivt till +7
-      - Deload får fortfarande sin sänkning via mesocycle_factor i tss_budget()
+    Philosophy:
+      - Normal range: +5-7 CTL/week
+      - Bias around +6 CTL/week
+      - Build weeks can nudge upwards, but not automatically max everything
+      - Detraining returns aggressively to +7
+      - Deload still gets its reduction via mesocycle_factor in tss_budget()
     """
     if required_weekly_tss:
         return ctl_ramp_from_daily_tss(ctl, required_weekly_tss / 7.0)
@@ -540,19 +549,19 @@ def choose_target_ramp(ctl: float, mesocycle_factor: float = 1.0,
 def tss_budget(ctl, tsb, horizon, fitness_history, mesocycle_factor=1.0,
                required_weekly_tss=None, actual_weekly_ramp=None):
     """
-    Beräknar TSS-budget för horisonten baserat på CTL-ODE-fysiken.
+    Calculates TSS budget for the horizon based on CTL-ODE physics.
 
-    CTL-ODE: ΔCTL/dag = (TSS - CTL) / 42
-    För att uppnå målramp R CTL/vecka: TSS_dag = CTL + R × 6
-    (härleds: ΔCTL/vecka = (TSS_dag − CTL) × 7/42 ⟹ TSS_dag = CTL + ramp × 6)
+    CTL-ODE: ΔCTL/day = (TSS - CTL) / 42
+    To achieve target ramp R CTL/week: TSS_day = CTL + R * 6
+    (derived: ΔCTL/week = (TSS_day - CTL) * 7/42 => TSS_day = CTL + ramp * 6)
 
-    Rekommenderat rampintervall (denna coach):
-      Normalt uppbyggnadsläge: +5–7 CTL/vecka
-      Detreningsåteruppbyggnad:  +7.0 CTL/vecka
-      Absolut tak (crash-block):  +8 CTL/vecka
+    Recommended ramp interval (this coach):
+      Normal build state: +5-7 CTL/week
+      Detraining rebuild: +7.0 CTL/week
+      Absolute ceiling (crash block): +8 CTL/week
 
-    - Om required_weekly_tss finns (från ctl_trajectory): konvertera direkt.
-    - mesocycle_factor appliceras på byggdelen (surplus), inte underhållet.
+    - If required_weekly_tss exists (from ctl_trajectory): convert directly.
+    - mesocycle_factor is applied to the build part (surplus), not maintenance.
     """
     target_ramp = choose_target_ramp(
         ctl,
@@ -562,21 +571,25 @@ def tss_budget(ctl, tsb, horizon, fitness_history, mesocycle_factor=1.0,
     )
     daily_target = ctl + target_ramp * 6.0
 
-    # Säkerhetstak: +8 CTL/vecka (crash-veckor kräver manuell override)
+    # Safety cap: +8 CTL/week (crash weeks require manual override)
     daily_cap = ctl + 8.0 * 6.0
     daily_target = min(daily_target, daily_cap)
 
-    # TSB-trötthetsjustering: om atlet är klart utmattad, dra ned mot underhåll
-    # Använd historisk TSB-fördelning för att avgöra vad som är "normalt negativt"
+    # TSB fatigue adjustment: if athlete is clearly exhausted, pull down towards maintenance
+        # Use 3-day average to avoid yo-yo effect from single hard sessions
     hist_tsb = [f.get("tsb", 0) for f in fitness_history[-60:] if f.get("tsb") is not None]
     typical_low = sorted(hist_tsb)[max(0, len(hist_tsb) // 5)] if len(hist_tsb) > 14 else -0.30 * ctl
-    if tsb < typical_low:
-        daily_target = max(ctl, daily_target * 0.85)
+        
+    recent_tsb = [f.get("tsb", 0) for f in fitness_history[-3:] if f.get("tsb") is not None]
+    avg_recent_tsb = sum(recent_tsb) / len(recent_tsb) if recent_tsb else tsb
+        
+    if avg_recent_tsb < typical_low:
+        daily_target = max(ctl, daily_target * 0.95)
 
-    # Underhållsgolv: deload-veckor tillåter 90% av CTL (äkta återhämtning)
+    # Maintenance floor: deload weeks allow 90% of CTL (true recovery)
     daily_floor = ctl * (0.90 if mesocycle_factor < 1.0 else 1.0)
 
-    # Mesocykel-faktor på bara byggdelen – deload sänker surplus, inte underhåll
+    # Mesocycle factor only on the build part - deload lowers surplus, not maintenance
     surplus = max(daily_target - daily_floor, 0.0)
     daily = daily_floor + surplus * mesocycle_factor
 
@@ -608,23 +621,23 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
         add(
             "recovery",
             100,
-            f"Readiness {readiness_score}/100 och motivation {motivation_state} kräver mer återhämtning för att kunna absorbera träningen.",
-            ["1-2 extra lätta dagar", "kortare huvudpass", "behåll bara mest värdefulla nyckelpass"],
+            f"Readiness {readiness_score}/100 and motivation {motivation_state} require more recovery to absorb the training.",
+            ["1-2 extra easy days", "shorter main sessions", "keep only most valuable key sessions"],
         )
     elif motivation_state == "FATIGUED":
         add(
             "recovery",
             82,
-            "Psykologisk/mental trötthet syns i känsla-trenden - lite lägre friktion ger bättre långsiktig utveckling.",
-            ["rolig kvalitet i kortare format", "hög genomförbarhet", "undvik onödigt filler"],
+            "Psychological/mental fatigue visible in the feel trend - slightly lower friction gives better long-term development.",
+            ["fun quality in shorter format", "high feasibility", "avoid unnecessary filler"],
         )
 
     if weighted_compliance < 75 or key_completion < 70:
         add(
             "consistency",
             92,
-            f"Viktad compliance {weighted_compliance}% och nyckelpass {key_completion}% är för låg för maximal utveckling.",
-            ["2-3 must-hit-pass", "kortare flexpass", "mindre planfriktion på vardagar"],
+            f"Weighted compliance {weighted_compliance}% and key sessions {key_completion}% is too low for maximum development.",
+            ["2-3 must-hit sessions", "shorter flex sessions", "less plan friction on weekdays"],
         )
 
     if ftp_check and ftp_check.get("needs_test") and phase_name not in ("Race Week",):
@@ -632,7 +645,7 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
             "calibration",
             86,
             ftp_check["recommendation"],
-            ["schemalägg FTP-test", "håll 1-2 dagar enklare före test", "justera framtida zoner efter utfallet"],
+            ["schedule FTP test", "keep 1-2 days easier before test", "adjust future zones after the outcome"],
         )
 
     if race_demands and race_demands.get("gaps"):
@@ -640,15 +653,15 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
             add(
                 "durability",
                 84,
-                "Race demands visar att lång uthållighet fortfarande är en tydlig flaskhals.",
-                ["1 långt Z2-pass", "progressiv långtur", "träna nutrition under långpass"],
+                "Race demands show that long durability is still a clear bottleneck.",
+                ["1 long Z2 session", "progressive long ride", "train nutrition during long sessions"],
             )
         if any("Fueling-gap" in g for g in race_demands["gaps"]):
             add(
                 "fueling",
                 74,
-                "Långa nutrition-repetitioner saknas för tävlingsmålet.",
-                ["CHO-plan på långpass", "öva 80-100g CHO/h", "logga magtolerans"],
+                "Long nutrition repetitions are missing for the race target.",
+                ["CHO plan on long sessions", "practice 80-100g CHO/h", "log stomach tolerance"],
             )
 
     threshold_count = session_scores.get("threshold", {}).get("count", 0)
@@ -657,8 +670,8 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
         add(
             "threshold",
             76 if phase_name == "Build" else 68,
-            f"Tröskelstimulit är {'få' if threshold_count < 2 else 'för svaga'} för nuvarande fas.",
-            ["1 tröskelpass", "håll RPE 6-7", "jämn kvalitet genom alla intervaller"],
+            f"Threshold stimuli are {'few' if threshold_count < 2 else 'too weak'} for the current phase.",
+            ["1 threshold session", "keep RPE 6-7", "even quality through all intervals"],
         )
 
     vo2_count = session_scores.get("vo2", {}).get("count", 0)
@@ -667,8 +680,8 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
         add(
             "vo2",
             70,
-            "Byggfas utan tydlig syrestimuli tappar toppfart och headroom.",
-            ["1 kort VO2-session", "full återhämtning före/efter", "undvik dubbla hårda dagar"],
+            "Build phase without clear oxygen stimuli loses top speed and headroom.",
+            ["1 short VO2 session", "full recovery before/after", "avoid double hard days"],
         )
 
     np_flags = (np_if_analysis or {}).get("flags", [])
@@ -677,24 +690,24 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
             add(
                 "pacing",
                 72,
-                "Pacing/IF-mönstret tyder på att passen blir hårdare än avsett eller tappar jämnhet.",
-                ["ett strikt Z2-pass", "ett pacing-fokuserat långpass", "tydligare nutrition och wattdisciplin"],
+                "The pacing/IF pattern indicates that the sessions are harder than intended or losing consistency.",
+                ["one strict Z2 session", "one pacing-focused long session", "clearer nutrition and watt discipline"],
             )
 
     if polarization and polarization.get("mid_pct", 0) > 20:
         add(
             "polarization",
             66,
-            "För mycket Z3 minskar kvaliteten i både aerob bas och hårda nyckelpass.",
-            ["renare Z2-dagar", "renare Z4+/VO2-dagar", "mindre gråzon"],
+            "Too much Z3 reduces the quality in both aerobic base and hard key sessions.",
+            ["cleaner Z2 days", "cleaner Z4+/VO2 days", "less gray zone"],
         )
 
     if not priorities:
         add(
             "durability",
             60,
-            "Inga akuta svagheter sticker ut - fortsätt bygga robust aerob uthållighet.",
-            ["1 långt Z2-pass", "1 kvalitetspass", "övrigt stödjande volym"],
+            "No acute weaknesses stand out - continue building robust aerobic durability.",
+            ["1 long Z2 session", "1 quality session", "other supporting volume"],
         )
 
     deduped = {}
@@ -717,10 +730,10 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
         "secondary_focus": secondary,
         "must_hit_sessions": must_hit[:4],
         "flex_sessions": [
-            "övriga pass får vara enklare om de ökar genomförbarheten",
-            "ta hellre bort filler än att kompromissa bort must-hit-pass",
+            "other sessions can be easier if it increases feasibility",
+            "rather remove filler than compromise must-hit sessions",
         ],
-        "summary": f"Utvecklingsbehov: {summary}",
+        "summary": f"Development needs: {summary}",
     }
 
 
@@ -729,7 +742,7 @@ def update_block_objective(state: dict, mesocycle: dict, phase: dict,
     today = date.today().isoformat()
     primary = development_needs.get("primary_focus", "durability")
     secondary = development_needs.get("secondary_focus")
-    target_name = race_demands.get("target_name", "huvudmål")
+    target_name = race_demands.get("target_name", "main_target")
     signature = "|".join([
         phase.get("phase", "Base"),
         str(mesocycle.get("block_number", 1)),
@@ -743,15 +756,15 @@ def update_block_objective(state: dict, mesocycle: dict, phase: dict,
         return existing
 
     focus_text = {
-        "recovery": "absorbera tidigare belastning och återställa kvalitet i nästa nyckelpass",
-        "consistency": "öka träffsäkerheten så att viktiga pass faktiskt blir gjorda",
-        "calibration": "kalibrera FTP/zoner så att resten av blocket får rätt dos",
-        "durability": "bygga tålighet för många timmar i sadeln utan att tappa kvalitet",
-        "fueling": "träna tävlingsrelevant nutrition och magtolerans",
-        "threshold": "höja sustainable power och effektivitet runt tröskeln",
-        "vo2": "öka aerob toppkapacitet och headroom",
-        "pacing": "få jämnare belastning och bättre kontroll på intensitet",
-        "polarization": "renodla intensitetsfördelningen för bättre adaptation",
+        "recovery": "acute recovery (first few days) to absorb fatigue, followed by normal training/key sessions later in the block",
+        "consistency": "increase consistency so that important sessions actually get done",
+        "calibration": "calibrate FTP/zones so the rest of the block gets the right dose",
+        "durability": "build durability for many hours in the saddle without losing quality",
+        "fueling": "train race-relevant nutrition and stomach tolerance",
+        "threshold": "raise sustainable power and efficiency around threshold",
+        "vo2": "increase aerobic top capacity and headroom",
+        "pacing": "get more even load and better control of intensity",
+        "polarization": "polarize intensity distribution for better adaptation",
     }
 
     objective = {
@@ -774,14 +787,14 @@ def training_phase(races, today):
     future = sorted([r for r in races if datetime.strptime(
         r.get("start_date_local", r.get("date","2099-01-01"))[:10], "%Y-%m-%d").date() >= today],
         key=lambda r: r.get("start_date_local",""))
-    if not future: return {"phase": "Grundtraning", "rule": "Grundträning: 1-2 intervallpass/vecka (Z4-Z5), 1 tempopass (Z3), resten Z2. Undvik intervaller ENDAST om HRV=LOW eller TSB < -20."}
+    if not future: return {"phase": "Base", "rule": "Base training: 1-2 interval sessions/week (Z4-Z5), 1 tempo session (Z3), rest Z2. Avoid intervals ONLY if HRV=LOW or TSB < -20."}
     nr = future[0]
     dt = (datetime.strptime(nr["start_date_local"][:10], "%Y-%m-%d").date() - today).days
-    nm = nr.get("name","Tävling")
-    if dt < 7:  return {"phase": "Race Week", "rule": f"{nm} om {dt}d. Aktivering."}
-    if dt < 28: return {"phase": "Taper",     "rule": f"{nm} om {dt}d. -30% volym, behåll intensitet."}
-    if dt < 84: return {"phase": "Build",     "rule": f"{nm} om {dt}d. Bygg intensitet."}
-    return {"phase": "Base", "rule": f"{nm} om {dt}d. Grundträning: 1-2 intervallpass/vecka (Z4-Z5), 1 tempopass (Z3), resten Z2."}
+    nm = nr.get("name","Race")
+    if dt < 7:  return {"phase": "Race Week", "rule": f"{nm} in {dt}d. Activation."}
+    if dt < 28: return {"phase": "Taper",     "rule": f"{nm} in {dt}d. -30% volume, maintain intensity."}
+    if dt < 84: return {"phase": "Build",     "rule": f"{nm} in {dt}d. Build intensity."}
+    return {"phase": "Base", "rule": f"{nm} in {dt}d. Base training: 1-2 interval sessions/week (Z4-Z5), 1 tempo session (Z3), rest Z2."}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -790,18 +803,18 @@ def training_phase(races, today):
 
 def race_week_protocol(races: list, today: date) -> dict:
     """
-    Genererar dagspecifikt race-week-protokoll (sista 7 dagarna före tävling).
+    Generates day-specific race-week protocol (last 7 days before race).
 
-    Protokollet:
-      -6d: Sista medellånga passet (90min Z2 + 2×5min Z4)
-      -5d: Kort Z2 (45min) + benstyrka (lätt, 15min)
-      -4d: Vila eller 30min Z1
-      -3d: Aktivering: 60min Z2 med 3×3min Z4 (korta, skarpa)
-      -2d: Kort Z1 (30min) – spinn benen
-      -1d: Vila ELLER 20min Z1 med 3×30s race pace
-      Race day: TÄVLING
+    Protocol:
+      -6d: Last medium session (90min Z2 + 2x5min Z4)
+      -5d: Short Z2 (45min) + leg strength (easy, 15min)
+      -4d: Rest or 30min Z1
+      -3d: Activation: 60min Z2 with 3x3min Z4 (short, sharp)
+      -2d: Short Z1 (30min) - spin legs
+      -1d: Rest OR 20min Z1 with 3x30s race pace
+      Race day: RACE
 
-    Returnerar: dict med protocol, days, race_name, is_active
+    Returns: dict with protocol, days, race_name, is_active
     """
     future = sorted([
         r for r in races
@@ -814,85 +827,85 @@ def race_week_protocol(races: list, today: date) -> dict:
     race = future[0]
     race_date = datetime.strptime(race["start_date_local"][:10], "%Y-%m-%d").date()
     days_to_race = (race_date - today).days
-    race_name = race.get("name", "Tävling")
+    race_name = race.get("name", "Race")
 
     if days_to_race > 7 or days_to_race <= 0:
         return {"is_active": False, "protocol": [], "race_name": race_name, "days_to_race": days_to_race}
 
-    # Bygg dagspecifikt protokoll
+    # Build day-specific protocol
     protocol = []
 
     day_templates = {
         6: {
-            "title": f"🏁 Pre-race: Sista medel-passet ({race_name} om 6d)",
+            "title": f"🏁 Pre-race: Last medium session ({race_name} in 6d)",
             "type": "VirtualRide", "dur": 90, "slot": "MAIN",
             "steps": [
-                {"d": 20, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 30, "z": "Z2", "desc": "Uthållighet – fokusera på känsla"},
-                {"d": 5, "z": "Z4", "desc": "Sista Z4-insatsen – race pace"},
-                {"d": 5, "z": "Z1", "desc": "Vila"},
-                {"d": 5, "z": "Z4", "desc": "Andra Z4-insatsen – kontrollerad"},
-                {"d": 15, "z": "Z2", "desc": "Lugnt"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 20, "z": "Z2", "desc": "Warm-up"},
+                {"d": 30, "z": "Z2", "desc": "Endurance - focus on feel"},
+                {"d": 5, "z": "Z4", "desc": "Last Z4 effort - race pace"},
+                {"d": 5, "z": "Z1", "desc": "Rest"},
+                {"d": 5, "z": "Z4", "desc": "Second Z4 effort - controlled"},
+                {"d": 15, "z": "Z2", "desc": "Easy"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ],
-            "desc": "Sista passet med substans. Inga rekord – bara bekräfta formen. Race-nutritionsstrategi: testa CHO-intag."
+            "desc": "Last session with substance. No records - just confirm form. Race nutrition strategy: test CHO intake."
         },
         5: {
-            "title": f"🏁 Pre-race: Lätt cykel + snabb styrka ({race_name} om 5d)",
+            "title": f"🏁 Pre-race: Easy bike + quick strength ({race_name} in 5d)",
             "type": "VirtualRide", "dur": 45, "slot": "MAIN",
             "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning"},
-                {"d": 20, "z": "Z2", "desc": "Lugnt – håll benen igång"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 15, "z": "Z2", "desc": "Warm-up"},
+                {"d": 20, "z": "Z2", "desc": "Easy - keep legs moving"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ],
-            "desc": "Lätt dag. Kort cykel + valfritt 15min mobilitetsövningar. Ingen utmattning."
+            "desc": "Easy day. Short bike + optional 15min mobility exercises. No exhaustion."
         },
         4: {
-            "title": f"🏁 Pre-race: Vila ({race_name} om 4d)",
+            "title": f"🏁 Pre-race: Rest ({race_name} in 4d)",
             "type": "Rest", "dur": 0, "slot": "MAIN", "steps": [],
-            "desc": "Vilodag. Promenad OK. Fokus: sömn, hydration, nutrition. Ladda glykogen."
+            "desc": "Rest day. Walk OK. Focus: sleep, hydration, nutrition. Carb load."
         },
         3: {
-            "title": f"🏁 Pre-race: Aktivering ({race_name} om 3d)",
+            "title": f"🏁 Pre-race: Activation ({race_name} in 3d)",
             "type": "VirtualRide", "dur": 55, "slot": "MAIN",
             "steps": [
-                {"d": 15, "z": "Z2", "desc": "Uppvärmning – lätt"},
-                {"d": 3, "z": "Z4", "desc": "Aktivering 1 – väck benen"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z4", "desc": "Aktivering 2 – skarpt men kort"},
-                {"d": 3, "z": "Z1", "desc": "Vila"},
-                {"d": 3, "z": "Z4", "desc": "Aktivering 3 – sista gången Z4 innan race"},
-                {"d": 15, "z": "Z2", "desc": "Lugnt tillbaka"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 15, "z": "Z2", "desc": "Warm-up - easy"},
+                {"d": 3, "z": "Z4", "desc": "Activation 1 - wake up legs"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z4", "desc": "Activation 2 - sharp but short"},
+                {"d": 3, "z": "Z1", "desc": "Rest"},
+                {"d": 3, "z": "Z4", "desc": "Activation 3 - last time Z4 before race"},
+                {"d": 15, "z": "Z2", "desc": "Easy back"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ],
-            "desc": "AKTIVERING! Korta, skarpa Z4-insatser väcker nervsystemet. Max ansträngning 7/10. Ej tungt."
+            "desc": "ACTIVATION! Short, sharp Z4 efforts wake up the nervous system. Max effort 7/10. Not heavy."
         },
         2: {
-            "title": f"🏁 Pre-race: Spinn ({race_name} om 2d)",
+            "title": f"🏁 Pre-race: Spin ({race_name} in 2d)",
             "type": "VirtualRide", "dur": 30, "slot": "MAIN",
             "steps": [
-                {"d": 10, "z": "Z1", "desc": "Lugnt"},
-                {"d": 10, "z": "Z2", "desc": "Lätt tryck – inte mer"},
-                {"d": 10, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 10, "z": "Z1", "desc": "Easy"},
+                {"d": 10, "z": "Z2", "desc": "Light pressure - nothing more"},
+                {"d": 10, "z": "Z1", "desc": "Cool-down"},
             ],
-            "desc": "Bara spinna benen. 30 min max. Spara allt till tävlingen."
+            "desc": "Just spin the legs. 30 min max. Save everything for the race."
         },
         1: {
-            "title": f"🏁 Pre-race: Vila/Kort aktivering ({race_name} IMORGON!)",
+            "title": f"🏁 Pre-race: Rest/Short activation ({race_name} TOMORROW!)",
             "type": "VirtualRide", "dur": 20, "slot": "MAIN",
             "steps": [
-                {"d": 10, "z": "Z1", "desc": "Extremt lugnt"},
-                {"d": 1, "z": "Z5", "desc": "30s sprint – race-pace-påminnelse"},
-                {"d": 2, "z": "Z1", "desc": "Vila"},
+                {"d": 10, "z": "Z1", "desc": "Extremely easy"},
+                {"d": 1, "z": "Z5", "desc": "30s sprint - race-pace reminder"},
+                {"d": 2, "z": "Z1", "desc": "Rest"},
                 {"d": 1, "z": "Z5", "desc": "30s sprint"},
-                {"d": 6, "z": "Z1", "desc": "Nedvarvning"},
+                {"d": 6, "z": "Z1", "desc": "Cool-down"},
             ],
-            "desc": "Valfritt! 20 min med 2×30s sprints. Packa väskan. Kolla utrustning. Sov 8h+."
+            "desc": "Optional! 20 min with 2x30s sprints. Pack the bag. Check equipment. Sleep 8h+."
         },
         0: {
-            "title": f"🏁 TÄVLINGSDAG: {race_name}!",
+            "title": f"🏁 RACE DAY: {race_name}!",
             "type": "Ride", "dur": 0, "slot": "MAIN", "steps": [],
-            "desc": f"TÄVLINGSDAG! {race_name}. Uppvärmning 15-20min. Ät frukost 3h före. 90g CHO/h under. Lycka till! 💪"
+            "desc": f"RACE DAY! {race_name}. Warm-up 15-20min. Eat breakfast 3h before. 90g CHO/h during. Good luck! 💪"
         },
     }
 
@@ -915,16 +928,16 @@ def race_week_protocol(races: list, today: date) -> dict:
 
 
 def format_race_week_for_prompt(rw: dict) -> str:
-    """Formaterar race-week-protokollet för AI-prompten."""
+    """Formats the race-week protocol for the AI prompt."""
     if not rw.get("is_active"):
         return ""
 
     lines = [
         f"🏁 RACE WEEK PROTOCOL – {rw['race_name']} ({rw['race_date']})",
-        f"  Dagar kvar: {rw['days_to_race']}",
+        f"  Days left: {rw['days_to_race']}",
         "",
-        "  ⚠️ FÖLJ DETTA PROTOKOLL EXAKT. Inga avvikelser tillåtna.",
-        "  Överstyr alla andra regler (mesocykel, passbibliotek, etc).",
+        "  ⚠️ FOLLOW THIS PROTOCOL EXACTLY. No deviations allowed.",
+        "  Overrides all other rules (mesocycle, workout library, etc).",
         "",
     ]
     for p in rw["protocol"]:
@@ -932,7 +945,7 @@ def format_race_week_for_prompt(rw: dict) -> str:
         lines.append(f"  {p['date']} (-{p['days_before']}d): {p['title']}")
         lines.append(f"    {p['type']} | {p['dur']}min")
         if steps_text:
-            lines.append(f"    Steg: {steps_text}")
+            lines.append(f"    Steps: {steps_text}")
         lines.append(f"    {p['desc']}")
         lines.append("")
 
@@ -945,8 +958,8 @@ def format_race_week_for_prompt(rw: dict) -> str:
 
 def check_return_to_play(activities: list, today: date) -> dict:
     """
-    Kollar om atleten haft 5 eller fler dagar i rad helt utan träning
-    och triggar i så fall ett Return to Play-protokoll.
+    Checks if the athlete has had 5 or more days in a row completely without training
+    and in that case triggers a Return to Play protocol.
     """
     days_off = 0
     for i in range(1, 14):
@@ -954,7 +967,7 @@ def check_return_to_play(activities: list, today: date) -> dict:
         daily_acts = [a for a in activities if a.get("start_date_local", "")[:10] == check_date]
         moving_time = sum((a.get("moving_time") or a.get("elapsed_time") or 0) for a in daily_acts)
         tss = sum((a.get("icu_training_load", 0) or 0) for a in daily_acts)
-        if moving_time < 900 and tss < 10:  # < 15 min OCH < 10 TSS räknas som vilodag
+        if moving_time < 900 and tss < 10:  # < 15 min AND < 10 TSS counts as rest day
             daily_acts = [a for a in activities if a.get("start_date_local", "")[:10] == check_date and a.get("type") not in ("Rest", "Note")]
         
         if not daily_acts:
@@ -967,10 +980,10 @@ def check_return_to_play(activities: list, today: date) -> dict:
         has_strength = any(a.get("type", "") in ("WeightTraining", "Strength") for a in daily_acts)
         
         if total_time >= 900 or total_tss >= 10 or has_rpe or has_strength:
-            break  # Träning loggad och giltig -> bryt vilodagskedjan!
+            break  # Training logged and valid -> break rest day chain!
         else:
             break
-            days_off += 1  # Aktiviteten var helt obetydlig (t.ex. 5 min promenad)
+            days_off += 1  # Activity was completely insignificant (e.g. 5 min walk)
     return {"is_active": days_off >= 5, "days_off": days_off}
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -980,20 +993,20 @@ def check_return_to_play(activities: list, today: date) -> dict:
 def taper_quality_score(fitness_history: list, race_date: Optional[date],
                         taper_days: int = 14) -> dict:
     """
-    Mäter om tapern genomförs korrekt:
-    - CTL bör sjunka 5-10% under taper
-    - TSB bör stiga till +5 till +15 på tävlingsdagen
-    - ATL bör sjunka snabbt (30-50%)
+    Measures if the taper is executed correctly:
+    - CTL should drop 5-10% during taper
+    - TSB should rise to +5 to +15 on race day
+    - ATL should drop quickly (30-50%)
 
-    Returnerar:
+    Returns:
       is_in_taper:     bool
-      taper_day:       int (vilken dag av tapern)
-      ctl_drop_pct:    faktisk CTL-minskning i %
-      tsb_rise:        TSB-förändring
-      atl_drop_pct:    ATL-minskning i %
-      score:           0-100 kvalitetspoäng
-      verdict:         textbedömning
-      adjustments:     lista med korrigeringar om det går fel
+      taper_day:       int (which day of the taper)
+      ctl_drop_pct:    actual CTL decrease in %
+      tsb_rise:        TSB change
+      atl_drop_pct:    ATL decrease in %
+      score:           0-100 quality score
+      verdict:         text assessment
+      adjustments:     list of adjustments if it goes wrong
     """
     if not race_date or not fitness_history:
         return {"is_in_taper": False, "score": None}
@@ -1004,10 +1017,10 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
     if days_to_race > taper_days or days_to_race < 0:
         return {"is_in_taper": False, "score": None, "days_to_race": days_to_race}
 
-    taper_day = taper_days - days_to_race  # Dag 1, 2, ... av tapern
+    taper_day = taper_days - days_to_race  # Day 1, 2, ... of the taper
     taper_progress = taper_day / taper_days  # 0.0 → 1.0
 
-    # CTL vid taper-start vs nu
+    # CTL at taper start vs now
     taper_start_idx = max(0, len(fitness_history) - taper_day - 1)
     ctl_at_start = fitness_history[taper_start_idx].get("ctl", 0) if taper_start_idx < len(fitness_history) else 0
     ctl_now = fitness_history[-1].get("ctl", 0) if fitness_history else 0
@@ -1020,15 +1033,15 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
     atl_drop_pct = round((atl_at_start - atl_now) / max(atl_at_start, 1) * 100, 1) if atl_at_start else 0
     tsb_rise = round(tsb_now - tsb_at_start, 1)
 
-    # Förväntade värden vid denna punkt i tapern
-    expected_ctl_drop = taper_progress * 8  # Förväntad 5-10% CTL-drop vid slutet
-    expected_atl_drop = taper_progress * 40  # ATL bör sjunka 30-50%
-    expected_tsb = taper_progress * 15  # TSB bör stiga ~15 poäng
+    # Expected values at this point in the taper
+    expected_ctl_drop = taper_progress * 8  # Expected 5-10% CTL drop at the end
+    expected_atl_drop = taper_progress * 40  # ATL should drop 30-50%
+    expected_tsb = taper_progress * 15  # TSB should rise ~15 points
 
-    # Poängsättning (0-100)
+    # Scoring (0-100)
     score = 0
 
-    # CTL-drop: 5-10% = perfekt, <3% = för lite vila, >15% = för mycket
+    # CTL drop: 5-10% = perfect, <3% = too little rest, >15% = too much
     if 3 <= ctl_drop_pct <= 12:
         score += 35
     elif ctl_drop_pct < 3:
@@ -1036,7 +1049,7 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
     else:
         score += max(0, 35 - (ctl_drop_pct - 12) * 5)
 
-    # ATL-drop: 25-50% = bra
+    # ATL drop: 25-50% = good
     if 20 <= atl_drop_pct <= 55:
         score += 30
     elif atl_drop_pct < 20:
@@ -1044,7 +1057,7 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
     else:
         score += max(0, 30 - (atl_drop_pct - 55))
 
-    # TSB-rise: bör vara positiv och stigande
+    # TSB rise: should be positive and rising
     if tsb_rise > 0:
         score += min(35, round(tsb_rise * 3))
     else:
@@ -1054,26 +1067,26 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
 
     # Verdict
     if score >= 80:
-        verdict = "✅ Utmärkt taper! Form och fräschhet byggs optimalt."
+        verdict = "✅ Excellent taper! Form and freshness are building optimally."
     elif score >= 60:
-        verdict = "🟡 OK taper, men rum för förbättring."
+        verdict = "🟡 OK taper, but room for improvement."
     elif score >= 40:
-        verdict = "🟠 Tapern funkar inte optimalt."
+        verdict = "🟠 The taper is not working optimally."
     else:
-        verdict = "🔴 Tapern misslyckas – åtgärda omedelbart."
+        verdict = "🔴 Taper failing - address immediately."
 
-    # Korrigeringar
+    # Adjustments
     adjustments = []
     if ctl_drop_pct < 2 and taper_day >= 5:
-        adjustments.append("CTL sjunker för långsamt – du tränar för hårt under tapern. Sänk volymen mer.")
+        adjustments.append("CTL dropping too slowly - you are training too hard during the taper. Reduce volume more.")
     if ctl_drop_pct > 15:
-        adjustments.append("CTL sjunker för snabbt – du vilar för mycket. Behåll korta aktiveringspass.")
+        adjustments.append("CTL dropping too fast - you are resting too much. Keep short activation sessions.")
     if atl_drop_pct < 15 and taper_day >= 7:
-        adjustments.append("ATL sjunker inte tillräckligt – fortfarande för hög akut belastning.")
+        adjustments.append("ATL not dropping enough - still too high acute load.")
     if tsb_now < -5 and days_to_race < 5:
-        adjustments.append(f"⚠️ TSB fortfarande negativ ({tsb_now}) med {days_to_race}d kvar! Vila mer.")
+        adjustments.append(f"⚠️ TSB still negative ({tsb_now}) with {days_to_race}d left! Rest more.")
     if tsb_now > 25 and days_to_race > 3:
-        adjustments.append("TSB väldigt hög – risk att tappa skärpa. Lägg in korta aktiveringspass.")
+        adjustments.append("TSB very high - risk of losing sharpness. Add short activation sessions.")
 
     return {
         "is_in_taper":   True,
@@ -1093,22 +1106,22 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
         "verdict":       verdict,
         "adjustments":   adjustments,
         "summary": (
-            f"Taper dag {taper_day}/{taper_days} | Score: {score}/100 {verdict}\n"
+            f"Taper day {taper_day}/{taper_days} | Score: {score}/100 {verdict}\n"
             f"  CTL: {round(ctl_at_start)}→{round(ctl_now)} ({ctl_drop_pct:+.1f}%) | "
             f"ATL: {round(atl_at_start)}→{round(atl_now)} ({atl_drop_pct:+.1f}%) | "
             f"TSB: {round(tsb_at_start)}→{round(tsb_now)} ({tsb_rise:+.1f})"
-            + ("\n  Korrigeringar: " + " ".join(adjustments) if adjustments else "")
+            + ("\n  Adjustments: " + " ".join(adjustments) if adjustments else "")
         ),
     }
 
 
 def parse_zones(athlete):
     lines = []
-    names = {"Ride":"Cykling","Run":"Löpning","NordicSki":"Längdskidor","RollerSki":"Rullskidor","VirtualRide":"Zwift"}
+    names = {"Ride":"Cycling","Run":"Running","NordicSki":"Cross-country skiing","RollerSki":"Roller skiing","VirtualRide":"Zwift"}
     for ss in athlete.get("sportSettings", []):
         stypes = ss.get("types", []) if isinstance(ss.get("types"), list) else [ss.get("type")]
         t_names = [names.get(x, x) for x in stypes if x]
-        t = "/".join(t_names) if t_names else "Standardzoner"
+        t = "/".join(t_names) if t_names else "Standard zones"
         parts = []
         if ss.get("ftp"):    parts.append(f"FTP {ss['ftp']}W")
         if ss.get("lthr"):   parts.append(f"LTHR {ss['lthr']}bpm")
@@ -1119,29 +1132,29 @@ def parse_zones(athlete):
         if ftp and zones:
             zs = " | ".join(f"{z.get('name','Z'+str(i+1))}: {round(z.get('min',0)*ftp/100)}-{round(z.get('max',0)*ftp/100)}W"
                             for i,z in enumerate(zones) if z.get("min") and z.get("max"))
-            if zs: lines.append(f"    Effektzoner: {zs}")
+            if zs: lines.append(f"    Power zones: {zs}")
         if lthr and hr_z:
             zs = " | ".join(f"{z.get('name','Z'+str(i+1))}: {round(z.get('min',0)*lthr/100)}-{round(z.get('max',0)*lthr/100)}bpm"
                             for i,z in enumerate(hr_z) if z.get("min") and z.get("max"))
-            if zs: lines.append(f"    HR-zoner: {zs}")
-    return "\n".join(lines) if lines else "  Inga sportinställningar hittades."
+            if zs: lines.append(f"    HR zones: {zs}")
+    return "\n".join(lines) if lines else "  No sport settings found."
 
 def env_nutrition(temp_max, duration_min, first_zone):
     advice = []
-    low_int = first_zone in ("Z1","Z2","Zon 1","Zon 2")
-    if temp_max > 25: advice.append("VÄRME: +200ml/h. Elektrolyter (>=800mg Na/l).")
-    elif temp_max < 0: advice.append("KYLA: Drick enligt schema. Håll drycken ljummen.")
-    if low_int and duration_min < 90: advice.append("TRAIN LOW: Möjlighet att köra fastande för fettadaptering.")
+    low_int = first_zone in ("Z1","Z2","Zone 1","Zone 2")
+    if temp_max > 25: advice.append("HEAT: +200ml/h. Electrolytes (>=800mg Na/l).")
+    elif temp_max < 0: advice.append("COLD: Drink according to schedule. Keep drink lukewarm.")
+    if low_int and duration_min < 90: advice.append("TRAIN LOW: Opportunity to ride fasted for fat adaptation.")
     return advice
 
 def biometric_vetoes(hrv, life_stress):
     rules = []
     if hrv["state"] == "LOW" or hrv["stability"] == "UNSTABLE":
-        rules.append("HRV_LOW: Inga pass över Z2. Konvertera till Z1/vila.")
+        rules.append("HRV_LOW: No sessions above Z2. Convert to Z1/rest.")
     elif hrv["state"] == "SLIGHTLY_LOW":
-        rules.append("HRV_SLIGHTLY_LOW: Undvik Z4+.")
+        rules.append("HRV_SLIGHTLY_LOW: Avoid Z4+.")
     if life_stress >= 4:
-        rules.append("LIVSSTRESS_HÖG: Inga intervaller över tröskel. Sänk IF med 15%.")
+        rules.append("LIFE_STRESS_HIGH: No intervals above threshold. Lower IF by 15%.")
     return rules
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1150,20 +1163,20 @@ def biometric_vetoes(hrv, life_stress):
 
 def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
     """
-    Bygger en detaljerad analys av gårdagens planerade vs faktiska pass
-    som skickas till AI:n för feedback.
+    Builds a detailed analysis of yesterday's planned vs actual sessions
+    that is sent to the AI for feedback.
     """
     yesterday_date = (date.today() - timedelta(days=1)).isoformat()
     if not yesterday_planned or not is_ai_generated(yesterday_planned):
         if yesterday_actuals:
             a = yesterday_actuals[0]
             return (
-                f"GÅRDAGEN ({yesterday_date}): Inget AI-planerat pass igår, men aktivitet registrerad:\n"
-                f"  Typ: {a.get('type','?')} | {round((a.get('moving_time',0) or 0)/60)}min | "
+                f"YESTERDAY ({yesterday_date}): No AI-planned session yesterday, but activity registered:\n"
+                f"  Type: {a.get('type','?')} | {round((a.get('moving_time',0) or 0)/60)}min | "
                 f"TSS: {a.get('icu_training_load','?')} | HR: {a.get('average_heartrate','?')}bpm | "
                 f"RPE: {a.get('perceived_exertion','?')}"
             )
-        # Inget planerat, ingen aktivitet – inget att ge feedback om
+        # Nothing planned, no activity - nothing to give feedback on
         return ""
 
     planned_name = yesterday_planned.get("name", "?")
@@ -1173,16 +1186,16 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
 
     if not yesterday_actuals:
         return (
-            f"MISSAT PASS IGÅR ({yesterday_date}):\n"
-            f"  Planerat: {planned_name} ({planned_type}, {planned_dur}min)\n"
-            f"  Beskrivning: {planned_desc[:200]}\n"
-            f"  Faktiskt: Ingenting registrerat.\n"
-            f"  → Ge feedback: Vad missades? Är det en compliance-trend?"
+            f"MISSED SESSION YESTERDAY ({yesterday_date}):\n"
+            f"  Planned: {planned_name} ({planned_type}, {planned_dur}min)\n"
+            f"  Description: {planned_desc[:200]}\n"
+            f"  Actual: Nothing registered.\n"
+            f"  -> Give feedback: What was missed? Is it a compliance trend?"
         )
 
-    lines = [f"GÅRDAGENS ({yesterday_date}) PLANERADE PASS:\n  {planned_name} ({planned_type}, {planned_dur}min)"]
-    lines.append(f"  Plan-beskrivning: {planned_desc[:300]}")
-    lines.append(f"\nGÅRDAGENS FAKTISKA AKTIVITET(ER):")
+    lines = [f"YESTERDAY'S ({yesterday_date}) PLANNED SESSION:\n  {planned_name} ({planned_type}, {planned_dur}min)"]
+    lines.append(f"  Plan description: {planned_desc[:300]}")
+    lines.append(f"\nYESTERDAY'S ACTUAL ACTIVITY(IES):")
 
     for a in yesterday_actuals:
         actual_dur = round((a.get("moving_time", 0) or 0) / 60)
@@ -1192,22 +1205,22 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
             f"TSS: {fmt(a.get('icu_training_load'))} | "
             f"HR: {fmt(a.get('average_heartrate'),'bpm')} (max {fmt(a.get('max_heartrate'),'bpm')}) | "
             f"NP: {fmt(a.get('icu_weighted_avg_watts'),'W')} | IF: {fmt(a.get('icu_intensity'))} | "
-            f"RPE: {fmt(a.get('perceived_exertion'))} | Känsla: {fmt(a.get('feel'))}/5"
+            f"RPE: {fmt(a.get('perceived_exertion'))} | Feel: {fmt(a.get('feel'))}/5"
         )
 
-        # Jämförelseanalys
+        # Comparison analysis
         dur_diff = actual_dur - planned_dur
         if abs(dur_diff) > 10:
-            lines.append(f"  Δ Duration: {dur_diff:+d}min vs planerat")
+            lines.append(f"  Δ Duration: {dur_diff:+d}min vs planned")
 
-        # Zonanalys
+        # Zone analysis
         pz = format_zone_times(a.get("icu_zone_times")); hz = format_zone_times(a.get("icu_hr_zone_times"))
-        if pz: lines.append(f"  Effektzoner: {pz}")
-        if hz: lines.append(f"  HR-zoner: {hz}")
+        if pz: lines.append(f"  Power zones: {pz}")
+        if hz: lines.append(f"  HR zones: {hz}")
 
     lines.append(
-        "\n  → Ge feedback: Följdes planen? Rätt intensitet? Vad kan förbättras? "
-        "Var nutritionen tillräcklig? Konkreta tips."
+        "\n  -> Give feedback: Was the plan followed? Right intensity? What can be improved? "
+        "Was nutrition sufficient? Concrete tips."
     )
 
     return "\n".join(lines)

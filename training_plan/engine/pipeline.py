@@ -21,27 +21,27 @@ _INTENSITY_BY_ZONE = {
 }
 _CANDIDATE_VARIATIONS = [
     {
-        "label": "Kandidat A",
-        "focus": "Balanserad huvudkandidat",
+        "label": "Candidate A",
+        "focus": "Balanced main candidate",
         "instructions": [
-            "Bygg en balanserad plan med tydliga must-hit-pass och rimlig risk.",
-            "Optimera för helheten snarare än för max volym eller max aggressivitet.",
+            "Build a balanced plan with clear must-hit sessions and reasonable risk.",
+            "Optimize for the big picture rather than max volume or max aggressiveness.",
         ],
     },
     {
-        "label": "Kandidat B",
-        "focus": "Enkelhet och robusthet först",
+        "label": "Candidate B",
+        "focus": "Simplicity and robustness first",
         "instructions": [
-            "Förenkla upplägget aktivt och minimera filler-pass.",
-            "Skydda nyckelpassen men välj den mest robusta och genomförbara strukturen.",
+            "Actively simplify the plan and minimize filler sessions.",
+            "Protect the key sessions but choose the most robust and feasible structure.",
         ],
     },
     {
-        "label": "Kandidat C",
-        "focus": "Hög specificitet mot målet",
+        "label": "Candidate C",
+        "focus": "High specificity towards the goal",
         "instructions": [
-            "Prioritera race demands och blockets primära adaptation tydligare.",
-            "Var gärna mer specifik än Kandidat A, men håll dig inom säkra belastningsramar.",
+            "Prioritize race demands and the block's primary adaptation more clearly.",
+            "Feel free to be more specific than Candidate A, but stay within safe load limits.",
         ],
     },
 ]
@@ -54,9 +54,11 @@ def generate_plan(provider: str, prompt: str) -> AIPlan:
 def _extract_json_payload(raw: str) -> dict:
     clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     candidates = [clean]
-    matches = list(re.finditer(r"\{", clean))
-    if matches:
-        candidates.append(clean[matches[0].start():])
+    
+    start_idx = clean.find("{")
+    end_idx = clean.rfind("}")
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        candidates.append(clean[start_idx:end_idx+1])
 
     last_error: Exception | None = None
     for candidate in candidates:
@@ -67,17 +69,17 @@ def _extract_json_payload(raw: str) -> dict:
         except json.JSONDecodeError as exc:
             last_error = exc
 
-    raise ValueError(f"Kunde inte extrahera JSON-objekt: {last_error}")
+    raise ValueError(f"Could not extract JSON object: {last_error}")
 
 
 def _parse_structured_response(raw: str, model_cls, fallback, label: str):
     try:
         payload = _extract_json_payload(raw)
         parsed = model_cls.model_validate(payload)
-        log.info(f"✅ {label} parsad OK")
+        log.info(f"✅ {label} parsed OK")
         return parsed
     except Exception as exc:
-        log.warning(f"{label} kunde inte tolkas: {exc}")
+        log.warning(f"{label} could not be parsed: {exc}")
         return fallback
 
 
@@ -151,7 +153,7 @@ def _candidate_specs(candidate_count: int) -> list[dict]:
     for idx in range(candidate_count):
         base = _CANDIDATE_VARIATIONS[idx % len(_CANDIDATE_VARIATIONS)]
         specs.append({
-            "label": f"Kandidat {chr(65 + idx)}",
+            "label": f"Candidate {chr(65 + idx)}",
             "focus": base["focus"],
             "instructions": list(base["instructions"]),
         })
@@ -161,19 +163,19 @@ def _candidate_specs(candidate_count: int) -> list[dict]:
 def build_candidate_prompt(base_prompt: str, candidate_spec: dict, attempt: int, total_candidates: int) -> str:
     instructions = "\n".join(f"- {line}" for line in candidate_spec["instructions"])
     return f"""
-DU SKA SKAPA {candidate_spec['label']} av {total_candidates} i urvalet för revisionsvarv {attempt}.
+YOU MUST CREATE {candidate_spec['label']} out of {total_candidates} in the selection for revision round {attempt}.
 
-Syftet är att ge review/scoring flera verkliga alternativ att välja mellan.
-Skapa därför en meningsfullt annorlunda kandidat, inte bara små kosmetiska ändringar.
+The purpose is to give review/scoring multiple real alternatives to choose from.
+Therefore, create a meaningfully different candidate, not just small cosmetic changes.
 
-FOKUS FÖR DENNA KANDIDAT:
+FOCUS FOR THIS CANDIDATE:
 {candidate_spec['focus']}
 {instructions}
 
-KRAV:
-- Behåll exakt samma JSON-schema som briefen kräver.
-- Kopiera inte samma plan som de andra kandidaterna med bara små ordbyten.
-- Skillnaden ska synas i prioritering, enkelhet, nyckelpass eller riskprofil.
+REQUIREMENTS:
+- Keep exactly the same JSON schema as the brief requires.
+- Do not copy the same plan as the other candidates with just minor word swaps.
+- The difference must be visible in prioritization, simplicity, key sessions, or risk profile.
 
 BRIEF:
 {base_prompt}
@@ -183,59 +185,69 @@ BRIEF:
 def build_review_prompt(plan: AIPlan, athlete: dict | None, base_tss_by_date: dict[str, float],
                         review_context: dict, postprocess_changes: list[str]) -> str:
     plan_summary = summarize_plan_candidate(plan, athlete, base_tss_by_date)
-    changes_text = "\n".join(f"- {c}" for c in postprocess_changes) if postprocess_changes else "- Inga postprocess-ändringar"
+    changes_text = "\n".join(f"- {c}" for c in postprocess_changes) if postprocess_changes else "- No postprocess changes"
     return f"""
-ROLL: Du är en oberoende och skeptisk granskningscoach för uthållighetsplanering.
-Du skapade INTE planen nedan. Din uppgift är att hitta fel, blinda fläckar, onödig komplexitet och övertro.
-Var särskilt vaksam på planer som optimerar fel sak, gömmer filler-pass eller är säkra trots svag data.
+ROLE: You are an independent and skeptical review coach for endurance planning.
+You did NOT create the plan below. Your task is to find errors, blind spots, unnecessary complexity, and overconfidence.
+Be especially vigilant of plans that optimize the wrong thing, hide filler sessions, or are safe despite weak data.
 
-BEDÖM PLANEN UTIFRÅN:
-A. Målkoppling
-B. Nyckelpass
-C. Effektivitet
-D. Belastning & risk
-E. Individualisering
+EVALUATE THE PLAN BASED ON:
+A. Goal alignment
+B. Key sessions
+C. Efficiency
+D. Load & risk
+E. Individualization
 F. Race demands
 
 COUNTERFACTUAL THINKING:
-- Finns en enklare plan med liknande effekt?
-- Vad händer om volymen minskas men kvaliteten behålls?
-- Vad händer om fokus skiftas från nuvarande primära fokus till bästa alternativet?
+- Is there a simpler plan with similar effect?
+- What happens if the volume is reduced but the quality is maintained?
+- What happens if the focus shifts from the current primary focus to the best alternative?
 
-VIKTIGT:
-- Belöna inte bara planer som "låter coachiga".
-- Om datagrunden är osäker ska det synas i reviewn.
-- Filler-pass ska straffas.
-- Must-hit-pass ska vara tydligt skyddade.
+IMPORTANT ABOUT SAFETY RULES AND POSTPROCESSING:
+The above plan has already run through Python's strict safety rules. If you see in "POSTPROCESSING ALREADY APPLIED" that the code was forced to overwrite sessions (e.g. converted to Z1 due to "HARD-EASY", reduced time due to "CAP", or changed sport due to "STRENGTH_LIMIT" / "ACWR-VETO"), it means the original plan violated physiological laws.
+If such rule violations have occurred, you MUST fail the plan (set overall_verdict to REVISE or REJECT) and add the rule violation as a "must_fix". Never accept a plan that Python had to "cut to pieces", but force a revision where the AI builds the puzzle neatly and legally from the start! (Exceptions: "Illness", "LOCKED DATE" and "RETURN TO PLAY" are OK).
+
+IMPORTANT:
+- Do not just reward plans that "sound coach-like".
+- If the data foundation is uncertain, it should be visible in the review.
+- Filler sessions should be penalized.
+- Must-hit sessions must be clearly protected.
+- DO NOT penalize sessions several days into the future based on today's low readiness/HRV. You may only require changes (must_fix) for high intensity if they are TODAY or TOMORROW.
+- Even if the "primary_focus" for the block happens to be 'recovery', this ONLY applies short-term. You may NOT fail an FTP test or key session 4+ days into the future citing a 'recovery phase'.
+- Avoid conditional must-fixes (e.g. "change this IF form does not improve"). Either the session is a direct error today, or you approve it.
+- NEVER use `must_fix` to warn about behaviors (e.g. "make sure this doesn't become a habit") or future concerns. A `must_fix` may ONLY point to a concrete, physiological error in the plan.
+- If you have philosophical advice, warnings about the future, or minor feedback, put them in `coaching_advice` instead of `must_fix`.
 
 KONTEXT:
 {_compact_context(review_context)}
 
-PLANMETRIK:
+PLAN METRICS:
 {json.dumps(plan_summary, ensure_ascii=False, indent=2)}
 
-POSTPROCESSING SOM REDAN HAR GJORTS:
+POSTPROCESSING ALREADY APPLIED:
 {changes_text}
 
-KANDIDATPLAN:
+CANDIDATE PLAN:
 {_plan_for_prompt(plan)}
 
-Returnera ENBART JSON med exakt detta schema:
+Return ONLY JSON with exactly this schema:
 {{
-  "summary": "2-4 meningar med tydlig huvuddom",
+  "summary": "2-4 sentences with a clear main verdict",
   "goal_alignment": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "key_sessions": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "efficiency": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "load_and_risk": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "individualization": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "race_demands": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
-  "strengths": ["max 4 konkreta styrkor"],
-  "must_fix": ["det viktigaste som måste ändras innan planen kan litas på"],
-  "uncertainty_sources": ["vad gör dig osäker"],
+  "strengths": ["max 4 concrete strengths"],
+  "coaching_advice": ["minor feedback, tips and future warnings that DO NOT require immediate rebuilding"],
+  "must_fix": ["the most important thing that must be changed before the plan can be trusted"],
+  "uncertainty_sources": ["what makes you uncertain"],
   "counterfactuals": [
-    {{"question": "Finns en enklare plan med liknande effekt?", "answer": "", "tradeoffs": "", "recommendation": ""}},
-    {{"question": "Vad händer om volym minskas men kvalitet behålls?", "answer": "", "tradeoffs": "", "recommendation": ""}},
-    {{"question": "Vad händer om fokus skiftas till bästa alternativet?", "answer": "", "tradeoffs": "", "recommendation": ""}}
+    {{"question": "Is there a simpler plan with similar effect?", "answer": "", "tradeoffs": "", "recommendation": ""}},
+    {{"question": "What happens if volume is reduced but quality is maintained?", "answer": "", "tradeoffs": "", "recommendation": ""}},
+    {{"question": "What happens if focus shifts to the best alternative?", "answer": "", "tradeoffs": "", "recommendation": ""}}
   ],
   "overall_verdict": "PASS|REVISE|REJECT"
 }}
@@ -246,9 +258,9 @@ def review_plan(provider: str, plan: AIPlan, athlete: dict | None,
                 base_tss_by_date: dict[str, float], review_context: dict,
                 postprocess_changes: list[str]) -> PlanReview:
     fallback = PlanReview(
-        summary="Review-steget kunde inte tolkas säkert. Planen bör förenklas och granskas igen.",
-        must_fix=["Review-svaret var ogiltigt; kör ett säkrare revisionsvarv."],
-        uncertainty_sources=["Reviewer-response kunde inte parsas."],
+        summary="Review step could not be parsed safely. The plan should be simplified and reviewed again.",
+        must_fix=["Review response was invalid; run a safer revision round."],
+        uncertainty_sources=["Reviewer response could not be parsed."],
         overall_verdict="REVISE",
     )
     raw = call_ai(provider, build_review_prompt(plan, athlete, base_tss_by_date, review_context, postprocess_changes))
@@ -259,25 +271,25 @@ def build_score_prompt(plan: AIPlan, review: PlanReview, athlete: dict | None,
                        base_tss_by_date: dict[str, float], review_context: dict) -> str:
     plan_summary = summarize_plan_candidate(plan, athlete, base_tss_by_date)
     return f"""
-ROLL: Du är en separat scoring-modell. Du skapade inte planen och du skrev inte reviewn.
-Din uppgift är att poängsätta planen nyktert utifrån prestationsnytta, risk, specificitet, enkelhet och hur säker du är.
+ROLE: You are a separate scoring model. You did not create the plan and you did not write the review.
+Your task is to score the plan soberly based on performance benefit, risk, specificity, simplicity, and your confidence.
 
-SCORINGREGLER:
-- Effectiveness 0-10: sannolik prestationsnytta för blockmålet
-- Risk 0-10: risk för överbelastning, dålig absorption eller failure
-- Specificity 0-10: hur väl planen matchar målet och race demands
-- Simplicity 0-10: hur robust, tydlig och genomförbar planen är
-- Confidence 0-10: hur säker du är på din egen bedömning
+SCORING RULES:
+- Effectiveness 0-10: probable performance benefit for the block goal
+- Risk 0-10: risk of overload, poor absorption or failure
+- Specificity 0-10: how well the plan matches the goal and race demands
+- Simplicity 0-10: how robust, clear and executable the plan is
+- Confidence 0-10: how confident you are in your own assessment
 
-VIKTIGT:
-- Hög osäkerhet i data eller review ska sänka confidence.
-- Hög risk ska inte gömmas bakom hög effectiveness.
-- En enkel plan med skyddade must-hit-pass får gärna slå en mer avancerad plan.
+IMPORTANT:
+- High uncertainty in data or review should lower confidence.
+- High risk should not be hidden behind high effectiveness.
+- A simple plan with protected must-hit sessions should beat a more advanced plan.
 
 KONTEXT:
 {_compact_context(review_context)}
 
-PLANMETRIK:
+PLAN METRICS:
 {json.dumps(plan_summary, ensure_ascii=False, indent=2)}
 
 REVIEW:
@@ -286,15 +298,15 @@ REVIEW:
 PLAN:
 {_plan_for_prompt(plan)}
 
-Returnera ENBART JSON:
+Return ONLY JSON:
 {{
   "effectiveness": 0,
   "risk": 0,
   "specificity": 0,
   "simplicity": 0,
   "confidence": 0,
-  "rationale": "kort förklaring",
-  "uncertainty_sources": ["vad gör scoret osäkert"],
+  "rationale": "short explanation",
+  "uncertainty_sources": ["what makes the score uncertain"],
   "action_hint": "ACCEPT|REVISE|REJECT"
 }}
 """.strip()
@@ -308,15 +320,19 @@ def score_plan(provider: str, plan: AIPlan, review: PlanReview, athlete: dict | 
         specificity=5,
         simplicity=5,
         confidence=2,
-        rationale="Score-steget kunde inte tolkas säkert; välj revision före acceptans.",
-        uncertainty_sources=["Scoring-response kunde inte parsas."],
+        rationale="Scoring step could not be parsed safely; choose revision before acceptance.",
+        uncertainty_sources=["Scoring response could not be parsed."],
         action_hint="REVISE",
     )
     raw = call_ai(provider, build_score_prompt(plan, review, athlete, base_tss_by_date, review_context))
     return _parse_structured_response(raw, PlanScores, fallback, "Plan-score")
 
 
-def decide_plan(review: PlanReview, scores: PlanScores) -> tuple[str, str]:
+def decide_plan(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> tuple[str, str]:
+    postprocess_changes = postprocess_changes or []
+    veto_triggers = ["HARD-EASY", "TAK v", "VOLYMSPÄRR", "STYRKEGRÄNS", "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET", "TSS-UNDERSKOTT VETO"]
+    vetos_found = [c for c in postprocess_changes if any(t in c for t in veto_triggers)]
+
     dimensions = [
         review.goal_alignment,
         review.key_sessions,
@@ -329,10 +345,12 @@ def decide_plan(review: PlanReview, scores: PlanScores) -> tuple[str, str]:
     weak_count = sum(1 for dim in dimensions if dim.rating == "WEAK")
 
     reasons = []
+    if vetos_found:
+        reasons.append(f"Python veto triggered ({len(vetos_found)} rule violations)")
     if review.must_fix:
         reasons.append(f"{len(review.must_fix)} must-fix")
     if critical_count:
-        reasons.append(f"{critical_count} kritiska områden")
+        reasons.append(f"{critical_count} critical areas")
     if scores.risk >= 8:
         reasons.append(f"risk {scores.risk}/10")
     if scores.effectiveness <= 4:
@@ -348,10 +366,11 @@ def decide_plan(review: PlanReview, scores: PlanScores) -> tuple[str, str]:
         or scores.specificity <= 4
         or critical_count >= 2
     ):
-        return "REJECT", ", ".join(reasons) or "Planen underkänns av review/scoring."
+        return "REJECT", ", ".join(reasons) or "The plan is rejected by review/scoring."
 
     if (
-        review.overall_verdict == "PASS"
+        not vetos_found
+        and review.overall_verdict == "PASS"
         and scores.action_hint == "ACCEPT"
         and scores.effectiveness >= 7
         and scores.specificity >= 7
@@ -362,7 +381,7 @@ def decide_plan(review: PlanReview, scores: PlanScores) -> tuple[str, str]:
         and critical_count == 0
         and weak_count <= 1
     ):
-        return "ACCEPT", "Planen är målkopplad, tillräckligt säker och behöver inga tvingande ändringar."
+        return "ACCEPT", "The plan is aligned with goals, sufficiently safe and needs no mandatory changes."
 
     reasons.extend([
         f"effectiveness {scores.effectiveness}/10",
@@ -378,29 +397,32 @@ def build_revision_prompt(base_generation_prompt: str, plan: AIPlan, review: Pla
                           scores: PlanScores, action: str, attempt: int,
                           postprocess_changes: list[str]) -> str:
     hard_reset = action == "REJECT"
-    changes_text = "\n".join(f"- {c}" for c in postprocess_changes) if postprocess_changes else "- Inga postprocess-ändringar"
-    revision_mode = (
-        "KASTA den tidigare strukturen och bygg om planen från grunden."
-        if hard_reset else
-        "Behåll endast de delar som fortfarande är tydligt försvarbara. Revidera resten aktivt."
-    )
+    surgical = action == "REVISE" and scores.effectiveness >= 7 and scores.specificity >= 7
+    changes_text = "\n".join(f"- {c}" for c in postprocess_changes) if postprocess_changes else "- No postprocess changes"
+    
+    if hard_reset:
+        revision_mode = "DISCARD the previous structure and rebuild the plan from scratch."
+    elif surgical:
+        revision_mode = "SURGICAL REVISION: This plan is almost perfect. You may ONLY change exactly what is mentioned in must-fix. Do absolutely not touch anything else in the weekly structure. DO NOT lower the total load (TSS)."
+    else:
+        revision_mode = "Keep only the parts that are still clearly defensible. Actively revise the rest."
     return f"""
-ROLL: Du är revisionsplaneraren. Du MÅSTE förbättra planen utifrån oberoende review och scoring.
-Försök inte försvara den gamla planen. Om reviewn säger att något är svagt eller fel ska det åtgärdas.
+ROLE: You are the revision planner. You MUST improve the plan based on independent review and scoring.
+Do not try to defend the old plan. If the review says something is weak or wrong, fix it.
 
-REVISIONSVARV: {attempt}
-KRAV:
-- Åtgärda must-fix först
-- Skydda rätt must-hit-pass
-- Ta bort filler-pass
-- Förenkla om samma effekt kan nås med mindre friktion
-- Visa osäkerhet i summary när datagrunden är osäker
-- Om action är REJECT ska du tänka om från grunden
+REVISION ROUND: {attempt}
+REQUIREMENTS:
+- Address must-fix first
+- Protect the right must-hit sessions
+- Remove filler sessions
+- Simplify if the same effect can be achieved with less friction
+- Show uncertainty in summary when data foundation is uncertain
+- If action is REJECT, rethink from scratch
 
-REVISIONSLÄGE:
+REVISION MODE:
 {revision_mode}
 
-NUVARANDE PLAN:
+CURRENT PLAN:
 {_plan_for_prompt(plan)}
 
 REVIEW:
@@ -409,17 +431,21 @@ REVIEW:
 SCORES:
 {json.dumps(scores.model_dump(exclude_none=True), ensure_ascii=False, indent=2)}
 
-POSTPROCESSING SOM REDAN HAR GJORTS:
+POSTPROCESSING ALREADY APPLIED:
 {changes_text}
 
-ORIGINALT PLANERINGSBRIEF:
+ORIGINAL PLANNING BRIEF:
 {base_generation_prompt}
 
-Returnera ENBART samma AIPlan-JSON-schema som originalprompten kräver.
+Return ONLY the exact same AIPlan JSON schema that the original prompt requires.
 """.strip()
 
 
-def _candidate_rank(review: PlanReview, scores: PlanScores) -> float:
+def _candidate_rank(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> float:
+    postprocess_changes = postprocess_changes or []
+    veto_triggers = ["HARD-EASY", "TAK v", "VOLYMSPÄRR", "STYRKEGRÄNS", "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET", "TSS-UNDERSKOTT VETO"]
+    vetos_found = sum(1 for c in postprocess_changes if any(t in c for t in veto_triggers))
+
     verdict_bonus = {"PASS": 2.0, "REVISE": 0.5, "REJECT": -2.0}
     return (
         scores.effectiveness * 2.0
@@ -428,6 +454,7 @@ def _candidate_rank(review: PlanReview, scores: PlanScores) -> float:
         + scores.confidence * 0.8
         - scores.risk * 1.8
         - len(review.must_fix) * 0.7
+        - vetos_found * 3.0
         + verdict_bonus.get(review.overall_verdict, 0.0)
     )
 
@@ -436,8 +463,8 @@ def _candidate_round_line(label: str, action: str, scores: PlanScores, review: P
                           focus: str = "") -> str:
     must_fix = review.must_fix[0] if review.must_fix else "no major must-fix"
     return (
-        f"{label}: {action} | Focus {focus or 'balanced'} | Effekt {scores.effectiveness}/10 | "
-        f"Risk {scores.risk}/10 | Spec {scores.specificity}/10 | Enkelhet {scores.simplicity}/10 | "
+        f"{label}: {action} | Focus {focus or 'balanced'} | Effect {scores.effectiveness}/10 | "
+        f"Risk {scores.risk}/10 | Spec {scores.specificity}/10 | Simplicity {scores.simplicity}/10 | "
         f"Confidence {scores.confidence}/10 | Must-fix {must_fix}"
     )
 
@@ -451,8 +478,9 @@ def _pick_round_winner(results: list[dict]) -> dict:
 def run_plan_pipeline(provider: str, generation_prompt: str,
                       postprocess_candidate: Callable[[AIPlan], tuple[AIPlan, list[str]]],
                       athlete: dict | None, base_tss_by_date: dict[str, float],
-                      review_context: dict, max_iterations: int = 2,
-                      candidate_count: int = 3) -> tuple[AIPlan, list[str], PlanDecisionTrace]:
+                      tss_budget: float,
+                      review_context: dict, max_iterations: int = 5,
+                      candidate_count: int = 2) -> tuple[AIPlan, list[str], PlanDecisionTrace]:
     max_iterations = max(1, max_iterations)
     candidate_count = max(1, candidate_count)
     best_candidate: tuple[AIPlan, list[str], PlanDecisionTrace, float] | None = None
@@ -464,7 +492,7 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
 
     for attempt in range(1, max_iterations + 1):
         if attempt == 1:
-            log.info("🧠 Generate %s plan candidates", candidate_count)
+            log.info("🧠 Creating original plan (Attempt %s/%s). Generating %s candidates...", attempt, max_iterations, candidate_count)
             round_base_prompt = generation_prompt
         else:
             review = last_trace.review if last_trace and last_trace.review else PlanReview()
@@ -474,11 +502,11 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
                 specificity=5,
                 simplicity=5,
                 confidence=3,
-                rationale="Fallback inför revision.",
+                rationale="Fallback before revision.",
                 action_hint="REVISE",
             )
             action = last_trace.action if last_trace else "REVISE"
-            log.info(f"🔁 Revision varv {attempt}/{max_iterations} ({action})")
+            log.info(f"🔁 Revision round {attempt}/{max_iterations} (Decision: {action}) - AI is rebuilding the plan...")
             round_base_prompt = build_revision_prompt(
                 generation_prompt,
                 current_plan or best_candidate[0],
@@ -494,6 +522,20 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
             candidate_prompt = build_candidate_prompt(round_base_prompt, candidate_spec, attempt, candidate_count)
             candidate_plan = generate_plan(provider, candidate_prompt)
             candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
+
+            # --- FÖRSLAG 3: Dynamisk TSS-kalkylator & Veto ---
+            planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
+            total_tss = planned_tss + sum(base_tss_by_date.values())
+            med_mode = review_context.get("minimum_effective_dose", {}).get("mode", "READY")
+            
+            if tss_budget > 0 and total_tss < tss_budget * 0.85:
+                missing = round(tss_budget - total_tss)
+                if med_mode == "ACTIVE":
+                    candidate_changes.append(f"TSS-INFO: Plan gives {round(total_tss)} TSS (budget {round(tss_budget)}). Approved due to low form (MED=ACTIVE), but do not reduce further.")
+                else:
+                    candidate_changes.append(f"TSS-DEFICIT VETO: Plan only reaches {round(total_tss)} TSS (budget {round(tss_budget)}). You are missing {missing} TSS. Extend endurance sessions or add aerobic volume!")
+            # -------------------------------------------------
+
             review = review_plan(
                 provider,
                 candidate_plan,
@@ -510,8 +552,8 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
                 base_tss_by_date,
                 review_context,
             )
-            action, rationale = decide_plan(review, scores)
-            rank = _candidate_rank(review, scores)
+            action, rationale = decide_plan(review, scores, candidate_changes)
+            rank = _candidate_rank(review, scores, candidate_changes)
             round_results.append({
                 "label": candidate_spec["label"],
                 "focus": candidate_spec["focus"],
@@ -524,7 +566,7 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
                 "rank": rank,
             })
             log.info(
-                "🧪 %s -> %s | Effekt %s/10 | Risk %s/10 | Spec %s/10 | Enkelhet %s/10 | Confidence %s/10",
+                "🧪 %s -> %s | Effect %s/10 | Risk %s/10 | Spec %s/10 | Simplicity %s/10 | Confidence %s/10",
                 candidate_spec["label"],
                 action,
                 scores.effectiveness,
@@ -544,9 +586,9 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
         current_plan = winner["plan"]
         current_changes = winner["changes"]
         revision_history.append(
-            f"Varv {attempt}: valde {winner['label']} ({winner['focus']}) -> {winner['action']} | "
-            f"Effekt {winner['scores'].effectiveness}/10 | Risk {winner['scores'].risk}/10 | "
-            f"Spec {winner['scores'].specificity}/10 | Enkelhet {winner['scores'].simplicity}/10 | "
+            f"Round {attempt}: chose {winner['label']} ({winner['focus']}) -> {winner['action']} | "
+            f"Effect {winner['scores'].effectiveness}/10 | Risk {winner['scores'].risk}/10 | "
+            f"Spec {winner['scores'].specificity}/10 | Simplicity {winner['scores'].simplicity}/10 | "
             f"Confidence {winner['scores'].confidence}/10"
         )
 
@@ -569,7 +611,7 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
             best_candidate = (current_plan, list(current_changes), trace, winner_rank)
         last_trace = trace
 
-        log.info("🏁 Varv %s vinnare: %s", attempt, _candidate_round_line(
+        log.info("🏁 Round %s winner: %s", attempt, _candidate_round_line(
             winner["label"], winner["action"], winner["scores"], winner["review"], winner["focus"]
         ))
 
@@ -582,10 +624,10 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
     best_trace = best_trace.model_copy(update={
         "used_with_override": True,
         "revision_history": list(revision_history) + [
-            "Ingen kandidat nådde ACCEPT inom max iterationer; bästa reviderade versionen används med försiktighet."
+            "No candidate reached ACCEPT within max iterations; best revised version used with caution."
         ],
     })
-    log.warning("⚠️ Ingen plan nådde ACCEPT. Använder bästa reviderade kandidat med override.")
+    log.warning("⚠️ No plan reached ACCEPT. Using best revised candidate with override.")
     return best_plan.model_copy(update={"decision_trace": best_trace}), best_changes, best_trace
 
 
@@ -717,11 +759,11 @@ def update_plan_outcome_tracking(state: dict, activities: list[dict]) -> tuple[d
         realized_load_pct = round(realized_load / planned_tss, 2) if planned_tss else None
 
         if key_completion_rate is not None and key_completion_rate >= 0.8:
-            verdict = "Planen omsattes starkt i praktiken."
+            verdict = "The plan was executed strongly in practice."
         elif completion_rate is not None and completion_rate < 0.5:
-            verdict = "Planen fick låg faktisk efterlevnad."
+            verdict = "The plan had low actual compliance."
         else:
-            verdict = "Planen gav blandat utfall."
+            verdict = "The plan yielded mixed results."
 
         entry["outcome"] = {
             "completion_rate": completion_rate,
@@ -735,11 +777,11 @@ def update_plan_outcome_tracking(state: dict, activities: list[dict]) -> tuple[d
     if not recent:
         historical_validation = {
             "evaluated_plans": 0,
-            "summary": "Historisk validering: ännu inga tidigare planer med färdigt utfall att utvärdera.",
+            "summary": "Historical validation: no previous plans with final outcomes to evaluate yet.",
         }
         outcome_tracking = {
             "evaluated_plans": 0,
-            "summary": "Outcome tracking: väntar på att tidigare planfönster ska avslutas innan kalibrering kan göras.",
+            "summary": "Outcome tracking: waiting for previous plan windows to finish before calibration can be done.",
         }
         bucket["historical_validation"] = historical_validation
         bucket["outcome_tracking"] = outcome_tracking
@@ -763,26 +805,26 @@ def update_plan_outcome_tracking(state: dict, activities: list[dict]) -> tuple[d
         and entry["outcome"].get("key_session_completion_rate") is not None
     ]
 
-    bias_note = "Kalibreringen ser relativt neutral ut."
+    bias_note = "Calibration looks relatively neutral."
     if avg_effectiveness >= 8 and avg_key_completion < 0.6:
-        bias_note = "Modellen tenderar att överskatta effekt när nyckelpassen inte blir genomförda."
+        bias_note = "The model tends to overestimate effectiveness when key sessions are not completed."
     elif avg_effectiveness <= 5 and avg_key_completion >= 0.75:
-        bias_note = "Modellen verkar ibland underskatta vad atleten faktiskt kan absorbera."
+        bias_note = "The model sometimes underestimates what the athlete can actually absorb."
 
     simplicity_note = ""
     if simplicity_strong and simplicity_weak:
         strong_avg = sum(simplicity_strong) / len(simplicity_strong)
         weak_avg = sum(simplicity_weak) / len(simplicity_weak)
         if strong_avg > weak_avg + 0.15:
-            simplicity_note = " Enklare planer har hittills gett bättre nyckelpass-compliance."
+            simplicity_note = " Simpler plans have historically given better key session compliance."
 
     historical_validation = {
         "evaluated_plans": len(recent),
         "avg_completion_rate": avg_completion,
         "avg_key_session_completion_rate": avg_key_completion,
         "summary": (
-            f"Historisk validering (proxy): {len(recent)} tidigare planfönster utvärderade. "
-            f"Snitt efterlevnad {round(avg_completion * 100)}% och nyckelpass {round(avg_key_completion * 100)}%."
+            f"Historical validation (proxy): {len(recent)} previous plan windows evaluated. "
+            f"Avg compliance {round(avg_completion * 100)}% and key sessions {round(avg_key_completion * 100)}%."
             f"{simplicity_note}"
         ),
     }

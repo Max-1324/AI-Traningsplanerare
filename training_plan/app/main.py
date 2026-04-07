@@ -17,7 +17,7 @@ args = None
 def main(argv=None):
     global args
 
-    # Tvinga Python att använda UTF-8 för in- och utmatning så att å, ä, ö fungerar i Windows-terminaler
+    # Force Python to use UTF-8 for input/output so that special characters work in Windows terminals
     import sys
     if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
@@ -26,7 +26,7 @@ def main(argv=None):
     args = parse_args(argv)
     common.args = args
     ensure_required_config()
-    log.info("Hämtar data från intervals.icu...")
+    log.info("Fetching data from intervals.icu...")
     try:
         athlete    = fetch_athlete()
         wellness   = fetch_wellness(args.days_history)
@@ -35,24 +35,24 @@ def main(argv=None):
         races      = fetch_races(365)
         planned    = fetch_planned_workouts(args.horizon)
         all_events = fetch_all_planned_events(days_back=28)
-        log.info(f"  {len(activities)} aktiviteter | {len(wellness)} wellness | {len(races)} tävlingar | {len(planned)} planerade")
+        log.info(f"  {len(activities)} activities | {len(wellness)} wellness | {len(races)} races | {len(planned)} planned")
     except requests.HTTPError as e:
-        log.error(f"API-fel: {e}"); sys.exit(1)
+        log.error(f"API error: {e}"); sys.exit(1)
 
     state = load_state()
 
     manual_workouts = [w for w in planned if not is_ai_generated(w) and w.get("category") == "WORKOUT"]
     ai_workouts     = [w for w in planned if is_ai_generated(w)]
     locked_dates    = {w.get("start_date_local","")[:10] for w in manual_workouts}
-    if manual_workouts: log.info(f"  {len(manual_workouts)} manuella pass låsta: {', '.join(sorted(locked_dates))}")
+    if manual_workouts: log.info(f"  {len(manual_workouts)} manual sessions locked: {', '.join(sorted(locked_dates))}")
 
-    log.info("Hämtar väder...")
+    log.info("Fetching weather...")
     weather = fetch_weather(args.horizon)
 
     # ── DATAKVALITETSVALIDERING ──────────────────────────────────────────────
     dq = validate_data_quality(activities, wellness)
     if dq["has_issues"]:
-        log.warning(f"⚠️  Datakvalitet: {len(dq['warnings'])} varningar")
+        log.warning(f"⚠️  Data quality: {len(dq['warnings'])} warnings")
     activities_clean = [a for a in activities
                         if (a.get("id") or a.get("start_date_local","")) not in dq["filtered_activity_ids"]]
     wellness_clean   = [w for w in wellness
@@ -116,11 +116,11 @@ def main(argv=None):
     # Filtret är för aggressivt för just denna kontroll.
     rtp_status = check_return_to_play(activities, date.today())
     if rtp_status.get("is_active"):
-        log.info(f"🚑 Return to Play-protokoll aktivt ({rtp_status['days_off']} vilodagar i rad)")
+        log.info(f"🚑 Return to Play protocol active ({rtp_status['days_off']} rest days in a row)")
 
     mesocycle = determine_mesocycle(fitness, activities_clean, state)
     save_state(state)
-    log.info(f"🔄 Mesocykel: Block {mesocycle['block_number']}, Vecka {mesocycle['week_in_block']}/4"
+    log.info(f"🔄 Mesocycle: Block {mesocycle['block_number']}, Week {mesocycle['week_in_block']}/4"
              + (" [DELOAD]" if mesocycle['is_deload'] else ""))
 
     # ── 2: CTL-TRAJEKTORIA (körs FÖRE budget så vi kan använda required_weekly_tss) ──
@@ -129,14 +129,14 @@ def main(argv=None):
     taper_days = taper_config["taper_days"]
     trajectory = ctl_trajectory(ctl, race_date, TARGET_CTL, taper_days=taper_days)
     if trajectory["has_target"]:
-        log.info(f"🎯 CTL-trajektoria: {trajectory['message']}")
+        log.info(f"🎯 CTL trajectory: {trajectory['message']}")
 
     # Faktisk ramp från intervals.icu:s egna CTL-värden (7 dgr bakåt)
     actual_weekly_ramp = None
     if len(fitness) >= 8:
         ctl_7d_ago = fitness[-8].get("ctl", ctl)
         actual_weekly_ramp = round(ctl - ctl_7d_ago, 1)
-        log.info(f"📈 Faktisk CTL-ramp (intervals.icu): {actual_weekly_ramp:+.1f} CTL/vecka")
+        log.info(f"📈 Actual CTL ramp (intervals.icu): {actual_weekly_ramp:+.1f} CTL/week")
 
     tsb_bgt = tss_budget(
         ctl, tsb_val, args.horizon + 1, fitness, mesocycle["load_factor"],  # +1: matchar enforce_tss horizon_days
@@ -151,7 +151,7 @@ def main(argv=None):
     )
     budget_daily_tss = tsb_bgt / max(args.horizon + 1, 1)
     budget_ramp = ctl_ramp_from_daily_tss(ctl, budget_daily_tss)
-    log.info(f"🎚️ Rampmål: +{target_ramp:.1f} CTL/vecka | Budget motsvarar ca +{budget_ramp:.1f} CTL/vecka")
+    log.info(f"🎚️ Ramp goal: +{target_ramp:.1f} CTL/week | Budget corresponds to approx +{budget_ramp:.1f} CTL/week")
 
     # ── 3: COMPLIANCE ────────────────────────────────────────────────────────
     compliance = compliance_analysis(all_events, activities_clean, days=28)
@@ -160,7 +160,7 @@ def main(argv=None):
     # ── 4: PASSBIBLIOTEK ─────────────────────────────────────────────────────
     workout_levels = state.get("workout_levels", {})
     workout_lib_text = get_next_workouts(workout_levels, phase["phase"])
-    log.info(f"📚 Passbibliotek: {', '.join(f'{k}=L{v}' for k,v in workout_levels.items())}")
+    log.info(f"📚 Workout library: {', '.join(f'{k}=L{v}' for k,v in workout_levels.items())}")
 
     # ── 6: FTP-TEST ──────────────────────────────────────────────────────────
     ftp_check = ftp_test_check(activities_clean, planned, athlete)
@@ -189,7 +189,7 @@ def main(argv=None):
     # ── RACE WEEK PROTOCOL ───────────────────────────────────────────────────
     race_week = race_week_protocol(races, date.today())
     if race_week.get("is_active"):
-        log.info(f"🏁 Race week aktiv! {race_week['race_name']} om {race_week['days_to_race']}d")
+        log.info(f"🏁 Race week active! {race_week['race_name']} in {race_week['days_to_race']}d")
 
     # ── PRE-RACE LOGISTIK ────────────────────────────────────────────────────
     pre_race_advice = pre_race_logistics_advice(race_week.get("days_to_race", 999)) if race_week else ""
@@ -197,7 +197,7 @@ def main(argv=None):
     # ── TAPER QUALITY SCORE ──────────────────────────────────────────────────
     taper_score = taper_quality_score(fitness, race_date, taper_days=taper_days)
     if taper_score.get("is_in_taper"):
-        log.info(f"📉 Taper dag {taper_score['taper_day']}/{taper_score['taper_days']} | Score: {taper_score['score']}/100 {taper_score['verdict']}")
+        log.info(f"📉 Taper day {taper_score['taper_day']}/{taper_score['taper_days']} | Score: {taper_score['score']}/100 {taper_score['verdict']}")
 
     # ── YESTERDAY ANALYSIS ───────────────────────────────────────────────────
     yesterday_analysis = analyze_yesterday(yesterday_planned, yesterday_actuals, activities_clean)
@@ -207,7 +207,7 @@ def main(argv=None):
     horizon_dates = [(date.today() + timedelta(days=i)).isoformat() for i in range(args.horizon + 1)]
     constraints_text = format_constraints_for_prompt(constraints, horizon_dates)
     if constraints:
-        log.info(f"📅 Schema-begränsningar: {len(constraints)} regler från intervals.icu")
+        log.info(f"📅 Schedule constraints: {len(constraints)} rules from intervals.icu")
 
     # ── Sammanfatta befintlig plan ───────────────────────────────────────────
     existing_plan_summary = format_existing_plan(ai_workouts)
@@ -373,10 +373,10 @@ def main(argv=None):
             continue
         base_tss_by_date[d] = base_tss_by_date.get(d, 0) + (w.get("planned_load", 0) or 0)
 
-    log.info(f"🤖 Coachen granskar plan och dagsform...")
+    log.info(f"🤖 The coach is reviewing the plan and daily form...")
     prompt_morning = dict(morning)
     if not prompt_morning.get("time_available"):
-        prompt_morning["time_available"] = "Ingen explicit tidsgrans"
+        prompt_morning["time_available"] = "No explicit time limit"
 
     prompt = build_prompt(
         activities, wellness_clean, fitness, races, weather, prompt_morning, args.horizon,
@@ -466,9 +466,10 @@ def main(argv=None):
         apply_postprocess,
         athlete,
         base_tss_by_date,
+        tsb_bgt,
         review_context,
-        max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "2")),
-        candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "3")),
+        max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "5")),
+        candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "2")),
     )
     # Rensa coach-feedback om det inte finns faktisk aktivitetsdata att ge feedback om
     if not yesterday_analysis:
@@ -476,7 +477,7 @@ def main(argv=None):
     planned_total_tss = sum(estimate_tss_coggan(d, athlete) for d in plan.days) + sum(base_tss_by_date.values())
     planned_daily_tss = planned_total_tss / max(args.horizon + 1, 1)
     planned_ramp = ctl_ramp_from_daily_tss(ctl, planned_daily_tss)
-    log.info(f"📐 Planerad ramp från sparad plan: ca +{planned_ramp:.1f} CTL/vecka")
+    log.info(f"📐 Planned ramp from saved plan: approx {planned_ramp:+.1f} CTL/week")
 
     print_plan(
         plan, changes, mesocycle, trajectory, acwr_trend, taper_score, race_week, rtp_status,
@@ -484,10 +485,10 @@ def main(argv=None):
     )
 
     if args.dry_run:
-        print("\nDRY-RUN - ingenting sparades.")
-        print(f"Validering: {len(changes)} ändringar gjorda av post-processing.")
-        ans = input("Vill du spara ändå? (j/n) [n]: ").strip().lower()
-        if ans not in ("j","ja","y","yes"): return
+        print("\nDRY-RUN - nothing was saved.")
+        print(f"Validation: {len(changes)} changes made by post-processing.")
+        ans = input("Do you want to save anyway? (y/n) [n]: ").strip().lower()
+        if ans not in ("y","yes"): return
 
     now_local = _stockholm_now_naive()
 
@@ -508,12 +509,12 @@ def main(argv=None):
         future_tss = future_ai_tss + future_manual_tss
         if future_tss < tsb_bgt * 0.75:
             mode = "full"
-            mode_reason = (f"Befintlig plan ({future_tss} TSS inkl. manuella pass) täcker under 75% av budget "
-                           f"({tsb_bgt} TSS) – regenererar.")
+            mode_reason = (f"Existing plan ({future_tss} TSS incl. manual sessions) covers less than 75% of budget "
+                           f"({tsb_bgt} TSS) – regenerating.")
 
-    log.info(f"📋 Läge: {mode.upper()} – {mode_reason}")
+    log.info(f"📋 Mode: {mode.upper()} – {mode_reason}")
 
-    log.info("Uppdaterar intervals.icu...")
+    log.info("Updating intervals.icu...")
 
     # Nutrition på manuella pass
     man_nutr = {m.date: m.nutrition for m in plan.manual_workout_nutrition if m.nutrition}
@@ -521,13 +522,13 @@ def main(argv=None):
         d = w.get("start_date_local","")[:10]
         if d in man_nutr:
             update_manual_nutrition(w, man_nutr[d])
-            log.info(f"  Nutrition tillagd: {w.get('name','?')} ({d})")
+            log.info(f"  Nutrition added: {w.get('name','?')} ({d})")
 
     # ── Spara Daglig Coach-anteckning ─────────────────────────────────────────
     if not args.dry_run:
         save_daily_note_to_icu(plan, changes, planner_insights=planner_insights)
     else:
-        print("\n[DRY-RUN] Skulle ha sparat daglig coach-anteckning till intervals.")
+        print("\n[DRY-RUN] Would have saved daily coach note to intervals.")
 
     # ── 7: VECKORAPPORT (körs på måndagar eller full regen) ──────────────────
     if date.today().weekday() == 0 or mode == "full":
@@ -545,7 +546,7 @@ def main(argv=None):
             else:
                 print("\n" + report)
         except Exception as e:
-            log.warning(f"Veckorapport misslyckades: {e}")
+            log.warning(f"Weekly report failed: {e}")
 
     if mode == "none":
         log.info(f"✅ {mode_reason}")
@@ -558,9 +559,9 @@ def main(argv=None):
     if mode == "full":
         started_ai = [w for w in ai_workouts if event_has_started(w, now_local)]
         deleted = delete_ai_workouts(ai_workouts, now_local)
-        if deleted: log.info(f"  Tog bort {deleted} gamla AI-workouts")
+        if deleted: log.info(f"  Deleted {deleted} old AI workouts")
         if started_ai:
-            log.info(f"  Behåller {len(started_ai)} AI-events som redan startat/skett")
+            log.info(f"  Keeping {len(started_ai)} AI events that have already started/occurred")
         days_to_save = [day for day in plan.days if not plan_day_has_started(day, now_local)]
 
     elif mode == "extend":
@@ -595,7 +596,7 @@ def main(argv=None):
             ]
             for chunk in [to_del[i:i+50] for i in range(0, len(to_del), 50)]:
                 requests.put(f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete", auth=AUTH, timeout=15, json=chunk).raise_for_status()
-            log.info(f"  Ersätter {len(to_del)} event(s) med dubbelpass på: {', '.join(sorted(dates_to_delete))}")
+            log.info(f"  Replacing {len(to_del)} event(s) with double sessions on: {', '.join(sorted(dates_to_delete))}")
 
         existing_dates = {d for d in existing_count if d not in dates_to_delete}
         days_to_save = [
@@ -604,12 +605,12 @@ def main(argv=None):
         ]
         preserved = len(started_dates & set(new_count))
         if preserved:
-            log.info(f"  Behåller {preserved} datum med redan startade AI-events")
-        log.info(f"  Behåller {len(existing_dates)} befintliga datum, lägger till {len(days_to_save)} nya.")
+            log.info(f"  Keeping {preserved} dates with already started AI events")
+        log.info(f"  Keeping {len(existing_dates)} existing dates, adding {len(days_to_save)} new.")
 
     skipped_started_days = len(plan.days) - len(days_to_save)
     if skipped_started_days:
-        log.info(f"  Hoppar över {skipped_started_days} nya plan-dag(ar) som redan startat/skett")
+        log.info(f"  Skipping {skipped_started_days} new plan day(s) that have already started/occurred")
 
     saved = errors = 0
     for day in days_to_save:
@@ -620,11 +621,11 @@ def main(argv=None):
                 save_event(day)
             saved += 1
         except requests.HTTPError as e:
-            log.error(f"Misslyckades spara {day.date}: {e}"); errors += 1
+            log.error(f"Failed to save {day.date}: {e}"); errors += 1
 
     vetoed_count = sum(1 for d in plan.days if d.vetoed)
-    log.info(f"Klart! {saved} pass sparade. {vetoed_count} säkerhetsjusterades av reglerna. {errors} fel. {len(changes)} post-processing-ändringar.")
-    print("\nKör igen imorgon bitti.\n")
+    log.info(f"Done! {saved} sessions saved. {vetoed_count} safety adjusted by rules. {errors} errors. {len(changes)} post-processing changes.")
+    print("\nRun again tomorrow morning.\n")
 
 
 if __name__ == "__main__":

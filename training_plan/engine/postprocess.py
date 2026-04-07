@@ -9,34 +9,34 @@ from training_plan.engine.planning import classify_session_category
 HARD_THRESHOLD = 0.20
 
 def enforce_illness(days, today_wellness):
-    """Om atleten är sjuk, byt ut alla pass mot vila."""
+    """If the athlete is sick, replace all sessions with rest."""
     if not today_wellness or not today_wellness.get("sick"):
         return days, []
-    changes = ["Sjukdom rapporterad – alla pass konverteras till vila."]
+    changes = ["Illness reported – all sessions converted to rest."]
     new_days = []
     for day in days:
         if day.intervals_type != "Rest":
-            changes.append(f"  {day.date}: {day.title} → Vila (sjuk)")
+            changes.append(f"  {day.date}: {day.title} → Rest (Illness)")
         new_days.append(PlanDay(
             date=day.date,
-            title="Vila (Sjuk)",
+            title="Rest (Illness)",
             intervals_type="Rest",
             duration_min=0,
-            description="Automatisk vila pga sjukdomsrapport i intervals.icu. Krya på dig!",
+            description="Automatic rest due to illness report in intervals.icu. Get well soon!",
             vetoed=True,
         ))
     return new_days, changes
 
 def enforce_rtp(days, rtp_status):
-    """Tvinga igenom ett Return-to-Play-protokoll efter flera vilodagar."""
+    """Force a Return-to-Play protocol after several rest days."""
     if not rtp_status or not rtp_status.get("is_active"):
         return days, []
     protocol = [
-        {"d": 1, "title": "RTP Dag 1: Test", "type": "VirtualRide", "dur": 30, "steps": [{"duration_min": 30, "zone": "Z1", "description": "Mycket lätt, testa kroppen"}]},
-        {"d": 2, "title": "RTP Dag 2: Bekräfta", "type": "VirtualRide", "dur": 45, "steps": [{"duration_min": 45, "zone": "Z2", "description": "Lätt, bekräfta pulsrespons"}]},
-        {"d": 3, "title": "RTP Dag 3: Öppna upp", "type": "VirtualRide", "dur": 60, "steps": [{"duration_min": 50, "zone": "Z2", "description": "Grundtempo"}, {"duration_min": 1, "zone": "Z3", "description": "Öppna upp"}, {"duration_min": 9, "zone": "Z2", "description": "Lugnt igen"}]},
+        {"d": 1, "title": "RTP Day 1: Test", "type": "VirtualRide", "dur": 30, "steps": [{"duration_min": 30, "zone": "Z1", "description": "Very easy, test the body"}]},
+        {"d": 2, "title": "RTP Day 2: Confirm", "type": "VirtualRide", "dur": 45, "steps": [{"duration_min": 45, "zone": "Z2", "description": "Easy, confirm HR response"}]},
+        {"d": 3, "title": "RTP Day 3: Open up", "type": "VirtualRide", "dur": 60, "steps": [{"duration_min": 50, "zone": "Z2", "description": "Base tempo"}, {"duration_min": 1, "zone": "Z3", "description": "Open up"}, {"duration_min": 9, "zone": "Z2", "description": "Easy again"}]},
     ]
-    changes = [f"🚑 RETURN TO PLAY ({rtp_status['days_off']} vilodagar) – tvingande protokoll appliceras."]
+    changes = [f"🚑 RETURN TO PLAY ({rtp_status['days_off']} rest days) – forced protocol applied."]
     for i, p in enumerate(protocol):
         if i >= len(days):
             break
@@ -46,12 +46,12 @@ def enforce_rtp(days, rtp_status):
             title=p["title"],
             intervals_type=p["type"],
             duration_min=p["dur"],
-            description=f"Return-to-Play protokoll efter {rtp_status['days_off']} vilodagar.",
+            description=f"Return-to-Play protocol after {rtp_status['days_off']} rest days.",
             workout_steps=[WorkoutStep(**step) for step in p["steps"]],
             vetoed=False,
         )
         days[i] = rtp_day
-        changes.append(f"  {target_date}: Ersatt med '{p['title']}'")
+        changes.append(f"  {target_date}: Replaced with '{p['title']}'")
     return days, changes
 
 def intensity_rating(day: PlanDay) -> float:
@@ -64,7 +64,7 @@ def is_intense(day: PlanDay) -> bool:
     return intensity_rating(day) >= HARD_THRESHOLD
 
 def enforce_max_consecutive_rest(days):
-    """Ersätter tredje vilodagen i rad med ett lätt Z1-pass (30min)."""
+    """Replaces the third consecutive rest day with an easy Z1 session (30min)."""
     changes = []
     # Bygg en ordnad lista av unika datum med deras "vila"-status
     sorted_days = sorted(days, key=lambda d: d.date)
@@ -80,18 +80,18 @@ def enforce_max_consecutive_rest(days):
             consecutive = 0
             rest_streak = []
         if consecutive >= 3:
-            # Ersätt den tredje vilodagen med ett kort aktiv-vila-pass
+            # Replace the third rest day with a short active recovery session
             target_date = rest_streak[-1]
             for i, day in enumerate(days):
                 if day.date == target_date and (day.intervals_type == "Rest" or day.duration_min == 0):
                     days[i] = day.model_copy(update={
                         "intervals_type": "Run",
                         "duration_min": 30,
-                        "title": "Aktiv vila (lätt rörlighet)",
-                        "description": "Lätt rörlighetspass eller promenad för att hålla igång cirkulationen utan belastning.",
-                        "workout_steps": [WorkoutStep(duration_min=30, zone="Z1", description="Lugn aktivitet")],
+                        "title": "Active rest (light mobility)",
+                        "description": "Light mobility session or walk to keep circulation going without load.",
+                        "workout_steps": [WorkoutStep(duration_min=30, zone="Z1", description="Easy activity")],
                     })
-                    changes.append(f"MAX-VILA: {target_date} – 3 vilodagar i rad ersatt med 30min Z1")
+                    changes.append(f"MAX-REST: {target_date} – 3 rest days in a row replaced with 30min Z1")
                     is_rest[target_date] = False
                     consecutive = 0
                     rest_streak = []
@@ -137,7 +137,6 @@ def enforce_hard_easy(days):
         r_prev = intensity_rating(days[i-1])
         r_curr = intensity_rating(days[i])
         if r_prev >= HARD_THRESHOLD and r_curr >= HARD_THRESHOLD:
-            # Hoppa över om det är mer än 1 dags mellanrum (vilodag emellan)
             try:
                 gap = (_date.fromisoformat(days[i].date) - _date.fromisoformat(days[i-1].date)).days
                 if gap > 1:
@@ -152,16 +151,16 @@ def enforce_hard_easy(days):
                 "workout_steps": [WorkoutStep(
                     duration_min=days[i].duration_min,
                     zone="Z1",
-                    description=f"Lugnt tempo – HARD-EASY-regel "
-                                f"(föregående dag: {round(r_prev*100)}% Z4+)"
+                    description=f"Easy tempo - HARD-EASY rule "
+                                f"(previous day: {round(r_prev*100)}% Z4+)"
                 )],
                 "nutrition": "",
-                "description": f"⚠️ KOD-VETO: AI:n försökte lägga ett hårt pass här, men Python-koden ändrade det till återhämtning (Hard-Easy-regeln).\n\nOriginalidé från AI:n: {days[i].description}",
+                "description": f"⚠️ CODE VETO: The AI tried to schedule a hard session here, but the Python code changed it to recovery (Hard-Easy rule).\n\nOriginal idea from AI: {days[i].description}",
                 "vetoed": True,
             })
             changes.append(
                 f"HARD-EASY: {days[i].date} '{old}' "
-                f"({round(r_curr*100)}% Z4+) konverterat till Z1"
+                f"({round(r_curr*100)}% Z4+) converted to Z1"
             )
     return days, changes
 
@@ -170,10 +169,10 @@ def apply_injury_rules(days, injury_note: str):
         return days, []
     inj = injury_note.lower()
     avoid_map = [
-        (["knä", "höft", "lår", "vad", "fot", "ankel"],  {"Run", "RollerSki"},     "VirtualRide"),
-        (["axel", "armbåge", "handled", "arm"],           {"Ride", "VirtualRide"},  "Run"),
-        (["rygg", "ländrygg", "nacke"],                   {"Run", "Ride"},          "VirtualRide"),
-        (["skena", "shin"],                               {"Run"},                  "VirtualRide"),
+        (["knä", "höft", "lår", "vad", "fot", "ankel", "knee", "hip", "thigh", "calf", "foot", "ankle"],  {"Run", "RollerSki"},     "VirtualRide"),
+        (["axel", "armbåge", "handled", "arm", "shoulder", "elbow", "wrist"],           {"Ride", "VirtualRide"},  "Run"),
+        (["rygg", "ländrygg", "nacke", "back", "lower back", "neck"],                   {"Run", "Ride"},          "VirtualRide"),
+        (["skena", "shin", "splints"],                               {"Run"},                  "VirtualRide"),
     ]
     affected, replacement = set(), "VirtualRide"
     for keywords, sports, repl in avoid_map:
@@ -187,12 +186,12 @@ def apply_injury_rules(days, injury_note: str):
         if day.intervals_type in affected:
             new_dur = min(day.duration_min, 45)
             days[i] = day.model_copy(update={
-                "title":          f"{day.title} [→ {replacement}, skada]",
+                "title":          f"{day.title} [→ {replacement}, injury]",
                 "intervals_type": replacement,
                 "duration_min":   new_dur,
-                "description":    day.description + f"\n\n⚠️ Anpassat pga skaderapport: '{injury_note}'",
+                "description":    day.description + f"\n\n⚠️ Adapted due to injury report: '{injury_note}'",
             })
-            changes.append(f"SKADA: {day.date} '{day.intervals_type}' → '{replacement}' ({new_dur}min)")
+            changes.append(f"INJURY: {day.date} '{day.intervals_type}' → '{replacement}' ({new_dur}min)")
     return days, changes
 
 def enforce_hrv(days, hrv):
@@ -207,7 +206,7 @@ def enforce_hrv(days, hrv):
             recovery_step = WorkoutStep(
                 duration_min=day.duration_min,
                 zone="Z1",
-                description=f"Lugn återhämtning – HRV är LOW ({hrv['deviation_pct']}% under baseline)",
+                description=f"Easy recovery - HRV is LOW ({hrv['deviation_pct']}% under baseline)",
             )
             days[i] = day.model_copy(update={
                 "title": f"{day.title} -> Z1 (HRV-VETO)",
@@ -215,7 +214,7 @@ def enforce_hrv(days, hrv):
                 "nutrition": "",
                 "vetoed": True,
             })
-            changes.append(f"HRV-VETO: {day.date} - ersatt med Z1 återhämtning (HRV LOW).")
+            changes.append(f"HRV-VETO: {day.date} - replaced with Z1 recovery (HRV LOW).")
     return days, changes
 
 def enforce_sport_budget(days, budgets):
@@ -226,10 +225,10 @@ def enforce_sport_budget(days, budgets):
         if st not in budgets or day.duration_min == 0: continue
         b = budgets[st]
         if accumulated[st] + day.duration_min > b["remaining"]:
-            changes.append(f"VOLYMSPÄRR ({st}): {day.date} - {day.duration_min}min överstiger budget ({b['remaining']}min kvar). Konverterar till VirtualRide.")
+            changes.append(f"VOLUME CAP ({st}): {day.date} - {day.duration_min}min exceeds budget ({b['remaining']}min remaining). Converting to VirtualRide.")
             days[i] = day.model_copy(update={
                 "intervals_type": "VirtualRide",
-                "title": f"{day.title} -> Zwift (volymspärr)",
+                "title": f"{day.title} -> Zwift (volume cap)",
                 "vetoed": True,
             })
         else:
@@ -239,7 +238,7 @@ def enforce_sport_budget(days, budgets):
 def enforce_locked(days, locked):
     clean   = [d for d in days if d.date not in locked]
     removed = [d.date for d in days if d.date in locked]
-    changes = [f"LÅST DATUM: {d} togs bort (manuellt pass finns)." for d in removed]
+    changes = [f"LOCKED DATE: {d} removed (manual session exists)." for d in removed]
     return clean, changes
 
 ZONE_NP_RATIO = {
@@ -357,7 +356,7 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
                         "title": f"{day.title} [filler borttagen]",
                         "description": (
                             day.description
-                            + "\n\nTSS-justering: lagprioriterad fyllnadsvolym togs bort for att skydda viktigare struktur."
+                            + "\n\nTSS adjustment: low-priority filler volume removed to protect more important structure."
                         ),
                         "vetoed": True,
                     })
@@ -386,7 +385,7 @@ def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_b
         week_summaries.append(f"v{wk[1]}: {round(wk_tss + wk_base)} TSS inkl. låsta pass {status} ({pct}% av {wk_budget})")
 
     total = sum(estimate_tss_coggan(d, athlete) for d in result)
-    changes.append("TSS-AUDIT " + " | ".join(week_summaries) + f" | Totalt {round(total)} TSS")
+    changes.append("TSS-AUDIT " + " | ".join(week_summaries) + f" | Total {round(total)} TSS")
     return result, changes
 
 
@@ -440,13 +439,13 @@ def enforce_today_time_budget(days: list[PlanDay], time_available_text: str) -> 
             "title": f"{day.title} [tidsbudget]",
             "description": (
                 day.description
-                + f"\n\nTidsjustering: dagens totala tid behovde rymmas inom {available_min} min."
+                + f"\n\nTime adjustment: today's total time needed to fit within {available_min} min."
             ),
             "vetoed": True,
         })
         total_today -= day.duration_min
         active_today.remove(idx)
-        changes.append(f"TIDSBUDGET: {day.date} tog bort '{day.title}' for att rymmas inom {available_min}min idag")
+        changes.append(f"TIME BUDGET: {day.date} removed '{day.title}' to fit within {available_min}min today")
 
     if total_today > available_min and active_today:
         idx = max(active_today, key=lambda item: days[item].duration_min)
@@ -464,11 +463,11 @@ def enforce_today_time_budget(days: list[PlanDay], time_available_text: str) -> 
                 "title": f"{day.title} [tidsbudget -> vila]",
                 "description": (
                     day.description
-                    + f"\n\nTidsjustering: dagens tid ({available_min} min) rackte inte for minimilangd."
+                    + f"\n\nTime adjustment: today's time ({available_min} min) was not enough for minimum duration."
                 ),
                 "vetoed": True,
             })
-            changes.append(f"TIDSBUDGET: {day.date} ersatte '{day.title}' med vila eftersom {available_min}min ar under minimilangd")
+            changes.append(f"TIME BUDGET: {day.date} replaced '{day.title}' with rest since {available_min}min is under minimum duration")
         else:
             days[idx] = day.model_copy(update={
                 "duration_min": new_duration,
@@ -476,11 +475,11 @@ def enforce_today_time_budget(days: list[PlanDay], time_available_text: str) -> 
                 "title": f"{day.title} ({day.duration_min}->{new_duration}min)",
                 "description": (
                     day.description
-                    + f"\n\nTidsjustering: dagens totala tid klamptes till {available_min} min."
+                    + f"\n\nTime adjustment: today's total time clamped to {available_min} min."
                 ),
                 "vetoed": True,
             })
-            changes.append(f"TIDSBUDGET: {day.date} kortade '{day.title}' till {new_duration}min for att rymmas inom {available_min}min idag")
+            changes.append(f"TIME BUDGET: {day.date} shortened '{day.title}' to {new_duration}min to fit within {available_min}min today")
 
     return days, changes
 
@@ -492,8 +491,8 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
                                        workout_day, tss_estimate: float,
                                        weight_kg: float | None = None) -> str:
     """
-    Returnerar näringsstrategi baserat på träningsfas, tävlingsproximitet och passets belastning.
-    Kompletterar miljöbaserad nutrition med periodiserade rekommendationer.
+    Returns nutrition strategy based on training phase, race proximity and session load.
+    Complements environment-based nutrition with periodized recommendations.
     """
     dur = workout_day.duration_min
     sport = workout_day.intervals_type
@@ -510,33 +509,33 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
 
     # Tävlingsdag
     if days_to_race == 0:
-        return ("TÄVLINGSDAG: Start 300ml sportdryck. 60-90g CHO/h under loppet (gels + bars). "
-                "500mg Na/h. Koffein 200mg vid t-1h. Drick 500ml i mål.")
+        return ("RACE DAY: Start 300ml sports drink. 60-90g CHO/h during the race (gels + bars). "
+                "500mg Na/h. Caffeine 200mg at t-1h. Drink 500ml at finish.")
 
     # Kolhydratladning 3 dagar före
     if days_to_race is not None and 1 <= days_to_race <= 3:
         dag = 4 - days_to_race
-        return (f"KOLHYDRATLADNING dag {dag}/3: {cho_range(8, 10)} idag. "
-                f"Ris, pasta, havregryn, bröd. Undvik fiber och fett. Drick 2-3L.")
+        return (f"CARB LOADING day {dag}/3: {cho_range(8, 10)} today. "
+                f"Rice, pasta, oatmeal, bread. Avoid fiber and fat. Drink 2-3L.")
 
     # Hög TSS-dag
     if tss_estimate > 100:
-        return (f"HIGH-CARB: {round(tss_estimate)} TSS planerat – {cho_range(6, 8)} idag. "
-                f"Frukost: havregryn + banan + honung. Under: 60-90g CHO/h.")
+        return (f"HIGH-CARB: {round(tss_estimate)} TSS planned – {cho_range(6, 8)} today. "
+                f"Breakfast: oatmeal + banana + honey. During: 60-90g CHO/h.")
 
     # Basfas + Z2-pass (fasted training OK)
     is_z2_only = all(s.zone in ("Z1", "Z2") for s in workout_day.workout_steps) if workout_day.workout_steps else True
     if phase_name in ("Base", "Grundtraning") and is_z2_only and 60 <= dur <= 90:
-        return ("FASTED OK: Morgonpass 60-90min Z2 kan göras fastad för fettadaptation. "
-                "Max 30g CHO/h om du är hungrig. Ha en gel redo.")
+        return ("FASTED OK: Morning session 60-90min Z2 can be done fasted for fat adaptation. "
+                "Max 30g CHO/h if you are hungry. Have a gel ready.")
 
     # Standard baserat på duration
     if dur < 60:
         return ""
     elif dur <= 90:
-        return f"30-60g CHO/h under passet ({dur}min). Sportdryck eller 1 gel/45min."
+        return f"30-60g CHO/h during the session ({dur}min). Sports drink or 1 gel/45min."
     else:
-        return f"60-90g CHO/h under passet ({dur}min). Testa race-dag-nutrition."
+        return f"60-90g CHO/h during the session ({dur}min). Test race day nutrition."
 
 
 def add_env_nutrition(days, weather, phase=None, races=None, athlete=None, wellness=None):
@@ -598,17 +597,17 @@ def enforce_strength_limit(days, max_strength=2, min_gap=2):
         too_close  = (i - last_strength_idx) < min_gap
         too_many   = strength_count >= max_strength
         if too_many or too_close:
-            reason = "styrkegräns (max 2)" if too_many else f"för tätt (< {min_gap} dagar sedan förra)"
+            reason = "strength limit (max 2)" if too_many else f"too close (< {min_gap} days since last)"
             days[i] = day.model_copy(update={
-                "title":          day.title + f" → Zwift Z1 ({reason})",
+                "title":          day.title + f" -> Zwift Z1 ({reason})",
                 "intervals_type": "VirtualRide",
                 "duration_min":   45,
-                "workout_steps":  [WorkoutStep(duration_min=45, zone="Z1", description="Lätt återhämtningscykling @ <120W")],
+                "workout_steps":  [WorkoutStep(duration_min=45, zone="Z1", description="Easy recovery spinning @ <120W")],
                 "strength_steps": [],
-                "description":    day.description + f"\n\n⚠️ Konverterad – {reason}.",
+                "description":    day.description + f"\n\n⚠️ Converted – {reason}.",
                 "vetoed": True,
             })
-            changes.append(f"STYRKEGRÄNS: {day.date} → Zwift Z1 ({reason})")
+            changes.append(f"STRENGTH_LIMIT: {day.date} -> Zwift Z1 ({reason})")
         else:
             strength_count  += 1
             last_strength_idx = i
@@ -628,12 +627,12 @@ def enforce_rollski_limit(days, max_per_week=1):
     for i in to_convert:
         day = days[i]
         days[i] = day.model_copy(update={
-            "title":          day.title + " → Cykling (rullskidsgräns)",
+            "title":          day.title + " -> Cycling (roller ski limit)",
             "intervals_type": "Ride",
-            "description":    day.description + "\n\n⚠️ Konverterad – max 1 rullskidspass/vecka.",
+            "description":    day.description + "\n\n⚠️ Converted – max 1 roller ski session/week.",
             "vetoed": True,
         })
-        changes.append(f"RULLSKIDSGRÄNS: {day.date} → Ride (max 1/vecka)")
+        changes.append(f"ROLLERSKI_LIMIT: {day.date} -> Ride (max 1/week)")
     return days, changes
 
 
@@ -667,8 +666,8 @@ def ensure_warmup(days: list) -> list:
 def enforce_deload(days, mesocycle: dict, athlete: dict):
     if not mesocycle["is_deload"]:
         return days, []
-    changes = [f"🟡 DELOAD-VECKA (vecka {mesocycle['week_in_block']}/4, "
-               f"block {mesocycle['block_number']}). Sänker volym och intensitet."]
+    changes = [f"🟡 DELOAD WEEK (week {mesocycle['week_in_block']}/4, "
+               f"block {mesocycle['block_number']}). Lowering volume and intensity."]
     for i, day in enumerate(days):
         modified = False
         updates = {}
@@ -682,7 +681,7 @@ def enforce_deload(days, mesocycle: dict, athlete: dict):
                 if s.zone in INTENSE:
                     new_steps.append(s.model_copy(update={
                         "zone": "Z2",
-                        "description": f"[DELOAD] {s.description} – sänkt från {s.zone}",
+                        "description": f"[DELOAD] {s.description} - reduced from {s.zone}",
                         "duration_min": round(s.duration_min * 0.7),
                     }))
                     modified = True
@@ -694,15 +693,15 @@ def enforce_deload(days, mesocycle: dict, athlete: dict):
         if day.intervals_type == "WeightTraining":
             updates["intervals_type"] = "VirtualRide"
             updates["duration_min"]   = 30
-            updates["workout_steps"]  = [WorkoutStep(duration_min=30, zone="Z1", description="Lätt spinning – deload")]
+            updates["workout_steps"]  = [WorkoutStep(duration_min=30, zone="Z1", description="Easy spinning - deload")]
             updates["strength_steps"] = []
-            updates["title"]          = f"{day.title} → Zwift Z1 (deload)"
+            updates["title"]          = f"{day.title} -> Zwift Z1 (deload)"
             modified = True
         if modified:
             if "title" not in updates:
                 updates["title"] = f"{day.title} [DELOAD -35%]"
             days[i] = day.model_copy(update=updates)
-            changes.append(f"  {day.date}: {day.title} → deload-justerad")
+            changes.append(f"  {day.date}: {day.title} -> deload-adjusted")
     return days, changes
 
 
@@ -714,8 +713,8 @@ def enforce_motivation_state(days: list, motivation: dict) -> tuple:
     if not motivation or motivation.get("state") != "BURNOUT_RISK":
         return days, []
     changes = [
-        f"BURNOUT-RISK: Snittkänsla {motivation['avg_feel']:.1f}/5, "
-        f"{motivation['weeks_declining']} veckor sjunkande. Sänker intensitet och volym."
+        f"BURNOUT-RISK: Avg feel {motivation['avg_feel']:.1f}/5, "
+        f"{motivation['weeks_declining']} weeks declining. Lowering intensity and volume."
     ]
     for i, day in enumerate(days):
         updates = {}
@@ -736,7 +735,7 @@ def enforce_motivation_state(days: list, motivation: dict) -> tuple:
             updates["title"] = day.title + " [BURNOUT-VETO]"
             updates["vetoed"] = True
             days[i] = day.model_copy(update=updates)
-            changes.append(f"  {day.date}: intensitet/volym sänkt")
+            changes.append(f"  {day.date}: intensity/volume lowered")
     return days, changes
 
 
@@ -761,8 +760,8 @@ def enforce_per_sport_acwr_veto(days: list, per_sport: dict) -> tuple:
             "intervals_type": fallback,
             "title": f"{day.title} [ACWR-VETO {sport}→{fallback}]",
             "description": (day.description +
-                f"\n\n⚠️ Konverterad: {sport} ACWR {ratio:.2f} > 1.5 (hög skaderisk). "
-                f"Tränar {fallback} istället."),
+                f"\n\n⚠️ Converted: {sport} ACWR {ratio:.2f} > 1.5 (high injury risk). "
+                f"Training {fallback} instead."),
             "vetoed": True,
         })
         changes.append(f"ACWR-VETO: {day.date} {sport} → {fallback} (ratio {ratio:.2f})")
