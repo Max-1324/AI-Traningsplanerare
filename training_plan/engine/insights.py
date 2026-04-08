@@ -1,5 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.planning import classify_session_category, session_duration_min
+from training_plan.engine.utils import time_available_minutes
 
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -40,19 +41,6 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
     return result
 
 
-def _time_available_minutes(value: str) -> int | None:
-    if not value:
-        return None
-    text = value.strip().lower()
-    hours_match = re.search(r"(\d+(?:[.,]\d+)?)\s*h", text)
-    mins_match = re.search(r"(\d+)\s*m", text)
-    if hours_match:
-        return round(float(hours_match.group(1).replace(",", ".")) * 60)
-    if mins_match:
-        return int(mins_match.group(1))
-    if text.isdigit():
-        return int(text)
-    return None
 
 
 def build_capacity_map(activities: list[dict],
@@ -70,7 +58,6 @@ def build_capacity_map(activities: list[dict],
     category_scores = session_quality.get("category_scores", {})
     cycling = [a for a in activities if a.get("type") in ("Ride", "VirtualRide")]
     recent_56 = _recent_items(cycling, 56)
-    gaps_lower = [str(gap).lower() for gap in race_demands.get("gaps", [])]
 
     longest_ride = max((session_duration_min(a) for a in recent_56), default=0)
     rides_3h = sum(1 for a in recent_56 if session_duration_min(a) >= 180)
@@ -394,7 +381,7 @@ def build_execution_friction(constraints: list[dict] | None,
         score += 1.5
         factors.append("motivation trend suggests extra friction sensitivity")
 
-    availability = _time_available_minutes(morning.get("time_available", ""))
+    availability = time_available_minutes(morning.get("time_available", ""))
     if availability is not None and availability < 60:
         score += 2.0
         factors.append("very limited daily time")
@@ -503,7 +490,7 @@ def build_training_frequency_target(horizon_days: int,
     else:
         max_double_days = 2
 
-    today_time_cap_min = _time_available_minutes(morning.get("time_available", ""))
+    today_time_cap_min = time_available_minutes(morning.get("time_available", ""))
     summary = (
         f"Structure target: aim for {min_training_days}-{max_training_days} training days over "
         f"{horizon_days} plan days, with {min_rest_days}-{max_rest_days} rest days and "

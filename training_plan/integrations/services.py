@@ -3,21 +3,12 @@ from training_plan.engine.analysis import *
 from training_plan.engine.planning import *
 from training_plan.engine.postprocess import estimate_tss_coggan
 from training_plan.engine.ai import sanitize
+from training_plan.engine.utils import strip_planner_comment_block, read_wellness_score
 
 PLANNER_COMMENT_START = "[AI_MORNING]"
 PLANNER_COMMENT_END = "[/AI_MORNING]"
 
 
-def _strip_planner_comment_block(comments):
-    if not comments:
-        return ""
-    cleaned = re.sub(
-        rf"{re.escape(PLANNER_COMMENT_START)}.*?{re.escape(PLANNER_COMMENT_END)}",
-        "",
-        comments,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    return cleaned.strip()
 
 
 def _build_planner_comment_block(morning):
@@ -41,37 +32,25 @@ def _build_planner_comment_block(morning):
 
 
 def _merge_planner_comments(existing_comments, morning):
-    base_comments = _strip_planner_comment_block(existing_comments or "")
+    base_comments = strip_planner_comment_block(existing_comments or "")
     planner_block = _build_planner_comment_block(morning)
     if base_comments and planner_block:
         return f"{base_comments}\n\n{planner_block}"
     return base_comments or planner_block
 
 
-def _read_wellness_score(today_wellness, keys, default=1, minimum=1, maximum=4):
-    if not today_wellness:
-        return default
-    for key in keys:
-        value = today_wellness.get(key)
-        if value in (None, ""):
-            continue
-        try:
-            return max(minimum, min(maximum, int(float(value))))
-        except (TypeError, ValueError):
-            continue
-    return default
 
 
 def save_morning_wellness(morning, today_wellness=None):
     today_wellness = today_wellness or {}
     payload = {}
 
-    stress_value = _read_wellness_score(
+    stress_value = read_wellness_score(
         {"stress": morning.get("life_stress", 1)},
         ("stress",),
         default=1,
     )
-    current_stress = _read_wellness_score(today_wellness, ("stress", "Stress"), default=None)
+    current_stress = read_wellness_score(today_wellness, ("stress", "Stress"), default=None)
     if current_stress != stress_value:
         payload["stress"] = stress_value
 
@@ -122,6 +101,8 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
             lines_today.append(f"Forecast: {performance_forecast.get('summary', '')}")
         if minimum_effective_dose:
             lines_today.append(f"MED: {minimum_effective_dose.get('summary', '')}")
+            if minimum_effective_dose.get("rationale"):
+                lines_today.append("MED reasons: " + " | ".join(minimum_effective_dose.get("rationale", [])[:4]))
         if execution_friction:
             lines_today.append(f"Friction: {execution_friction.get('summary', '')}")
         if benchmark_system.get("next_benchmark"):
@@ -244,7 +225,7 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
     week_end_incl = week_start + timedelta(days=6)
     week_acts = [
         a for a in activities
-        if _safe_date_str(a) and week_start.isoformat() <= _safe_date_str(a) < week_end.isoformat()
+        if safe_date_str(a) and week_start.isoformat() <= safe_date_str(a) < week_end.isoformat()
     ]
     total_min   = sum((a.get("moving_time", 0) or 0) / 60 for a in week_acts)
     total_tss   = sum((a.get("icu_training_load", 0) or 0) for a in week_acts)
@@ -422,6 +403,8 @@ def generate_weekly_report(activities: list, wellness: list, fitness: list,
             report += f"  {performance_forecast.get('summary', '')}\n"
         if minimum_effective_dose:
             report += f"  {minimum_effective_dose.get('summary', '')}\n"
+            if minimum_effective_dose.get("rationale"):
+                report += f"  MED reasons: {' | '.join(minimum_effective_dose.get('rationale', [])[:4])}\n"
         if execution_friction:
             report += f"  {execution_friction.get('summary', '')}\n"
         if capacity_map:
