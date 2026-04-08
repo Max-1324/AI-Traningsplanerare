@@ -1,7 +1,7 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
-from training_plan.engine.planning import _safe_date_str
+from training_plan.engine.utils import safe_date_str, safe_date
 
 def validate_data_quality(activities: list, wellness: list) -> dict:
     """Identifies and filters out data points that are likely measurement errors."""
@@ -17,13 +17,13 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
         name_lower = (a.get("name") or "").lower()
         is_race = "race" in name_lower or a.get("workout_type") == "race"
         if intf > 1.8 and not is_race:
-            warnings.append(f"High IF {intf:.2f} on {_safe_date_str(a)} – likely incorrect FTP, filtered from analysis")
+            warnings.append(f"High IF {intf:.2f} on {safe_date_str(a)} – likely incorrect FTP, filtered from analysis")
             filtered_activity_ids.add(aid)
         elif tss > 600:
-            warnings.append(f"Unreasonable TSS {tss} on {_safe_date_str(a)} – filtered")
+            warnings.append(f"Unreasonable TSS {tss} on {safe_date_str(a)} – filtered")
             filtered_activity_ids.add(aid)
         elif 0 < dur < 5 and tss > 10:
-            warnings.append(f"Short activity ({dur:.0f}min) with TSS {tss} on {_safe_date_str(a)} – filtered")
+            warnings.append(f"Short activity ({dur:.0f}min) with TSS {tss} on {safe_date_str(a)} – filtered")
             filtered_activity_ids.add(aid)
 
     for w in wellness:
@@ -62,19 +62,21 @@ def analyze_motivation(wellness: list, activities: list) -> dict:
     cutoff = (date.today() - timedelta(days=14)).isoformat()
     week2_cutoff = (date.today() - timedelta(days=7)).isoformat()
 
-    recent_acts = [a for a in activities if _safe_date_str(a) >= cutoff and a.get("feel") is not None]
+    recent_acts = [a for a in activities if safe_date_str(a) >= cutoff and a.get("feel") is not None]
     feel_vals = [a["feel"] for a in recent_acts]
     avg_feel = sum(feel_vals) / len(feel_vals) if feel_vals else 3.0
 
-    w1_feels = [a["feel"] for a in recent_acts if cutoff <= _safe_date_str(a) < week2_cutoff]
-    w2_feels = [a["feel"] for a in recent_acts if _safe_date_str(a) >= week2_cutoff]
+    w1_feels = [a["feel"] for a in recent_acts if cutoff <= safe_date_str(a) < week2_cutoff]
+    w2_feels = [a["feel"] for a in recent_acts if safe_date_str(a) >= week2_cutoff]
     avg_w1 = sum(w1_feels) / len(w1_feels) if w1_feels else avg_feel
     avg_w2 = sum(w2_feels) / len(w2_feels) if w2_feels else avg_feel
 
+    # Intervals feel scale is interpreted as 1=strong/better ... 5=weak/worse.
+    # Lower values are therefore better, so trend direction is inverted.
     delta = avg_w2 - avg_w1
-    if delta > 0.3:
+    if delta < -0.3:
         trend = "IMPROVING"
-    elif delta < -0.3:
+    elif delta > 0.3:
         trend = "DECLINING"
     else:
         trend = "STABLE"
@@ -84,16 +86,16 @@ def analyze_motivation(wellness: list, activities: list) -> dict:
     if trend == "DECLINING":
         weeks_declining = 1
         older_cutoff = (date.today() - timedelta(days=28)).isoformat()
-        older_acts = [a for a in activities if older_cutoff <= _safe_date_str(a) < cutoff and a.get("feel") is not None]
+        older_acts = [a for a in activities if older_cutoff <= safe_date_str(a) < cutoff and a.get("feel") is not None]
         avg_older = sum(a["feel"] for a in older_acts) / len(older_acts) if older_acts else avg_feel
-        if avg_w1 < avg_older - 0.3:
+        if avg_w1 > avg_older + 0.3:
             weeks_declining = 2
 
-    if avg_feel < 2.5 and weeks_declining >= 2:
+    if avg_feel > 4.0 and weeks_declining >= 2:
         state = "BURNOUT_RISK"
-    elif avg_feel < 2.5 or (avg_feel < 3.0 and trend == "DECLINING"):
+    elif avg_feel >= 3.5:
         state = "FATIGUED"
-    elif avg_feel >= 3.5 and trend in ("IMPROVING", "STABLE"):
+    elif avg_feel <= 2.0 and trend in ("IMPROVING", "STABLE"):
         state = "MOTIVATED"
     else:
         state = "NEUTRAL"
@@ -160,17 +162,39 @@ def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> di
     mean_rpe = sum(rpes) / len(rpes) if rpes else 6.0
     rpe_sc = clamp(int((9 - mean_rpe) / 5 * 100))
 
-    # Feel (10%) – avg last 5 sessions, 1..5 -> 0..100
+    # Feel (10%) – avg last 5 sessions, 1..5 where lower is better -> 0..100
     feels = [a["feel"] for a in activities[-5:] if a.get("feel")]
     mean_feel = sum(feels) / len(feels) if feels else 3.0
-    feel_sc = clamp(int((mean_feel - 1) / 4 * 100))
+    feel_sc = clamp(int((5 - mean_feel) / 4 * 100))
 
     score = int(hrv_sc*0.35 + sleep_sc*0.25 + rhr_sc*0.15 + rpe_sc*0.15 + feel_sc*0.10)
     label = "PEAK" if score >= 80 else ("GOOD" if score >= 65 else ("NORMAL" if score >= 50 else ("LOW" if score >= 35 else "CRITICAL")))
 
+    limiters = []
+    for name, value in sorted(
+        {
+            "hrv": hrv_sc,
+            "sleep": sleep_sc,
+            "rhr": rhr_sc,
+            "rpe": rpe_sc,
+            "feel": feel_sc,
+        }.items(),
+        key=lambda item: item[1],
+    ):
+        if value < 70:
+            limiters.append(f"{name}={value}")
+
     return {
         "score": score, "label": label,
         "components": {"hrv": hrv_sc, "sleep": sleep_sc, "rhr": rhr_sc, "rpe": rpe_sc, "feel": feel_sc},
+        "raw_inputs": {
+            "hrv_deviation_pct": round(dev, 1),
+            "sleep_hours": round(sleep_h, 1),
+            "rhr_slope_7d": round(slope, 2) if len(rhr_vals) >= 3 else None,
+            "avg_rpe_last5": round(mean_rpe, 1),
+            "avg_feel_last5": round(mean_feel, 2),
+        },
+        "limiters": limiters,
         "summary": f"Readiness: {score}/100 ({label}) | HRV:{hrv_sc} Sleep:{sleep_sc} RHR:{rhr_sc} RPE:{rpe_sc} Feel:{feel_sc}",
     }
 
@@ -195,8 +219,10 @@ def rpe_trend(activities) -> str:
         lines.append(f"  ⚠️  RPE VOLATILE (CV={cv:.2f}) – irregular recovery")
     if len(feels) >= 4:
         feel_slope = (feels[-1] - feels[0]) / (len(feels) - 1)
-        if feel_slope < -0.3:
+        if feel_slope > 0.3:
             lines.append(f"  ⚠️  FEEL DECLINING ({feel_slope:.2f}/session) – signs of fatigue")
+        elif feel_slope < -0.3:
+            lines.append(f"  ✅ FEEL IMPROVING ({feel_slope:.2f}/session)")
     return "\n".join(lines)
 
 def analyze_np_if(activities: list) -> dict:
@@ -393,7 +419,7 @@ def per_sport_acwr(activities: list) -> dict:
         atl = 0.0
         ctl = 0.0
         for a in sport_acts:
-            ds = _safe_date_str(a)
+            ds = safe_date_str(a)
             if not ds:
                 continue
             try:
@@ -469,11 +495,11 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
     cutoff_7d  = datetime.now() - timedelta(days=7)
     past_14d = sum(
         (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
-        if a.get("type") == sport_type and _safe_date(a) >= cutoff_14d
+        if a.get("type") == sport_type and safe_date(a) >= cutoff_14d
     )
     past_7d = sum(
         (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
-        if a.get("type") == sport_type and _safe_date(a) >= cutoff_7d
+        if a.get("type") == sport_type and safe_date(a) >= cutoff_7d
     )
     basis   = (past_7d + past_14d / 2) / 1.5
     budget  = max(basis * growth, 60)
@@ -493,18 +519,6 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
     }
 
 
-def _safe_date_str(activity) -> str:
-    try:
-        return activity["start_date_local"][:10]
-    except Exception:
-        return ""
-
-
-def _safe_date(activity) -> datetime:
-    try:
-        return datetime.strptime(activity["start_date_local"][:10], "%Y-%m-%d")
-    except Exception:
-        return datetime(1970, 1, 1)
 
 
 def ctl_ramp_from_daily_tss(ctl: float, daily_tss: float) -> float:
@@ -1223,4 +1237,93 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
         "Was nutrition sufficient? Concrete tips."
     )
 
+
+# ── TSS REFERENCE ─────────────────────────────────────────────────────────────
+
+def compute_tss_reference(activities: list) -> str:
+    """Return a calibrated TSS cheat sheet derived from the athlete's own history.
+
+    Groups completed sessions by sport, computes median TSS/hour per sport (and
+    by intensity for VirtualRide where power data is available), then formats a
+    compact reference string to inject into the generation prompt.
+
+    Falls back to theoretical zone-formula values if there is too little data for
+    a given sport type.
+    """
+    _SPORTS = ("VirtualRide", "Ride", "Run", "RollerSki")
+    _MIN_DURATION_H = 20 / 60   # exclude sessions < 20 min
+    _MIN_TSS = 10
+    _MAX_TSS_PER_H = 200        # sanity cap
+
+    def _median(vals):
+        if not vals:
+            return None
+        s = sorted(vals)
+        m = len(s) // 2
+        return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
+
+    # Collect (duration_h, tss, if_val_or_None) per sport
+    by_sport: dict[str, list] = {s: [] for s in _SPORTS}
+    for a in activities:
+        sport = a.get("type", "")
+        if sport not in _SPORTS:
+            continue
+        tss = a.get("icu_training_load") or 0
+        dur_h = ((a.get("moving_time") or a.get("elapsed_time") or 0)) / 3600
+        if tss < _MIN_TSS or dur_h < _MIN_DURATION_H:
+            continue
+        rate = tss / dur_h
+        if rate > _MAX_TSS_PER_H:
+            continue
+        if_val = session_intensity(a)   # returns 0.0–2.0 or None
+        by_sport[sport].append((dur_h, tss, rate, if_val))
+
+    lines = ["  TSS CHEAT SHEET (calibrated from your training history):"]
+
+    # ── VirtualRide (power-based → reliable IF split) ─────────────────────────
+    vr = by_sport["VirtualRide"]
+    if vr:
+        easy = [r for _, _, r, ifv in vr if ifv is not None and ifv < 0.80]
+        hard = [r for _, _, r, ifv in vr if ifv is not None and ifv >= 0.80]
+        all_rates = [r for _, _, r, _ in vr]
+        lines.append(f"  VirtualRide/Zwift (power-based, N={len(vr)}):")
+        if len(easy) >= 3:
+            h = round(_median(easy))
+            lines.append(f"    Easy/Z2 (IF<0.80):   1h={h} | 90min={round(h*1.5)} | 2h={h*2} | 3h={h*3} | 4h={h*4} TSS")
+        else:
+            lines.append("    Easy/Z2:   1h≈49 | 90min≈74 | 2h≈98 | 3h≈147 | 4h≈196 TSS (formula, limited data)")
+        if len(hard) >= 3:
+            h = round(_median(hard))
+            lines.append(f"    Hard/Z3-Z5 (IF≥0.80): 1h={h} | 70min={round(h*70/60)} | 90min={round(h*1.5)} TSS")
+        else:
+            lines.append("    Hard/Z3-Z5: 1h≈82 | 70min≈96 | 90min≈123 TSS (formula, limited data)")
+    else:
+        lines.append("  VirtualRide/Zwift: 1h≈49 | 2h≈98 | 3h≈147 | 4h≈196 TSS (formula, no history yet)")
+
+    # ── Ride outdoor (HR-based → no reliable intensity split) ─────────────────
+    rides = by_sport["Ride"]
+    if len(rides) >= 3:
+        h = round(_median([r for _, _, r, _ in rides]))
+        lines.append(f"  Ride outdoor (HR-based, N={len(rides)}): 1h={h} | 2h={h*2} | 3h={h*3} | 4h={h*4} | 5h={h*5} TSS")
+    else:
+        lines.append("  Ride outdoor (HR-based): 1h≈44 | 2h≈88 | 3h≈132 | 4h≈176 | 5h≈220 TSS (limited data)")
+
+    # ── Run ───────────────────────────────────────────────────────────────────
+    runs = by_sport["Run"]
+    if len(runs) >= 3:
+        h = round(_median([r for _, _, r, _ in runs]))
+        lines.append(f"  Run (N={len(runs)}): 1h={h} | 90min={round(h*1.5)} | 2h={h*2} TSS")
+    else:
+        lines.append("  Run: 1h≈55 | 90min≈83 | 2h≈110 TSS (limited data)")
+
+    # ── RollerSki ─────────────────────────────────────────────────────────────
+    rs = by_sport["RollerSki"]
+    if len(rs) >= 3:
+        h = round(_median([r for _, _, r, _ in rs]))
+        lines.append(f"  RollerSki (N={len(rs)}): 1h={h} | 90min={round(h*1.5)} | 2h={h*2} TSS")
+    else:
+        lines.append("  RollerSki: 1h≈50 | 90min≈75 | 2h≈100 TSS (limited data)")
+
+    lines.append("  WeightTraining: ~15-20 TSS/session | Rest: 0 TSS")
+    return "\n".join(lines)
     return "\n".join(lines)

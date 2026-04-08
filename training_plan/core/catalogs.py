@@ -30,7 +30,7 @@ SPORTS = [
         "name": "Cycling (outdoors)",
         "intervals_type": "Ride",
         "injury_risk": "low",
-        "comment": "PRIO 1. Main sport – Vätternrundan is the goal. Prioritize long outdoor sessions in good weather.",
+        "comment": "PRIO 1. Main sport – prioritize long outdoor sessions in good weather.",
     },
     {
         "name": "Indoor cycling (Zwift)",

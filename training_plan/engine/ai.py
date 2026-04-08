@@ -3,6 +3,7 @@ from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.engine.analysis import *
+from training_plan.engine.utils import strip_planner_comment_block, read_wellness_score
 
 PLANNER_COMMENT_START = "[AI_MORNING]"
 PLANNER_COMMENT_END = "[/AI_MORNING]"
@@ -28,18 +29,6 @@ def fmt(val, suffix=""):
     if val is None: return "N/A"
     if isinstance(val, float): return f"{round(val,1)}{suffix}"
     return f"{val}{suffix}"
-
-
-def _strip_planner_comment_block(comments):
-    if not comments:
-        return ""
-    cleaned = re.sub(
-        rf"{re.escape(PLANNER_COMMENT_START)}.*?{re.escape(PLANNER_COMMENT_END)}",
-        "",
-        comments,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    return cleaned.strip()
 
 
 def _parse_planner_comment_block(comments):
@@ -145,20 +134,6 @@ def _extract_time_available_from_comments(comments):
     return None
 
 
-def _read_wellness_score(today_wellness, keys, default=1, minimum=1, maximum=4):
-    if not today_wellness:
-        return default
-    for key in keys:
-        value = today_wellness.get(key)
-        if value in (None, ""):
-            continue
-        try:
-            return max(minimum, min(maximum, int(float(value))))
-        except (TypeError, ValueError):
-            continue
-    return default
-
-
 def _read_wellness_injury(today_wellness):
     if not today_wellness:
         return None
@@ -179,13 +154,13 @@ def _read_wellness_injury(today_wellness):
 def _legacy_morning_questions_unused(auto, today_wellness, yesterday_planned, yesterday_actuals):
     raw_comments = (today_wellness or {}).get("comments", "")
     structured_comments = _parse_planner_comment_block(raw_comments)
-    free_comments = _strip_planner_comment_block(raw_comments)
+    free_comments = strip_planner_comment_block(raw_comments)
     comment_time = _extract_time_available_from_comments(free_comments)
     structured_time = _normalize_time_available(
         structured_comments.get("time_available") or structured_comments.get("time") or ""
     )
     existing_time = structured_time if comment_time is None else comment_time
-    existing_stress = _read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
+    existing_stress = read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
     existing_injury = (
         structured_comments.get("injury")
         or structured_comments.get("injury_today")
@@ -240,13 +215,13 @@ def _legacy_morning_questions_unused(auto, today_wellness, yesterday_planned, ye
 def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals):
     raw_comments = (today_wellness or {}).get("comments", "")
     structured_comments = _parse_planner_comment_block(raw_comments)
-    free_comments = _strip_planner_comment_block(raw_comments)
+    free_comments = strip_planner_comment_block(raw_comments)
     comment_time = _extract_time_available_from_comments(free_comments)
     structured_time = _normalize_time_available(
         structured_comments.get("time_available") or structured_comments.get("time") or ""
     )
     existing_time = structured_time if comment_time is None else comment_time
-    existing_stress = _read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
+    existing_stress = read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
     existing_injury = (
         structured_comments.get("injury")
         or structured_comments.get("injury_today")
@@ -334,7 +309,7 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
                  exclude_dates=None, development_needs=None, block_objective=None,
                  race_demands=None, session_quality=None, coach_confidence=None,
                  polarization=None, historical_validation=None,
-                 outcome_tracking=None, planner_insights=None):
+                 outcome_tracking=None, planner_insights=None, failure_memory=""):
     today = date.today()
     lf = fitness[-1] if fitness else {}
     atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb = lf.get("tsb",0.0)
@@ -389,11 +364,27 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
 
     locked_str = ", ".join(sorted({w.get("start_date_local","")[:10] for w in manual_workouts})) or "None"
     race_lines = []
+    _a_race_found = False
     for r in races[:8]:
         rd = r.get("start_date_local","")[:10]
         dt = (datetime.strptime(rd,"%Y-%m-%d").date()-today).days if rd else "?"
-        race_lines.append(f"  {rd} ({dt}d) | {r.get('name','?')}" + (" <- TAPER" if isinstance(dt,int) and dt<=21 else ""))
-    if not race_lines: race_lines = ["  Inga tävlingar"]
+        name = r.get("name", "?")
+        name_lower = name.lower()
+        if "c:" in name_lower:
+            priority = "C"
+        elif "b:" in name_lower:
+            priority = "B"
+        else:
+            priority = "A"
+        if isinstance(dt, int) and dt <= 21:
+            tag = " <- TAPER"
+        elif priority == "A" and not _a_race_found:
+            tag = " <- MAIN GOAL (A-race)"
+            _a_race_found = True
+        else:
+            tag = ""
+        race_lines.append(f"  {rd} ({dt}d) | [{priority}] {name}{tag}")
+    if not race_lines: race_lines = ["  No races registered"]
 
     # FIX #6: Visa eftermiddagstemperatur i väder
     weather_lines = []
@@ -432,6 +423,7 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
     meso_text = ""
     if mesocycle:
         meso_text = f"""
+        
 MESOCYCLE (3+1 block structure):
   Block {mesocycle['block_number']}, Vecka {mesocycle['week_in_block']}/4
   Load factor: {mesocycle['load_factor']:.0%}
@@ -465,6 +457,7 @@ COMPLIANCE ANALYSIS (last {compliance['period_days']}d):
   - If intensity sessions are often missed: Make them shorter (45min max) or switch to a more fun format.
   - If a sport is avoided: Reduce that sport, increase alternatives.
 """
+    failure_memory_text = f"\n{failure_memory}\n" if failure_memory else ""
     ftp_text = ""
     if ftp_check:
         ftp_proto = ""
@@ -850,6 +843,7 @@ YESTERDAY'S SESSION: {yday}
 {block_text}
 {traj_text}
 {comp_text}
+{failure_memory_text}
 {ftp_text}
 {development_text}
 {race_demands_text}
@@ -896,9 +890,15 @@ TSS BUDGET AND CHEAT SHEET:
   {'Locked manual sessions already consume approx ' + str(round(sum(w.get("planned_load", 0) or 0 for w in manual_workouts))) + ' TSS.' if manual_workouts else ''}
   Aim for 95-100% ({round(tsb_bgt * 0.95)}-{tsb_bgt} TSS) TOTAL. Under 90% ({round(tsb_bgt * 0.90)}) = too little for optimal development.
   {'⚠️ DELOAD: Budget is already reduced by 40%.' if mesocycle and mesocycle.get('is_deload') else ''}
-  TSS CHEAT SHEET (This is how the system calculates TSS - use this for your stress_audit!):
-    - 1h Z1 (Active rest) = ~30 TSS | 1h Z2 (Aerobic base) = ~50 TSS | 3h Z2 (Long ride) = ~150 TSS
-    - 1h Z3 (Tempo) = ~75 TSS | 1h Z4 (Intervals) = ~85 TSS (incl rest) | 40min Strength = ~20 TSS
+  TSS CHEAT SHEET (IF² × 100 formula — use this for stress_audit):
+    Z2 endurance:   60min=49 | 75min=61 | 90min=73 | 2h=98 | 2.5h=122 | 3h=147 | 3.5h=171 | 4h=196 | 5h=245 TSS
+    Z1 recovery:    60min=30 | 75min=38 | 90min=45 TSS
+    Z3 tempo:       60min=69 TSS
+    Threshold:      2×20min (70min)=80 TSS | 3×20min (95min)=113 TSS | 4×8min (65min)=71 TSS
+    Sweetspot/Z3:   2×20min (70min)=71 TSS
+    VO2max:         5×5min (55min)=63 TSS | 6×3min (46min)=53 TSS
+    WeightTraining: ~18 TSS/session | Rest: 0 TSS
+    NOTE: Outdoor rides (no power) use HR-based TSS — expect ~10% lower than Z2 formula above.
   IMPORTANT: Previously, the AI has systematically built too short sessions and underestimated how much time in the saddle is required 
   to reach the TSS budget. Increase duration_min on endurance sessions if you don't reach the TSS target!
 
@@ -914,7 +914,6 @@ Use EXACT zone targets: VirtualRide -> watt+hr. Ride/Run/RollerSki -> ONLY hr.
 
 RACES:
 {chr(10).join(race_lines)}
-Fixed goal: Vätternrundan (300 km cycling).
 {pre_race_text}
 
 WEATHER ({LOCATION}, afternoon data at 13-18):
@@ -1009,8 +1008,39 @@ workout_steps MUST be included for ALL training sessions (not WeightTraining/Res
 # ══════════════════════════════════════════════════════════════════════════════
 
 _EXHAUSTED_MODELS = set()
+_MODEL_LAST_REQUEST_TS: dict[str, float] = {}
+_DEFAULT_MIN_REQUEST_INTERVAL = float(os.getenv("AI_MIN_REQUEST_INTERVAL_SEC", "6.0"))
+_OLLAMA_THINK_DEFAULT = os.getenv("OLLAMA_THINK", "").strip().lower() in {"1", "true", "yes", "on"}
 
-def call_ai(provider, prompt):
+
+def _maybe_wait_for_rate_limit(provider: str, model_name: str):
+    if provider != "gemini":
+        return
+    now = time.time()
+    key = f"{provider}:{model_name}"
+    min_interval = _DEFAULT_MIN_REQUEST_INTERVAL
+    last_ts = _MODEL_LAST_REQUEST_TS.get(key)
+    if last_ts is None:
+        return
+    elapsed = now - last_ts
+    wait_time = max(0.0, min_interval - elapsed)
+    if wait_time > 0.05:
+        log.info(f"   Waiting {wait_time:.2f}s to respect adaptive rate limit for {model_name}...")
+        time.sleep(wait_time)
+
+
+def _mark_rate_limited(provider: str, model_name: str):
+    if provider != "gemini":
+        return
+    _MODEL_LAST_REQUEST_TS[f"{provider}:{model_name}"] = time.time()
+
+
+def _ollama_generate(url: str, payload: dict) -> dict:
+    resp = requests.post(url, json=payload, timeout=600)
+    resp.raise_for_status()
+    return resp.json()
+
+def call_ai(provider, prompt, temperature: float | None = None):
     global _EXHAUSTED_MODELS
     if provider == "gemini":
         from google import genai
@@ -1021,7 +1051,7 @@ def call_ai(provider, prompt):
             sys.exit("Set GEMINI_API_KEY.")
 
         client = genai.Client(api_key=key, http_options={"timeout": 120_000})
-        models_str = os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash")
+        models_str = os.getenv("GEMINI_MODELS")
         model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
         
         active_models = [m for m in model_queue if m not in _EXHAUSTED_MODELS]
@@ -1035,13 +1065,17 @@ def call_ai(provider, prompt):
         for current_model in active_models:
             for attempt in range(1, 4):
                 try:
+                    _maybe_wait_for_rate_limit(provider, current_model)
                     log.info(f"   Trying {current_model} (attempt {attempt})...")
                     response = client.models.generate_content(
                         model=current_model, contents=prompt,
-                        config=types.GenerateContentConfig(response_mime_type="application/json"),
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=temperature,
+                        ),
                     )
                     os.environ["_USED_MODEL"] = current_model
-                    time.sleep(6.0)  # 6.0s paus garanterar max 10 anrop/minut (skyddar mot 15 RPM-gräns)
+                    _mark_rate_limited(provider, current_model)
                     return response.text
                 except Exception as e:
                     import httpx
@@ -1071,14 +1105,26 @@ def call_ai(provider, prompt):
         if not key: sys.exit("Set ANTHROPIC_API_KEY.")
         mn = os.getenv("ANTHROPIC_MODEL","claude-opus-4-5")
         log.info(f"Sending to Anthropic ({mn})...")
-        return anthropic.Anthropic(api_key=key).messages.create(model=mn, max_tokens=6000, messages=[{"role":"user","content":prompt}]).content[0].text
+        return anthropic.Anthropic(api_key=key).messages.create(
+            model=mn,
+            max_tokens=6000,
+            temperature=temperature if temperature is not None else 0,
+            messages=[{"role":"user","content":prompt}],
+        ).content[0].text
     elif provider == "openai":
         from openai import OpenAI
         key = os.getenv("OPENAI_API_KEY","")
         if not key: sys.exit("Set OPENAI_API_KEY.")
         mn = os.getenv("OPENAI_MODEL","gpt-4o")
         log.info(f"Sending to OpenAI ({mn})...")
-        return OpenAI(api_key=key).chat.completions.create(model=mn, messages=[{"role":"user","content":prompt}], response_format={"type":"json_object"}).choices[0].message.content
+        kwargs = {
+            "model": mn,
+            "messages": [{"role":"user","content":prompt}],
+            "response_format": {"type":"json_object"},
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        return OpenAI(api_key=key).chat.completions.create(**kwargs).choices[0].message.content
     elif provider == "mistral":
         key = os.getenv("MISTRAL_API_KEY","")
         if not key: sys.exit("Set MISTRAL_API_KEY.")
@@ -1091,8 +1137,10 @@ def call_ai(provider, prompt):
         payload = {
             "model": mn,
             "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"},
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         resp = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         os.environ["_USED_MODEL"] = mn
@@ -1108,16 +1156,40 @@ def call_ai(provider, prompt):
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.1
-            }
+                "temperature": temperature if temperature is not None else 0.1,
+                "num_predict": 4096,
+            },
+            "think": _OLLAMA_THINK_DEFAULT,
         }
-
-        resp = requests.post(url, json=payload, timeout=600)
-        resp.raise_for_status()
+        data = _ollama_generate(url, payload)
 
         os.environ["_USED_MODEL"] = mn
 
-        return resp.json()["response"]
+        # Token-statistik
+        if "eval_count" in data and "eval_duration" in data:
+            toks = data["eval_count"] / (data["eval_duration"] / 1e9)
+            log.info(f"Tokens: {data['eval_count']} | Hastighet: {toks:.1f} tok/s")
+
+        response = data.get("response", "")
+        thinking = data.get("thinking", "")
+        if not response and thinking:
+            log.warning(f"⚠️ Ollama response empty but thinking non-empty ({len(thinking)} chars) - model used thinking-only mode")
+            log.debug(f"Thinking preview: {thinking[:200]}")
+            if payload.get("think"):
+                log.warning("⚠️ Retrying Ollama once with think=False to get a final answer")
+                retry_payload = dict(payload)
+                retry_payload["think"] = False
+                data = _ollama_generate(url, retry_payload)
+                if "eval_count" in data and "eval_duration" in data:
+                    toks = data["eval_count"] / (data["eval_duration"] / 1e9)
+                    log.info(f"Retry tokens: {data['eval_count']} | Hastighet: {toks:.1f} tok/s")
+                response = data.get("response", "")
+                thinking = data.get("thinking", "")
+        elif not response:
+            log.warning("⚠️ Ollama response is empty")
+            log.debug(f"Raw Ollama keys: {list(data.keys())}")
+
+        return response
     
 def parse_plan(raw: str) -> AIPlan:
     clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -1131,6 +1203,14 @@ def parse_plan(raw: str) -> AIPlan:
     for candidate in candidates:
         try:
             data = json.loads(candidate)
+            # Om modellen returnerar en array, ta första elementet om det är ett objekt
+            if isinstance(data, list):
+                data = next((item for item in data if isinstance(item, dict)), None)
+                if data is None:
+                    continue
+            # Remap common model alias: gemma/llama returnerar ibland "daily_plan" istället för "days"
+            if "daily_plan" in data and "days" not in data:
+                data["days"] = data.pop("daily_plan")
             # Rensa AI_TAG om den läckt in i textfält
             for field in ("yesterday_feedback", "weekly_feedback", "summary", "stress_audit"):
                 if field in data and isinstance(data[field], str):
@@ -1145,7 +1225,9 @@ def parse_plan(raw: str) -> AIPlan:
                                 step["reps"] = str(step["reps"])
                                 
             plan = AIPlan(**data)
-            log.info("✅ AI plan parsed and validated OK")
+            n_days = len(plan.days)
+            n_steps = sum(len(d.workout_steps) for d in plan.days)
+            log.info(f"✅ AI plan parsed and validated OK ({n_days} days, {n_steps} workout steps)")
             return plan
         except json.JSONDecodeError:
             continue
@@ -1163,7 +1245,7 @@ def parse_plan(raw: str) -> AIPlan:
                 pass
             continue
     log.error("❌ Could not parse AI response. Fallback to rest day.")
-    log.debug(f"Raw AI response (first 500 chars):\n{raw[:500]}")
+    log.warning(f"Raw AI response (first 500 chars):\n{raw[:500]}")
     try:
         fallback_day = PlanDay(
             date=date.today().isoformat(), title="Rest (AI error)",
@@ -1186,17 +1268,19 @@ def parse_plan(raw: str) -> AIPlan:
 # VISNING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _active_provider() -> str:
-    if common.args is not None:
-        return common.args.provider
-    return os.getenv("AI_PROVIDER", "gemini")
-
 def print_plan(plan, changes, mesocycle=None, trajectory=None,
                acwr_trend=None, taper_score=None, race_week=None, rtp_status=None,
                planner_insights=None):
     planner_insights = planner_insights or {}
+    if common.args is not None:
+        gen_provider = (common.args.provider_gen or common.args.provider).upper()
+        review_provider = (common.args.provider_review or common.args.provider).upper()
+    else:
+        gen_provider = os.getenv("AI_PROVIDER_gen_revision", os.getenv("AI_PROVIDER", "gemini")).upper()
+        review_provider = os.getenv("AI_PROVIDER_review", os.getenv("AI_PROVIDER", "gemini")).upper()
+    provider_label = gen_provider if gen_provider == review_provider else f"{gen_provider} gen / {review_provider} review"
     print("\n" + "="*65)
-    print(f"  TRAINING PLAN v2  ({_active_provider().upper()})")
+    print(f"  TRAINING PLAN v2  ({provider_label})")
     if mesocycle:
         print(f"  Block {mesocycle['block_number']}, Week {mesocycle['week_in_block']}/4"
               + (" [🟡 DELOAD]" if mesocycle['is_deload'] else ""))

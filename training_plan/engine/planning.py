@@ -1,5 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
+from training_plan.engine.utils import safe_date_str
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -11,6 +12,135 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+
+_FAILURE_MEMORY_LIMIT = 8
+_FAILURE_MEMORY_MIN_SCORE = 0.5
+_FAILURE_MEMORY_DECAY = 0.85
+_FAILURE_CATEGORIES = {
+    "complexity_overload": "Plans became too complex and likely hurt execution.",
+    "lost_key_sessions": "Important key sessions were weakened, misplaced, or not protected enough.",
+    "low_specificity": "The plan drifted away from block objective or race demands.",
+    "high_risk_load": "Load/risk balance was too aggressive or physiologically unsafe.",
+    "repeated_veto": "Python had to veto the plan repeatedly, meaning the structure was not legal from the start.",
+    "low_tss": "Planned load ended up too low relative to budget and objective.",
+    "filler_sessions": "The plan contained low-value filler instead of clear purpose.",
+    "weak_individualization": "The plan did not adapt well enough to this athlete's profile or constraints.",
+    "uncertainty_high": "The plan relied too much on weak or uncertain data.",
+}
+
+
+def _failure_memory_bucket(state: dict) -> dict:
+    bucket = state.setdefault("failure_memory", {})
+    bucket.setdefault("patterns", {})
+    return bucket
+
+
+def _categorize_failure_signals(trace, changes: list[str]) -> list[tuple[str, str]]:
+    results: list[tuple[str, str]] = []
+    if not trace or not trace.review or not trace.scores:
+        return results
+
+    review = trace.review
+    scores = trace.scores
+    must_fix_text = " ".join(review.must_fix or []).lower()
+    advice_text = " ".join(review.coaching_advice or []).lower()
+    summary_text = f"{review.summary} {trace.rationale}".lower()
+    change_text = " ".join(changes or []).lower()
+
+    if scores.simplicity <= 5 or "filler" in must_fix_text or "filler" in advice_text:
+        results.append(("complexity_overload", "Simplicity was weak or filler sessions appeared."))
+    if review.key_sessions.rating in ("WEAK", "CRITICAL") or "must-hit" in must_fix_text or "key session" in must_fix_text:
+        results.append(("lost_key_sessions", "Key sessions were not protected strongly enough."))
+    if scores.specificity <= 5 or review.race_demands.rating in ("WEAK", "CRITICAL"):
+        results.append(("low_specificity", "Specificity to block/race demands was too weak."))
+    if scores.risk >= 7 or review.load_and_risk.rating in ("WEAK", "CRITICAL"):
+        results.append(("high_risk_load", "Risk/load balance was too aggressive or unstable."))
+    if any("veto" in c.lower() for c in changes):
+        results.append(("repeated_veto", "Python had to veto parts of the plan."))
+    if "tss-deficit veto" in change_text or "too low" in must_fix_text or "missing" in must_fix_text and "tss" in must_fix_text:
+        results.append(("low_tss", "The plan under-shot the intended load budget."))
+    if "filler" in must_fix_text or "filler" in summary_text:
+        results.append(("filler_sessions", "The plan included low-value filler sessions."))
+    if scores.simplicity <= 5 or review.individualization.rating in ("WEAK", "CRITICAL"):
+        results.append(("weak_individualization", "The plan was not individualized enough."))
+    if scores.confidence <= 4 or len(review.uncertainty_sources or []) >= 3:
+        results.append(("uncertainty_high", "The plan depended on too much uncertainty."))
+
+    deduped = []
+    seen = set()
+    for key, reason in results:
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((key, reason))
+    return deduped
+
+
+def update_failure_memory(state: dict, trace, changes: list[str]) -> dict:
+    bucket = _failure_memory_bucket(state)
+    patterns = bucket.setdefault("patterns", {})
+    today = date.today()
+    last_updated = bucket.get("last_updated")
+    if last_updated:
+        try:
+            days_since = max((today - date.fromisoformat(last_updated)).days, 0)
+        except Exception:
+            days_since = 0
+        if days_since > 0:
+            decay_factor = _FAILURE_MEMORY_DECAY ** days_since
+            for item in patterns.values():
+                item["score"] = round(item.get("score", 0.0) * decay_factor, 3)
+
+    for category, reason in _categorize_failure_signals(trace, changes):
+        item = patterns.setdefault(category, {
+            "score": 0.0,
+            "count": 0,
+            "last_seen": today.isoformat(),
+            "example": reason,
+            "label": _FAILURE_CATEGORIES.get(category, category),
+        })
+        item["score"] = round(item.get("score", 0.0) + 1.0, 3)
+        item["count"] = item.get("count", 0) + 1
+        item["last_seen"] = today.isoformat()
+        item["example"] = reason
+        item["label"] = _FAILURE_CATEGORIES.get(category, category)
+
+    filtered = {
+        key: value for key, value in patterns.items()
+        if value.get("score", 0.0) >= _FAILURE_MEMORY_MIN_SCORE
+    }
+    ranked = sorted(
+        filtered.items(),
+        key=lambda kv: (-kv[1].get("score", 0.0), -kv[1].get("count", 0), kv[0]),
+    )[:_FAILURE_MEMORY_LIMIT]
+    bucket["patterns"] = {key: value for key, value in ranked}
+    bucket["last_updated"] = today.isoformat()
+    return bucket
+
+
+def format_failure_memory(memory: dict) -> str:
+    if not memory:
+        return ""
+    patterns = memory.get("patterns", {})
+    if not patterns:
+        return ""
+    ranked = sorted(
+        patterns.items(),
+        key=lambda kv: (-kv[1].get("score", 0.0), -kv[1].get("count", 0), kv[0]),
+    )[:3]
+    if not ranked:
+        return ""
+    lines = ["FAILURE MEMORY (recent recurring planning mistakes to avoid):"]
+    for key, item in ranked:
+        if item.get("count", 0) < 2 and item.get("score", 0.0) < 1.5:
+            continue
+        lines.append(
+            f"  - Avoid {key}: {item.get('label', key)} "
+            f"(score {round(item.get('score', 0.0), 1)}, seen {item.get('count', 0)}x). "
+            f"Recent example: {item.get('example', '')}"
+        )
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 def is_ai_generated(w):
     return AI_TAG in (w.get("description") or "")
@@ -72,17 +202,12 @@ def _weekly_tss_history(activities: list, weeks: int = 6) -> list[dict]:
         tss = sum(
             a.get("icu_training_load", 0) or 0
             for a in activities
-            if _safe_date_str(a) and week_start.isoformat() <= _safe_date_str(a) < week_end.isoformat()
+            if safe_date_str(a) and week_start.isoformat() <= safe_date_str(a) < week_end.isoformat()
         )
         result.append({"week_start": week_start.isoformat(), "tss": round(tss)})
     return result
 
 
-def _safe_date_str(activity) -> str:
-    try:
-        return activity["start_date_local"][:10]
-    except Exception:
-        return ""
 
 
 def format_zone_times(zt) -> str:
@@ -165,7 +290,7 @@ def classify_session_category(item: dict) -> str:
 
 def polarization_analysis(activities: list, days: int = 21) -> dict:
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    relevant = [a for a in activities if _safe_date_str(a) and _safe_date_str(a) >= cutoff]
+    relevant = [a for a in activities if safe_date_str(a) and safe_date_str(a) >= cutoff]
     if not relevant:
         return {
             "days": days,
@@ -215,7 +340,7 @@ def polarization_analysis(activities: list, days: int = 21) -> dict:
 
 def session_quality_analysis(activities: list, days: int = 28) -> dict:
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    relevant = [a for a in activities if _safe_date_str(a) and _safe_date_str(a) >= cutoff]
+    relevant = [a for a in activities if safe_date_str(a) and safe_date_str(a) >= cutoff]
     if not relevant:
         return {
             "days": days,
@@ -254,7 +379,7 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
             if rpe is not None:
                 score += 10 if rpe <= 6 else (-15 if rpe >= 8 else 0)
             if feel is not None:
-                score += 8 if feel >= 4 else (-8 if feel <= 2 else 0)
+                score += 8 if feel <= 2 else (-8 if feel >= 4 else 0)
         elif cat == "endurance":
             score = 60
             if dur >= 90:
@@ -272,7 +397,7 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
             if rpe is not None:
                 score += 10 if 6 <= rpe <= 8 else (-8 if rpe >= 9 else -4 if rpe <= 4 else 0)
             if feel is not None:
-                score += 6 if feel >= 3 else (-10 if feel <= 2 else 0)
+                score += 6 if feel <= 3 else (-10 if feel >= 4 else 0)
         elif cat == "vo2":
             score = 60
             if intf is not None and intf >= 0.98:
@@ -280,11 +405,11 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
             if rpe is not None:
                 score += 10 if 7 <= rpe <= 9 else (-8 if rpe <= 5 else 0)
             if feel is not None:
-                score += 5 if feel >= 3 else (-8 if feel <= 2 else 0)
+                score += 5 if feel <= 3 else (-8 if feel >= 4 else 0)
         elif cat == "strength":
             score = 62
             if feel is not None:
-                score += 8 if feel >= 3 else (-8 if feel <= 2 else 0)
+                score += 8 if feel <= 3 else (-8 if feel >= 4 else 0)
             if rpe is not None and rpe >= 8:
                 score -= 8
         elif cat == "recovery":
@@ -305,7 +430,7 @@ def session_quality_analysis(activities: list, days: int = 28) -> dict:
             bucket["poor"] += 1
 
         recent_sessions.append({
-            "date": _safe_date_str(a),
+            "date": safe_date_str(a),
             "name": a.get("name", "?"),
             "category": cat,
             "score": score,
@@ -363,15 +488,15 @@ def race_demands_analysis(races: list, activities: list) -> dict:
     ], key=lambda r: r.get("start_date_local", ""))
 
     target = future[0] if future else None
-    target_name = target.get("name", "Vätternrundan") if target else "Vätternrundan"
+    target_name = target.get("name", "Main race") if target else "Main race"
     target_date = target.get("start_date_local", "")[:10] if target else ""
     days_to_race = (datetime.strptime(target_date, "%Y-%m-%d").date() - today).days if target_date else None
 
     cycling = [a for a in activities if a.get("type") in ("Ride", "VirtualRide")]
     cutoff_56 = (today - timedelta(days=56)).isoformat()
     cutoff_21 = (today - timedelta(days=21)).isoformat()
-    recent_cycling = [a for a in cycling if _safe_date_str(a) and _safe_date_str(a) >= cutoff_56]
-    recent_21 = [a for a in cycling if _safe_date_str(a) and _safe_date_str(a) >= cutoff_21]
+    recent_cycling = [a for a in cycling if safe_date_str(a) and safe_date_str(a) >= cutoff_56]
+    recent_21 = [a for a in cycling if safe_date_str(a) and safe_date_str(a) >= cutoff_21]
 
     longest_ride = max((session_duration_min(a) for a in recent_cycling), default=0)
     rides_3h = sum(1 for a in recent_cycling if session_duration_min(a) >= 180)
@@ -556,7 +681,7 @@ def ctl_trajectory(ctl_now: float, race_date: Optional[date], target_ctl: float,
 
 
 def ctl_ontrack_check(trajectory: dict, ctl_now: float, fitness_history: list) -> str:
-    """Ger en enkel status om atleten är på rätt spår mot Vätternrundan-CTL-målet."""
+    """Ger en enkel status om atleten är på rätt spår mot CTL-målet för A-race."""
     if not trajectory.get("has_target"):
         return ""
     gap = trajectory["ctl_gap"]
@@ -595,7 +720,7 @@ def compliance_analysis(planned_events: list, activities: list, days: int = 28) 
         plan_by_date.setdefault(d, []).append(p)
     act_by_date = {}
     for a in activities:
-        d = _safe_date_str(a)
+        d = safe_date_str(a)
         if d and d >= cutoff:
             act_by_date.setdefault(d, []).append(a)
     total_planned   = len(planned)
@@ -1074,7 +1199,7 @@ def get_next_workouts(levels: dict, phase: str) -> str:
 def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yesterday_actuals: list, state: dict):
     """
     Kollar om gårdagens pass var ett lyckat bibliotekspass och avancerar i så fall nivån.
-    Ett pass är "lyckat" om det genomfördes med RPE <= 7 och Känsla >= 3.
+    Ett pass är "lyckat" om det genomfördes med RPE <= 7 och låg/bra känsla (feel <= 3).
     """
     if not yesterday_planned or not yesterday_actuals or not is_ai_generated(yesterday_planned):
         return
@@ -1109,7 +1234,7 @@ def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yes
     rpe = actual.get("perceived_exertion")
     feel = actual.get("feel")
 
-    is_mastered = (rpe is None and feel is None) or (rpe is not None and rpe <= 7 and feel is not None and feel >= 3)
+    is_mastered = (rpe is None and feel is None) or (rpe is not None and rpe <= 7 and feel is not None and feel <= 3)
 
     if is_mastered:
         log.info(f"✅ Session '{wk_key}' mastered (RPE: {rpe or 'N/A'}, Feel: {feel or 'N/A'}).")
@@ -1134,7 +1259,7 @@ def autoregulate_from_yesterday(yesterday_raw: dict, state: dict) -> list:
     Analyserar gårdagens prestation och justerar passprogressionen i realtid.
     Returnerar en lista med signaler som injiceras i AI-prompten.
 
-    - RPE <= 5 + Känsla >= 4: dubbel-avancering + FTP-test-signal
+    - RPE <= 5 + mycket bra känsla (feel <= 2): dubbel-avancering + FTP-test-signal
     - Missat pass: signal om att INTE kompensera
     """
     signals = []
@@ -1146,7 +1271,7 @@ def autoregulate_from_yesterday(yesterday_raw: dict, state: dict) -> list:
     wk_key = yesterday_raw.get("workout_key")
     missed = yesterday_raw.get("missed", False)
 
-    if rpe is not None and feel is not None and rpe <= 5 and feel >= 4 and wk_key:
+    if rpe is not None and feel is not None and rpe <= 5 and feel <= 2 and wk_key:
         levels = state.get("workout_levels", {})
         current = levels.get(wk_key, 1)
         max_level = len(WORKOUT_LIBRARY.get(wk_key, {}).get("levels", []))

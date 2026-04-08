@@ -1,4 +1,5 @@
 import training_plan.core.common as common
+from concurrent.futures import ThreadPoolExecutor
 from training_plan.core.common import *
 from training_plan.core.cli import parse_args
 from training_plan.engine.libraries import *
@@ -12,6 +13,25 @@ from training_plan.engine.ai import *
 from training_plan.engine.pipeline import *
 
 args = None
+
+
+def _fetch_initial_data(days_history: int, horizon: int) -> dict:
+    jobs = {
+        "athlete": lambda: fetch_athlete(),
+        "wellness": lambda: fetch_wellness(days_history),
+        "fitness": lambda: fetch_fitness(days_history),
+        "activities": lambda: fetch_activities(days_history),
+        "races": lambda: fetch_races(365),
+        "planned": lambda: fetch_planned_workouts(horizon),
+        "all_events": lambda: fetch_all_planned_events(days_back=28),
+        "weather": lambda: fetch_weather(horizon),
+    }
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        future_map = {name: executor.submit(job) for name, job in jobs.items()}
+        for name, future in future_map.items():
+            results[name] = future.result()
+    return results
 
 
 def main(argv=None):
@@ -28,13 +48,15 @@ def main(argv=None):
     ensure_required_config()
     log.info("Fetching data from intervals.icu...")
     try:
-        athlete    = fetch_athlete()
-        wellness   = fetch_wellness(args.days_history)
-        fitness    = fetch_fitness(args.days_history)
-        activities = fetch_activities(args.days_history)
-        races      = fetch_races(365)
-        planned    = fetch_planned_workouts(args.horizon)
-        all_events = fetch_all_planned_events(days_back=28)
+        initial_data = _fetch_initial_data(args.days_history, args.horizon)
+        athlete = initial_data["athlete"]
+        wellness = initial_data["wellness"]
+        fitness = initial_data["fitness"]
+        activities = initial_data["activities"]
+        races = initial_data["races"]
+        planned = initial_data["planned"]
+        all_events = initial_data["all_events"]
+        weather = initial_data["weather"]
         log.info(f"  {len(activities)} activities | {len(wellness)} wellness | {len(races)} races | {len(planned)} planned")
     except requests.HTTPError as e:
         log.error(f"API error: {e}"); sys.exit(1)
@@ -46,8 +68,7 @@ def main(argv=None):
     locked_dates    = {w.get("start_date_local","")[:10] for w in manual_workouts}
     if manual_workouts: log.info(f"  {len(manual_workouts)} manual sessions locked: {', '.join(sorted(locked_dates))}")
 
-    log.info("Fetching weather...")
-    weather = fetch_weather(args.horizon)
+    log.info("Weather loaded.")
 
     # ── DATAKVALITETSVALIDERING ──────────────────────────────────────────────
     dq = validate_data_quality(activities, wellness)
@@ -67,6 +88,13 @@ def main(argv=None):
     # ── MOTIVATIONSANALYS ────────────────────────────────────────────────────
     motivation = analyze_motivation(wellness_clean, activities_clean)
     log.info(f"🧠 Motivation: {motivation['state']} ({motivation['summary']})")
+    log.info(
+        "   Motivation details: trend=%s | avg_feel=%s/5 | sessions_with_feel=%s | weeks_declining=%s",
+        motivation.get("trend", "?"),
+        motivation.get("avg_feel", "?"),
+        motivation.get("n_activities", "?"),
+        motivation.get("weeks_declining", "?"),
+    )
 
     today_wellness    = next((w for w in wellness if w.get("id","").startswith(date.today().isoformat())), None)
 
@@ -352,7 +380,26 @@ def main(argv=None):
     }
     save_state(state)
     learned_patterns = format_learned_patterns(learned_patterns_raw)
+    failure_memory_text = format_failure_memory(state.get("failure_memory", {}))
     log.info(f"💪 Readiness: {readiness['score']}/100 ({readiness['label']})")
+    readiness_components = readiness.get("components", {})
+    readiness_inputs = readiness.get("raw_inputs", {})
+    readiness_limiters = readiness.get("limiters", [])
+    log.info(
+        "   Readiness details: HRV=%s (dev %s%%) | Sleep=%s (%.1fh) | RHR=%s (slope %s/d) | RPE=%s (avg %.1f) | Feel=%s (avg %.2f)",
+        readiness_components.get("hrv", "?"),
+        readiness_inputs.get("hrv_deviation_pct", "?"),
+        readiness_components.get("sleep", "?"),
+        readiness_inputs.get("sleep_hours", 0.0),
+        readiness_components.get("rhr", "?"),
+        readiness_inputs.get("rhr_slope_7d", "?"),
+        readiness_components.get("rpe", "?"),
+        readiness_inputs.get("avg_rpe_last5", 0.0),
+        readiness_components.get("feel", "?"),
+        readiness_inputs.get("avg_feel_last5", 0.0),
+    )
+    if readiness_limiters:
+        log.info("   Readiness limiters: %s", " | ".join(readiness_limiters[:3]))
     log.info(f"🎯 {development_needs['summary']}")
     log.info(f"🏁 {race_demands['summary']}")
     log.info(f"🛠️ {session_quality['summary']}")
@@ -364,6 +411,12 @@ def main(argv=None):
     log.info(f"Race readiness: {race_readiness['summary']}")
     log.info(f"Historical validation: {historical_validation['summary']}")
     log.info(f"Outcome tracking: {outcome_tracking['summary']}")
+    if minimum_effective_dose:
+        med_reasons = minimum_effective_dose.get("rationale", [])
+        if med_reasons:
+            log.info("MED rationale: %s", " | ".join(med_reasons))
+        else:
+            log.info("MED rationale: mode READY - no reduction triggers active.")
     existing_plan_dates = locked_dates  # locked_dates = datum med manuella (ej AI) pass
     # TSS från manuella pass (AI-events räknas inte – de ska regenereras)
     base_tss_by_date = {}
@@ -394,6 +447,7 @@ def main(argv=None):
         session_quality=session_quality, coach_confidence=coach_confidence,
         polarization=polarization, historical_validation=historical_validation,
         outcome_tracking=outcome_tracking, planner_insights=planner_insights,
+        failure_memory=failure_memory_text,
     )
     review_context = {
         "today": date.today().isoformat(),
@@ -447,6 +501,7 @@ def main(argv=None):
         },
         "historical_validation_summary": historical_validation.get("summary", ""),
         "outcome_tracking_summary": outcome_tracking.get("summary", ""),
+        "failure_memory_summary": failure_memory_text,
     }
 
     def apply_postprocess(candidate_plan):
@@ -455,22 +510,37 @@ def main(argv=None):
             injury_note=morning.get('injury_today', ''), mesocycle=mesocycle,
             constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
             per_sport_acwr_data=sport_acwr, motivation=motivation,
+            med_active=minimum_effective_dose.get("mode") == "ACTIVE",
             phase=phase, races=races, wellness=wellness_clean,
             base_tss_by_date=base_tss_by_date, horizon_days=args.horizon + 1,
             time_available_text=morning.get("time_available", ""),
         )
 
-    plan, changes, decision_trace = run_plan_pipeline(
-        args.provider,
-        prompt,
-        apply_postprocess,
-        athlete,
-        base_tss_by_date,
-        tsb_bgt,
-        review_context,
-        max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "5")),
-        candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "2")),
-    )
+    # Use one configurable provider for the full pipeline so generation, review,
+    # and pairwise judging stay aligned, while still being easy to switch in .env.
+    pipeline_provider = os.getenv(
+        "AI_PROVIDER_PIPELINE",
+        args.provider_gen or args.provider_review or args.provider or "gemini",
+    ).lower()
+    gen_provider = pipeline_provider
+    review_provider = pipeline_provider
+    try:
+        plan, changes, decision_trace = run_plan_pipeline(
+            gen_provider,
+            review_provider,
+            prompt,
+            apply_postprocess,
+            athlete,
+            base_tss_by_date,
+            tsb_bgt,
+            review_context,
+            max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "5")),
+            candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "2")),
+        )
+    except Exception as e:
+        log.error("❌ AI pipeline failed – all models exhausted or unreachable: %s", e)
+        log.error("   Try again in a few minutes, or switch provider with --provider.")
+        sys.exit(1)
     # Rensa coach-feedback om det inte finns faktisk aktivitetsdata att ge feedback om
     if not yesterday_analysis:
         plan = plan.model_copy(update={"yesterday_feedback": ""})
@@ -554,6 +624,7 @@ def main(argv=None):
         return
 
     record_plan_decision(state, plan, decision_trace, planned_total_tss, block_objective, race_demands)
+    update_failure_memory(state, decision_trace, changes)
     save_state(state)
 
     if mode == "full":

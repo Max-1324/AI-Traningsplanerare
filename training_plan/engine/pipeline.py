@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Callable, Optional
 
 from training_plan.core.common import *
-from training_plan.core.models import AIPlan, PlanDecisionTrace, PlanReview, PlanScores
+from training_plan.core.models import AIPlan, PairwiseDecision, PlanDecisionTrace, PlanReview, PlanScores
 from training_plan.engine.ai import call_ai, parse_plan
 from training_plan.engine.planning import classify_session_category
 from training_plan.engine.postprocess import estimate_tss_coggan
@@ -22,33 +22,48 @@ _INTENSITY_BY_ZONE = {
 _CANDIDATE_VARIATIONS = [
     {
         "label": "Candidate A",
-        "focus": "Balanced main candidate",
+        "focus": "Balanced with protected key sessions",
         "instructions": [
-            "Build a balanced plan with clear must-hit sessions and reasonable risk.",
-            "Optimize for the big picture rather than max volume or max aggressiveness.",
+            "Build a balanced plan that protects 3-4 key sessions per week.",
+            "Use 80/20 polarization: 80% easy endurance, 20% structured intensity.",
+            "Include test-and-adjust feedback loops; skip non-critical filler.",
         ],
     },
     {
         "label": "Candidate B",
-        "focus": "Simplicity and robustness first",
+        "focus": "Conservative recovery-first approach",
         "instructions": [
-            "Actively simplify the plan and minimize filler sessions.",
-            "Protect the key sessions but choose the most robust and feasible structure.",
+            "Minimize load: reduce weekly TSS by 15% from budget while hitting must-hit sessions.",
+            "Maximize recovery window between hard sessions (2+ days easy minimum).",
+            "Emphasize sleep/HRV feedback over aggressive periodization.",
         ],
     },
     {
         "label": "Candidate C",
-        "focus": "High specificity towards the goal",
+        "focus": "Aggressive race-specific preparation",
         "instructions": [
-            "Prioritize race demands and the block's primary adaptation more clearly.",
-            "Feel free to be more specific than Candidate A, but stay within safe load limits.",
+            "Prioritize race demands 3X heavier than block objective.",
+            "Cluster high-intensity sessions closer to race date; vary intensities (Z3→Z4→Z5).",
+            "Accept higher risk if TSS and specificity targets are met.",
         ],
     },
 ]
 
+_FIRST_ROUND_GENERATION_TEMPERATURE = float(os.getenv("PLAN_FIRST_ROUND_TEMPERATURE", "0.35"))
+_REVISION_GENERATION_TEMPERATURE = float(os.getenv("PLAN_REVISION_TEMPERATURE", "0.15"))
+_REVIEW_TEMPERATURE = float(os.getenv("PLAN_REVIEW_TEMPERATURE", "0.05"))
+_PAIRWISE_TEMPERATURE = float(os.getenv("PLAN_PAIRWISE_TEMPERATURE", "0.05"))
+_PAIRWISE_SCORE_MARGIN = int(os.getenv("PLAN_PAIRWISE_SCORE_MARGIN", "1"))
+_EARLY_STOP_PATIENCE = int(os.getenv("PLAN_EARLY_STOP_PATIENCE", "2"))
+_INVALID_REVIEW_RANK_PENALTY = float(os.getenv("PLAN_INVALID_REVIEW_RANK_PENALTY", "4.0"))
+_INVALID_REVIEW_COMPETITIVE_MARGIN = float(os.getenv("PLAN_INVALID_REVIEW_COMPETITIVE_MARGIN", "2.0"))
+_DEBUG_PARSE_FAILURES = os.getenv("PLAN_DEBUG_PARSE_FAILURES", "").strip().lower() in {"1", "true", "yes", "on"}
+_TSS_GAP_REVISION_MIN_MISSING = int(os.getenv("PLAN_TSS_GAP_REVISION_MIN_MISSING", "120"))
+_TSS_GAP_REVISION_MIN_PCT = float(os.getenv("PLAN_TSS_GAP_REVISION_MIN_PCT", "0.90"))
 
-def generate_plan(provider: str, prompt: str) -> AIPlan:
-    return parse_plan(call_ai(provider, prompt))
+
+def generate_plan(provider: str, prompt: str, temperature: float | None = None) -> AIPlan:
+    return parse_plan(call_ai(provider, prompt, temperature=temperature))
 
 
 def _extract_json_payload(raw: str) -> dict:
@@ -66,6 +81,10 @@ def _extract_json_payload(raw: str) -> dict:
             data = json.loads(candidate)
             if isinstance(data, dict):
                 return data
+            if isinstance(data, list):
+                first = next((item for item in data if isinstance(item, dict)), None)
+                if first is not None:
+                    return first
         except json.JSONDecodeError as exc:
             last_error = exc
 
@@ -80,7 +99,25 @@ def _parse_structured_response(raw: str, model_cls, fallback, label: str):
         return parsed
     except Exception as exc:
         log.warning(f"{label} could not be parsed: {exc}")
+        if _DEBUG_PARSE_FAILURES:
+            preview = (raw or "").strip()
+            if len(preview) > 4000:
+                preview = preview[:4000] + "\n...[truncated]"
+            log.warning("---- %s raw response start ----", label)
+            if preview:
+                for line in preview.splitlines():
+                    log.warning("%s", line)
+            else:
+                log.warning("<empty response>")
+            log.warning("---- %s raw response end ----", label)
         return fallback
+
+
+def _is_invalid_review_fallback(review: PlanReview) -> bool:
+    return bool(
+        review.must_fix
+        and "review response was invalid" in review.must_fix[0].lower()
+    )
 
 
 def _weighted_plan_intensity(day: PlanDay) -> float | None:
@@ -142,6 +179,36 @@ def summarize_plan_candidate(plan: AIPlan, athlete: dict | None = None,
 
 def _plan_for_prompt(plan: AIPlan) -> str:
     return json.dumps(plan.model_dump(exclude={"decision_trace"}, exclude_none=True), ensure_ascii=False, indent=2)
+
+
+def filter_review_context(review_context: dict, include_fields: list[str] | None = None) -> dict:
+    """
+    Filter review_context to only essential fields for a specific prompt stage.
+    Reduces token waste from redundant context.
+
+    Args:
+        review_context: Full context from main.py
+        include_fields: List of fields to include. If None, returns all.
+
+    Returns:
+        Filtered context dict with only relevant fields.
+    """
+    default_review_fields = [
+        "phase", "mesocycle", "trajectory", "block_objective",
+        "development_needs", "race_demands", "readiness", "motivation",
+        "compliance", "coach_confidence", "session_quality", "capacity_map",
+        "performance_forecast", "race_readiness", "failure_memory_summary"
+    ]
+
+    if include_fields is None:
+        include_fields = default_review_fields
+
+    filtered = {}
+    for field in include_fields:
+        if field in review_context:
+            filtered[field] = review_context[field]
+
+    return filtered
 
 
 def _compact_context(review_context: dict) -> str:
@@ -213,10 +280,12 @@ IMPORTANT:
 - If the data foundation is uncertain, it should be visible in the review.
 - Filler sessions should be penalized.
 - Must-hit sessions must be clearly protected.
+- For every meaningful must-fix, explain the required change and what must be preserved while fixing it.
 - DO NOT penalize sessions several days into the future based on today's low readiness/HRV. You may only require changes (must_fix) for high intensity if they are TODAY or TOMORROW.
 - Even if the "primary_focus" for the block happens to be 'recovery', this ONLY applies short-term. You may NOT fail an FTP test or key session 4+ days into the future citing a 'recovery phase'.
 - Avoid conditional must-fixes (e.g. "change this IF form does not improve"). Either the session is a direct error today, or you approve it.
 - NEVER use `must_fix` to warn about behaviors (e.g. "make sure this doesn't become a habit") or future concerns. A `must_fix` may ONLY point to a concrete, physiological error in the plan.
+- NEVER use `must_fix` for nutrition advice or vague power target personalization ("personalize based on physiology"). Power targets are only a `must_fix` if you can point to a specific session with concretely wrong watt values (e.g. "4×8min set to 280W but FTP is 230W"). Vague personalization advice belongs in `coaching_advice`.
 - If you have philosophical advice, warnings about the future, or minor feedback, put them in `coaching_advice` instead of `must_fix`.
 
 KONTEXT:
@@ -241,7 +310,17 @@ Return ONLY JSON with exactly this schema:
   "individualization": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "race_demands": {{"rating": "STRONG|ADEQUATE|WEAK|CRITICAL", "rationale": "", "issues": [""], "recommendations": [""]}},
   "strengths": ["max 4 concrete strengths"],
+  "protected_elements": ["what the revision must preserve because these parts are already right or strategically important"],
   "coaching_advice": ["minor feedback, tips and future warnings that DO NOT require immediate rebuilding"],
+  "review_fixes": [
+    {{
+      "issue": "concrete problem",
+      "severity": "MEDIUM|HIGH|CRITICAL",
+      "required_change": "what must change in the revised plan",
+      "protected_elements": ["what must not be lost while fixing this"],
+      "evidence": "brief physiological or structural reason"
+    }}
+  ],
   "must_fix": ["the most important thing that must be changed before the plan can be trusted"],
   "uncertainty_sources": ["what makes you uncertain"],
   "counterfactuals": [
@@ -250,6 +329,69 @@ Return ONLY JSON with exactly this schema:
     {{"question": "What happens if focus shifts to the best alternative?", "answer": "", "tradeoffs": "", "recommendation": ""}}
   ],
   "overall_verdict": "PASS|REVISE|REJECT"
+}}
+""".strip()
+
+
+def build_pairwise_prompt(current_plan: AIPlan, current_review: PlanReview, current_scores: PlanScores,
+                          candidate_plan: AIPlan, candidate_review: PlanReview, candidate_scores: PlanScores,
+                          athlete: dict | None, base_tss_by_date: dict[str, float],
+                          review_context: dict, candidate_changes: list[str]) -> str:
+    current_summary = summarize_plan_candidate(current_plan, athlete, base_tss_by_date)
+    candidate_summary = summarize_plan_candidate(candidate_plan, athlete, base_tss_by_date)
+    filtered_context = filter_review_context(review_context)
+    changes_text = "\n".join(f"- {c}" for c in candidate_changes) if candidate_changes else "- No postprocess changes"
+    return f"""
+ROLE: You are a strict pairwise planning judge.
+Your job is NOT to do a fresh open-ended review. Your job is to decide if the CANDIDATE is ACTUALLY BETTER than CURRENT.
+
+IMPORTANT:
+- Prefer the plan that solves must-fix items without introducing new regressions.
+- Protect key sessions and goal alignment over cosmetic differences.
+- Penalize candidates that add new must-fix problems, lose specificity, increase risk, or trigger postprocess vetoes.
+- Only pick CANDIDATE if there is a real net improvement, not just a different writing style.
+- If the improvement is unclear or mixed, return TIE.
+
+DECISION PRIORITY:
+1. Must-fix resolved vs must-fix added
+2. Goal alignment and key sessions
+3. Risk and veto avoidance
+4. Specificity
+5. Simplicity and confidence
+
+CONTEXT:
+{_compact_context(filtered_context)}
+
+CURRENT PLAN METRICS:
+{json.dumps(current_summary, ensure_ascii=False, indent=2)}
+
+CURRENT REVIEW:
+{json.dumps(current_review.model_dump(exclude_none=True), ensure_ascii=False, indent=2)}
+
+CURRENT SCORES:
+{json.dumps(current_scores.model_dump(exclude_none=True), ensure_ascii=False, indent=2)}
+
+CANDIDATE PLAN METRICS:
+{json.dumps(candidate_summary, ensure_ascii=False, indent=2)}
+
+CANDIDATE REVIEW:
+{json.dumps(candidate_review.model_dump(exclude_none=True), ensure_ascii=False, indent=2)}
+
+CANDIDATE SCORES:
+{json.dumps(candidate_scores.model_dump(exclude_none=True), ensure_ascii=False, indent=2)}
+
+CANDIDATE POSTPROCESSING:
+{changes_text}
+
+Return ONLY JSON with exactly this schema:
+{{
+  "better_plan": "CURRENT|CANDIDATE|TIE",
+  "confidence": 0,
+  "summary": "1-3 sentences on why one plan is better or why it is a tie",
+  "improved_areas": ["what candidate improved"],
+  "regressions": ["what candidate made worse"],
+  "must_fix_resolved": ["previous must-fix items that candidate resolved"],
+  "must_fix_added": ["new must-fix items candidate introduced"]
 }}
 """.strip()
 
@@ -263,69 +405,111 @@ def review_plan(provider: str, plan: AIPlan, athlete: dict | None,
         uncertainty_sources=["Reviewer response could not be parsed."],
         overall_verdict="REVISE",
     )
-    raw = call_ai(provider, build_review_prompt(plan, athlete, base_tss_by_date, review_context, postprocess_changes))
+    # Use filtered context to reduce token waste
+    filtered_context = filter_review_context(review_context)
+    raw = call_ai(
+        provider,
+        build_review_prompt(plan, athlete, base_tss_by_date, filtered_context, postprocess_changes),
+        temperature=_REVIEW_TEMPERATURE,
+    )
     return _parse_structured_response(raw, PlanReview, fallback, "Plan-review")
 
 
-def build_score_prompt(plan: AIPlan, review: PlanReview, athlete: dict | None,
-                       base_tss_by_date: dict[str, float], review_context: dict) -> str:
-    plan_summary = summarize_plan_candidate(plan, athlete, base_tss_by_date)
-    return f"""
-ROLE: You are a separate scoring model. You did not create the plan and you did not write the review.
-Your task is to score the plan soberly based on performance benefit, risk, specificity, simplicity, and your confidence.
-
-SCORING RULES:
-- Effectiveness 0-10: probable performance benefit for the block goal
-- Risk 0-10: risk of overload, poor absorption or failure
-- Specificity 0-10: how well the plan matches the goal and race demands
-- Simplicity 0-10: how robust, clear and executable the plan is
-- Confidence 0-10: how confident you are in your own assessment
-
-IMPORTANT:
-- High uncertainty in data or review should lower confidence.
-- High risk should not be hidden behind high effectiveness.
-- A simple plan with protected must-hit sessions should beat a more advanced plan.
-
-KONTEXT:
-{_compact_context(review_context)}
-
-PLAN METRICS:
-{json.dumps(plan_summary, ensure_ascii=False, indent=2)}
-
-REVIEW:
-{json.dumps(review.model_dump(exclude_none=True), ensure_ascii=False, indent=2)}
-
-PLAN:
-{_plan_for_prompt(plan)}
-
-Return ONLY JSON:
-{{
-  "effectiveness": 0,
-  "risk": 0,
-  "specificity": 0,
-  "simplicity": 0,
-  "confidence": 0,
-  "rationale": "short explanation",
-  "uncertainty_sources": ["what makes the score uncertain"],
-  "action_hint": "ACCEPT|REVISE|REJECT"
-}}
-""".strip()
-
-
-def score_plan(provider: str, plan: AIPlan, review: PlanReview, athlete: dict | None,
-               base_tss_by_date: dict[str, float], review_context: dict) -> PlanScores:
-    fallback = PlanScores(
-        effectiveness=5,
-        risk=6,
-        specificity=5,
-        simplicity=5,
-        confidence=2,
-        rationale="Scoring step could not be parsed safely; choose revision before acceptance.",
-        uncertainty_sources=["Scoring response could not be parsed."],
-        action_hint="REVISE",
+def compare_plans(provider: str, current_plan: AIPlan, current_trace: PlanDecisionTrace,
+                  candidate_plan: AIPlan, candidate_review: PlanReview, candidate_scores: PlanScores,
+                  athlete: dict | None, base_tss_by_date: dict[str, float], review_context: dict,
+                  candidate_changes: list[str]) -> PairwiseDecision:
+    fallback = PairwiseDecision(
+        better_plan="TIE",
+        confidence=3,
+        summary="Pairwise comparison could not be parsed safely, so no extra promotion was given.",
     )
-    raw = call_ai(provider, build_score_prompt(plan, review, athlete, base_tss_by_date, review_context))
-    return _parse_structured_response(raw, PlanScores, fallback, "Plan-score")
+    if not current_trace.review or not current_trace.scores:
+        return fallback
+
+    raw = call_ai(
+        provider,
+        build_pairwise_prompt(
+            current_plan,
+            current_trace.review,
+            current_trace.scores,
+            candidate_plan,
+            candidate_review,
+            candidate_scores,
+            athlete,
+            base_tss_by_date,
+            review_context,
+            candidate_changes,
+        ),
+        temperature=_PAIRWISE_TEMPERATURE,
+    )
+    return _parse_structured_response(raw, PairwiseDecision, fallback, "Plan-pairwise")
+
+
+
+
+def compute_scores_from_review(review: PlanReview) -> PlanScores:
+    """
+    Deterministic scoring based on review dimensions instead of AI scoring.
+    Eliminates redundant AI call while maintaining decision quality.
+    """
+    # Map review rating levels to score ranges
+    rating_to_score = {
+        "CRITICAL": 2,      # Critical problems = low score
+        "WEAK": 4,          # Weak = below acceptable
+        "ADEQUATE": 6,      # Adequate = acceptable baseline
+        "STRONG": 8,        # Strong = good
+    }
+
+    # Score effectiveness from goal_alignment + key_sessions
+    goal_score = rating_to_score.get(review.goal_alignment.rating, 5)
+    sessions_score = rating_to_score.get(review.key_sessions.rating, 5)
+    effectiveness = min(10, round((goal_score + sessions_score) / 2))
+
+    # Score risk from load_and_risk (inverted: higher rating = lower risk score)
+    risk_base = rating_to_score.get(review.load_and_risk.rating, 5)
+    # Invert: CRITICAL load → HIGH risk (8), EXCELLENT → LOW risk (2)
+    risk = max(1, min(10, 10 - risk_base + 2))
+
+    # Score specificity from race_demands + efficiency
+    demands_score = rating_to_score.get(review.race_demands.rating, 5)
+    efficiency_score = rating_to_score.get(review.efficiency.rating, 5)
+    specificity = min(10, round((demands_score + efficiency_score) / 2))
+
+    # Score simplicity from individualization (simple = individualized for athlete)
+    simplicity_base = rating_to_score.get(review.individualization.rating, 5)
+    # Also penalize if there are many must-fix items
+    must_fix_penalty = min(3, len(review.must_fix or []))
+    simplicity = max(1, simplicity_base - must_fix_penalty)
+
+    # Score confidence based on uncertainty sources
+    uncertainty_count = len(review.uncertainty_sources or [])
+    confidence_base = 8
+    confidence = max(2, confidence_base - uncertainty_count)
+
+    # Compute action hint based on verdict + dimensions
+    if review.overall_verdict == "REJECT":
+        action_hint = "REJECT"
+    elif review.overall_verdict == "PASS":
+        # Can ACCEPT only if all scores are good
+        if (effectiveness >= 7 and risk <= 5 and specificity >= 7 and
+            simplicity >= 6 and confidence >= 4 and not review.must_fix):
+            action_hint = "ACCEPT"
+        else:
+            action_hint = "REVISE"
+    else:
+        action_hint = "REVISE"
+
+    return PlanScores(
+        effectiveness=effectiveness,
+        risk=risk,
+        specificity=specificity,
+        simplicity=simplicity,
+        confidence=confidence,
+        rationale=f"Computed from review: {review.overall_verdict} ({', '.join(d.rating for d in [review.goal_alignment, review.key_sessions, review.load_and_risk, review.race_demands])})",
+        uncertainty_sources=review.uncertainty_sources or [],
+        action_hint=action_hint,
+    )
 
 
 def decide_plan(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> tuple[str, str]:
@@ -413,6 +597,8 @@ Do not try to defend the old plan. If the review says something is weak or wrong
 REVISION ROUND: {attempt}
 REQUIREMENTS:
 - Address must-fix first
+- Follow each review_fixes.required_change explicitly
+- Protect review.protected_elements and each fix item's protected_elements unless a physiological veto forces a change
 - Protect the right must-hit sessions
 - Remove filler sessions
 - Simplify if the same effect can be achieved with less friction
@@ -441,10 +627,51 @@ Return ONLY the exact same AIPlan JSON schema that the original prompt requires.
 """.strip()
 
 
+def build_tss_gap_revision_prompt(base_generation_prompt: str, plan: AIPlan,
+                                  missing_tss: int, total_tss: float, target_tss: float,
+                                  postprocess_changes: list[str], attempt: int) -> str:
+    changes_text = "\n".join(f"- {c}" for c in postprocess_changes) if postprocess_changes else "- No postprocess changes"
+    plan_summary = summarize_plan_candidate(plan)
+    return f"""
+ROLE: You are the load-balancing revision planner.
+Your only job is to revise the current plan so it closes a large TSS gap in a coach-like way.
+
+TSS GAP ALERT:
+- Current total TSS including locked/manual sessions: {round(total_tss)}
+- Target budget: {round(target_tss)}
+- Missing TSS: {missing_tss}
+- Revision round: {attempt}
+
+NON-NEGOTIABLE RULES:
+- Preserve the key sessions and overall block intent unless there is a physiological conflict.
+- Increase load mainly by extending existing Z2/endurance sessions and long rides.
+- Prefer fewer, longer, more coherent endurance sessions over adding many small filler sessions.
+- Do NOT add "repair" steps, "extension" filler blocks, or artificial padding language.
+- If volume must be added, fold it into the main session structure so the final plan reads naturally.
+- Do not solve the gap by adding extra intensity unless absolutely necessary.
+- Keep recovery logic intact around hard sessions and tests.
+
+CURRENT PLAN:
+{_plan_for_prompt(plan)}
+
+CURRENT PLAN SUMMARY:
+{json.dumps(plan_summary, ensure_ascii=False, indent=2)}
+
+POSTPROCESS SIGNALS:
+{changes_text}
+
+ORIGINAL PLANNING BRIEF:
+{base_generation_prompt}
+
+Return ONLY the exact same AIPlan JSON schema that the original prompt requires.
+""".strip()
+
+
 def _candidate_rank(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> float:
     postprocess_changes = postprocess_changes or []
     veto_triggers = ["HARD-EASY", "TAK v", "VOLYMSPÄRR", "STYRKEGRÄNS", "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET", "TSS-UNDERSKOTT VETO"]
     vetos_found = sum(1 for c in postprocess_changes if any(t in c for t in veto_triggers))
+    invalid_review_penalty = _INVALID_REVIEW_RANK_PENALTY if _is_invalid_review_fallback(review) else 0.0
 
     verdict_bonus = {"PASS": 2.0, "REVISE": 0.5, "REJECT": -2.0}
     return (
@@ -455,6 +682,7 @@ def _candidate_rank(review: PlanReview, scores: PlanScores, postprocess_changes:
         - scores.risk * 1.8
         - len(review.must_fix) * 0.7
         - vetos_found * 3.0
+        - invalid_review_penalty
         + verdict_bonus.get(review.overall_verdict, 0.0)
     )
 
@@ -472,10 +700,168 @@ def _candidate_round_line(label: str, action: str, scores: PlanScores, review: P
 def _pick_round_winner(results: list[dict]) -> dict:
     accepted = [result for result in results if result["action"] == "ACCEPT"]
     pool = accepted if accepted else results
+    valid_pool = [result for result in pool if not _is_invalid_review_fallback(result["review"])]
+    invalid_pool = [result for result in pool if _is_invalid_review_fallback(result["review"])]
+
+    if valid_pool:
+        best_valid = max(valid_pool, key=lambda result: result["rank"])
+        if invalid_pool:
+            best_invalid = max(invalid_pool, key=lambda result: result["rank"])
+            if best_invalid["rank"] > best_valid["rank"] + _INVALID_REVIEW_COMPETITIVE_MARGIN:
+                return best_invalid
+        return best_valid
+
     return max(pool, key=lambda result: result["rank"])
 
 
-def run_plan_pipeline(provider: str, generation_prompt: str,
+def _score_delta_text(prev: PlanScores | None, curr: PlanScores) -> str:
+    if prev is None:
+        return (
+            f"Baseline scores -> Effect {curr.effectiveness}/10, Risk {curr.risk}/10, "
+            f"Spec {curr.specificity}/10, Simplicity {curr.simplicity}/10, Confidence {curr.confidence}/10"
+        )
+
+    def fmt(label: str, old: int, new: int, invert_good: bool = False) -> str:
+        delta = new - old
+        if invert_good:
+            direction = "better" if delta < 0 else "worse" if delta > 0 else "unchanged"
+        else:
+            direction = "better" if delta > 0 else "worse" if delta < 0 else "unchanged"
+        sign = f"{delta:+d}"
+        return f"{label} {old}->{new} ({sign}, {direction})"
+
+    return " | ".join([
+        fmt("Effect", prev.effectiveness, curr.effectiveness),
+        fmt("Risk", prev.risk, curr.risk, invert_good=True),
+        fmt("Spec", prev.specificity, curr.specificity),
+        fmt("Simplicity", prev.simplicity, curr.simplicity),
+        fmt("Confidence", prev.confidence, curr.confidence),
+    ])
+
+
+def _candidate_change_reason(prev_trace: PlanDecisionTrace | None, result: dict) -> str:
+    reasons = []
+    prev_review = prev_trace.review if prev_trace else None
+    prev_scores = prev_trace.scores if prev_trace else None
+    review: PlanReview = result["review"]
+    scores: PlanScores = result["scores"]
+    changes: list[str] = result["changes"]
+
+    if prev_scores:
+        if scores.effectiveness > prev_scores.effectiveness:
+            reasons.append("higher effectiveness")
+        if scores.specificity > prev_scores.specificity:
+            reasons.append("better race/block specificity")
+        if scores.simplicity > prev_scores.simplicity:
+            reasons.append("simpler structure")
+        if scores.confidence > prev_scores.confidence:
+            reasons.append("less uncertainty")
+        if scores.risk < prev_scores.risk:
+            reasons.append("lower risk")
+
+    if prev_review:
+        prev_must_fix = set(prev_review.must_fix or [])
+        curr_must_fix = set(review.must_fix or [])
+        removed = [item for item in prev_review.must_fix if item not in curr_must_fix]
+        added = [item for item in review.must_fix if item not in prev_must_fix]
+        if removed:
+            reasons.append(f"resolved must-fix: {removed[0]}")
+        if added:
+            reasons.append(f"new must-fix: {added[0]}")
+
+    veto_items = [c for c in changes if "VETO" in c.upper()]
+    if veto_items:
+        reasons.append(f"postprocess veto: {veto_items[0]}")
+    if _is_invalid_review_fallback(review):
+        reasons.append("review parse fallback used")
+
+    if not reasons and review.strengths:
+        reasons.append(f"strength highlighted: {review.strengths[0]}")
+    if not reasons:
+        reasons.append(result["rationale"])
+
+    return "; ".join(reasons[:3])
+
+
+def _pairwise_rank_adjustment(pairwise: PairwiseDecision | None) -> float:
+    if pairwise is None:
+        return 0.0
+    confidence_bonus = min(1.5, pairwise.confidence / 10)
+    if pairwise.better_plan == "CANDIDATE":
+        return 2.5 + confidence_bonus
+    if pairwise.better_plan == "CURRENT":
+        return -(2.5 + confidence_bonus)
+    return 0.0
+
+
+def _pairwise_reason_text(pairwise: PairwiseDecision | None) -> str:
+    if pairwise is None:
+        return "no pairwise comparison"
+    parts = [f"Pairwise {pairwise.better_plan.lower()} ({pairwise.confidence}/10)"]
+    if pairwise.must_fix_resolved:
+        parts.append(f"resolved: {pairwise.must_fix_resolved[0]}")
+    if pairwise.must_fix_added:
+        parts.append(f"added: {pairwise.must_fix_added[0]}")
+    if pairwise.regressions:
+        parts.append(f"regression: {pairwise.regressions[0]}")
+    elif pairwise.improved_areas:
+        parts.append(f"improved: {pairwise.improved_areas[0]}")
+    elif pairwise.summary:
+        parts.append(pairwise.summary)
+    return "; ".join(parts[:4])
+
+
+def _should_run_pairwise(previous_trace: PlanDecisionTrace | None, candidate_scores: PlanScores,
+                         candidate_review: PlanReview, candidate_changes: list[str]) -> bool:
+    if not previous_trace or not previous_trace.scores or not previous_trace.review:
+        return False
+
+    prev_scores = previous_trace.scores
+    prev_review = previous_trace.review
+    candidate_must_fix = len(candidate_review.must_fix or [])
+    previous_must_fix = len(prev_review.must_fix or [])
+    veto_count = sum(1 for c in candidate_changes if "VETO" in c.upper())
+
+    if veto_count and not any("VETO" in item.upper() for item in (prev_review.must_fix or [])):
+        return False
+    if candidate_must_fix > previous_must_fix + 1:
+        return False
+    if candidate_scores.effectiveness + _PAIRWISE_SCORE_MARGIN < prev_scores.effectiveness:
+        return False
+    if candidate_scores.specificity + _PAIRWISE_SCORE_MARGIN < prev_scores.specificity:
+        return False
+    if candidate_scores.risk > prev_scores.risk + _PAIRWISE_SCORE_MARGIN:
+        return False
+    return True
+
+
+def _is_meaningful_improvement(previous_trace: PlanDecisionTrace | None, winner: dict) -> bool:
+    if not previous_trace or not previous_trace.scores or not previous_trace.review:
+        return True
+
+    prev_scores = previous_trace.scores
+    prev_review = previous_trace.review
+    scores: PlanScores = winner["scores"]
+    review: PlanReview = winner["review"]
+    pairwise: PairwiseDecision | None = winner.get("pairwise")
+
+    resolved = len([item for item in (prev_review.must_fix or []) if item not in (review.must_fix or [])])
+    added = len([item for item in (review.must_fix or []) if item not in (prev_review.must_fix or [])])
+
+    if pairwise and pairwise.better_plan == "CANDIDATE":
+        return True
+    if scores.effectiveness > prev_scores.effectiveness:
+        return True
+    if scores.specificity > prev_scores.specificity:
+        return True
+    if scores.risk < prev_scores.risk:
+        return True
+    if resolved > added:
+        return True
+    return False
+
+
+def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt: str,
                       postprocess_candidate: Callable[[AIPlan], tuple[AIPlan, list[str]]],
                       athlete: dict | None, base_tss_by_date: dict[str, float],
                       tss_budget: float,
@@ -489,11 +875,15 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
     revision_history: list[str] = []
     last_trace: PlanDecisionTrace | None = None
     candidate_specs = _candidate_specs(candidate_count)
+    stagnant_rounds = 0
 
     for attempt in range(1, max_iterations + 1):
+        previous_best_trace = best_candidate[2] if best_candidate else None
         if attempt == 1:
             log.info("🧠 Creating original plan (Attempt %s/%s). Generating %s candidates...", attempt, max_iterations, candidate_count)
             round_base_prompt = generation_prompt
+            generation_temperature = _FIRST_ROUND_GENERATION_TEMPERATURE
+            round_candidate_specs = candidate_specs
         else:
             review = last_trace.review if last_trace and last_trace.review else PlanReview()
             scores = last_trace.scores if last_trace and last_trace.scores else PlanScores(
@@ -516,44 +906,96 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
                 attempt,
                 current_changes,
             )
+            generation_temperature = _REVISION_GENERATION_TEMPERATURE
+            round_candidate_specs = candidate_specs[:1]
 
         round_results = []
-        for candidate_spec in candidate_specs:
-            candidate_prompt = build_candidate_prompt(round_base_prompt, candidate_spec, attempt, candidate_count)
-            candidate_plan = generate_plan(provider, candidate_prompt)
+        for candidate_spec in round_candidate_specs:
+            candidate_prompt = build_candidate_prompt(
+                round_base_prompt,
+                candidate_spec,
+                attempt,
+                len(round_candidate_specs),
+            )
+            candidate_plan = generate_plan(
+                gen_provider,
+                candidate_prompt,
+                temperature=generation_temperature,
+            )
             candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
 
-            # --- FÖRSLAG 3: Dynamisk TSS-kalkylator & Veto ---
+            med_mode = review_context.get("minimum_effective_dose", {}).get("mode", "READY")
             planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
             total_tss = planned_tss + sum(base_tss_by_date.values())
-            med_mode = review_context.get("minimum_effective_dose", {}).get("mode", "READY")
-            
+
+            if (
+                med_mode != "ACTIVE"
+                and tss_budget > 0
+                and total_tss < tss_budget * _TSS_GAP_REVISION_MIN_PCT
+            ):
+                missing = round(tss_budget - total_tss)
+                if missing >= _TSS_GAP_REVISION_MIN_MISSING:
+                    log.info(
+                        "   TSS-gap revision: candidate is %s TSS under budget (%s/%s). Asking AI to rebalance load...",
+                        missing,
+                        round(total_tss),
+                        round(tss_budget),
+                    )
+                    tss_gap_prompt = build_tss_gap_revision_prompt(
+                        generation_prompt,
+                        candidate_plan,
+                        missing,
+                        total_tss,
+                        tss_budget,
+                        candidate_changes,
+                        attempt,
+                    )
+                    candidate_plan = generate_plan(
+                        gen_provider,
+                        tss_gap_prompt,
+                        temperature=_REVISION_GENERATION_TEMPERATURE,
+                    )
+                    candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
+                    planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
+                    total_tss = planned_tss + sum(base_tss_by_date.values())
+
             if tss_budget > 0 and total_tss < tss_budget * 0.85:
                 missing = round(tss_budget - total_tss)
                 if med_mode == "ACTIVE":
                     candidate_changes.append(f"TSS-INFO: Plan gives {round(total_tss)} TSS (budget {round(tss_budget)}). Approved due to low form (MED=ACTIVE), but do not reduce further.")
                 else:
                     candidate_changes.append(f"TSS-DEFICIT VETO: Plan only reaches {round(total_tss)} TSS (budget {round(tss_budget)}). You are missing {missing} TSS. Extend endurance sessions or add aerobic volume!")
-            # -------------------------------------------------
 
             review = review_plan(
-                provider,
+                review_provider,
                 candidate_plan,
                 athlete,
                 base_tss_by_date,
                 review_context,
                 candidate_changes,
             )
-            scores = score_plan(
-                provider,
-                candidate_plan,
-                review,
-                athlete,
-                base_tss_by_date,
-                review_context,
-            )
+            # Use deterministic scoring instead of AI call (saves 33% of API calls)
+            scores = compute_scores_from_review(review)
             action, rationale = decide_plan(review, scores, candidate_changes)
             rank = _candidate_rank(review, scores, candidate_changes)
+            pairwise = None
+            if (
+                current_plan
+                and _should_run_pairwise(previous_best_trace, scores, review, candidate_changes)
+            ):
+                pairwise = compare_plans(
+                    review_provider,
+                    current_plan,
+                    previous_best_trace,
+                    candidate_plan,
+                    review,
+                    scores,
+                    athlete,
+                    base_tss_by_date,
+                    review_context,
+                    candidate_changes,
+                )
+                rank += _pairwise_rank_adjustment(pairwise)
             round_results.append({
                 "label": candidate_spec["label"],
                 "focus": candidate_spec["focus"],
@@ -564,7 +1006,9 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
                 "action": action,
                 "rationale": rationale,
                 "rank": rank,
+                "pairwise": pairwise,
             })
+            candidate_reason = _candidate_change_reason(previous_best_trace, round_results[-1])
             log.info(
                 "🧪 %s -> %s | Effect %s/10 | Risk %s/10 | Spec %s/10 | Simplicity %s/10 | Confidence %s/10",
                 candidate_spec["label"],
@@ -575,26 +1019,41 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
                 scores.simplicity,
                 scores.confidence,
             )
+            log.info("   Δ %s", _score_delta_text(previous_best_trace.scores if previous_best_trace else None, scores))
+            log.info("   Why: %s", candidate_reason)
+            if pairwise:
+                log.info("   Pairwise: %s", _pairwise_reason_text(pairwise))
 
         round_summary = [
             _candidate_round_line(
                 result["label"], result["action"], result["scores"], result["review"], result["focus"]
+            ) + (
+                f" | {_pairwise_reason_text(result['pairwise'])}"
+                if result.get("pairwise") else ""
             )
             for result in round_results
         ]
         winner = _pick_round_winner(round_results)
+        winner_reason = _candidate_change_reason(previous_best_trace, winner)
+        score_delta = _score_delta_text(previous_best_trace.scores if previous_best_trace else None, winner["scores"])
+        pairwise_text = _pairwise_reason_text(winner.get("pairwise")) if winner.get("pairwise") else ""
+        meaningful_improvement = _is_meaningful_improvement(previous_best_trace, winner)
         current_plan = winner["plan"]
         current_changes = winner["changes"]
         revision_history.append(
             f"Round {attempt}: chose {winner['label']} ({winner['focus']}) -> {winner['action']} | "
             f"Effect {winner['scores'].effectiveness}/10 | Risk {winner['scores'].risk}/10 | "
             f"Spec {winner['scores'].specificity}/10 | Simplicity {winner['scores'].simplicity}/10 | "
-            f"Confidence {winner['scores'].confidence}/10"
+            f"Confidence {winner['scores'].confidence}/10 | {score_delta} | Why: {winner_reason}"
+            + (f" | {pairwise_text}" if pairwise_text else "")
         )
 
         trace = PlanDecisionTrace(
             action=winner["action"],
-            rationale=winner["rationale"],
+            rationale=(
+                f"{winner['rationale']} | {score_delta} | Why: {winner_reason}"
+                + (f" | {pairwise_text}" if pairwise_text else "")
+            ),
             iterations_run=attempt,
             used_with_override=False,
             selected_candidate=winner["label"],
@@ -609,15 +1068,36 @@ def run_plan_pipeline(provider: str, generation_prompt: str,
 
         if best_candidate is None or winner_rank > best_candidate[3]:
             best_candidate = (current_plan, list(current_changes), trace, winner_rank)
-        last_trace = trace
+
+        # Keep plan, changes, and trace aligned from the same historical winner.
+        current_plan = best_candidate[0]
+        current_changes = list(best_candidate[1])
+        last_trace = best_candidate[2]
 
         log.info("🏁 Round %s winner: %s", attempt, _candidate_round_line(
             winner["label"], winner["action"], winner["scores"], winner["review"], winner["focus"]
         ))
+        log.info("   Round delta: %s", score_delta)
+        log.info("   Round why: %s", winner_reason)
+        if pairwise_text:
+            log.info("   Round pairwise: %s", pairwise_text)
 
         if winner["action"] == "ACCEPT":
-            accepted_plan = current_plan.model_copy(update={"decision_trace": trace})
-            return accepted_plan, current_changes, trace
+            accepted_plan = winner["plan"].model_copy(update={"decision_trace": trace})
+            return accepted_plan, winner["changes"], trace
+
+        if meaningful_improvement:
+            stagnant_rounds = 0
+        else:
+            stagnant_rounds += 1
+            log.info(
+                "   Early-stop watch: no meaningful improvement this round (%s/%s)",
+                stagnant_rounds,
+                _EARLY_STOP_PATIENCE,
+            )
+            if attempt >= 2 and stagnant_rounds >= _EARLY_STOP_PATIENCE:
+                log.info("⏹️ Early stopping: revisions have plateaued.")
+                break
 
     assert best_candidate is not None
     best_plan, best_changes, best_trace, _ = best_candidate

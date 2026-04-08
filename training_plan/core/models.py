@@ -40,6 +40,24 @@ class CounterfactualScenario(BaseModel):
     recommendation: str = ""
 
 
+class ReviewFix(BaseModel):
+    issue: str = ""
+    severity: Literal["MEDIUM", "HIGH", "CRITICAL"] = "HIGH"
+    required_change: str = ""
+    protected_elements: list[str] = Field(default_factory=list)
+    evidence: str = ""
+
+    @field_validator("protected_elements", mode="before")
+    @classmethod
+    def coerce_protected_elements(cls, v: object) -> object:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            text = v.strip()
+            return [text] if text else []
+        return v
+
+
 class PlanReview(BaseModel):
     summary: str = ""
     goal_alignment: ReviewDimension = Field(default_factory=ReviewDimension)
@@ -49,10 +67,57 @@ class PlanReview(BaseModel):
     individualization: ReviewDimension = Field(default_factory=ReviewDimension)
     race_demands: ReviewDimension = Field(default_factory=ReviewDimension)
     strengths: list[str] = Field(default_factory=list)
+    coaching_advice: list[str] = Field(default_factory=list)
+    protected_elements: list[str] = Field(default_factory=list)
+    review_fixes: list[ReviewFix] = Field(default_factory=list)
     must_fix: list[str] = Field(default_factory=list)
     uncertainty_sources: list[str] = Field(default_factory=list)
     counterfactuals: list[CounterfactualScenario] = Field(default_factory=list)
     overall_verdict: Literal["PASS", "REVISE", "REJECT"] = "REVISE"
+
+    @field_validator("counterfactuals", mode="before")
+    @classmethod
+    def coerce_counterfactuals(cls, v: object) -> object:
+        if not isinstance(v, list):
+            return v
+        result = []
+        for item in v:
+            if isinstance(item, str):
+                result.append({"question": item, "answer": item, "tradeoffs": "", "recommendation": ""})
+            else:
+                result.append(item)
+        return result
+
+    @field_validator("protected_elements", mode="before")
+    @classmethod
+    def coerce_review_protected_elements(cls, v: object) -> object:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            text = v.strip()
+            return [text] if text else []
+        return v
+
+    @field_validator("review_fixes", mode="before")
+    @classmethod
+    def coerce_review_fixes(cls, v: object) -> object:
+        if not isinstance(v, list):
+            return v
+        result = []
+        for item in v:
+            if isinstance(item, str):
+                result.append(
+                    {
+                        "issue": item,
+                        "severity": "HIGH",
+                        "required_change": item,
+                        "protected_elements": [],
+                        "evidence": "",
+                    }
+                )
+            else:
+                result.append(item)
+        return result
 
 
 class PlanScores(BaseModel):
@@ -64,6 +129,25 @@ class PlanScores(BaseModel):
     rationale: str = ""
     uncertainty_sources: list[str] = Field(default_factory=list)
     action_hint: Literal["ACCEPT", "REVISE", "REJECT"] = "REVISE"
+
+
+class PairwiseDecision(BaseModel):
+    better_plan: Literal["CURRENT", "CANDIDATE", "TIE"] = "TIE"
+    confidence: int = Field(default=5, ge=0, le=10)
+    summary: str = ""
+    improved_areas: list[str] = Field(default_factory=list)
+    regressions: list[str] = Field(default_factory=list)
+    must_fix_resolved: list[str] = Field(default_factory=list)
+    must_fix_added: list[str] = Field(default_factory=list)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _coerce_confidence(cls, v):
+        f = float(v)
+        # Model sometimes returns 0-1 scale (e.g. 0.8) instead of 0-10
+        if f <= 1.0:
+            f = f * 10
+        return max(0, min(10, round(f)))
 
 
 class PlanDecisionTrace(BaseModel):

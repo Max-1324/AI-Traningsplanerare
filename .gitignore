@@ -4,3 +4,5 @@ __pycache__/
 training_plan/__pycache__/
 .weather_cache.json
 .coach_state.json
+venv/
+.codex
