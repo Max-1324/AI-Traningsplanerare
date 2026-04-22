@@ -1,10 +1,12 @@
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
 from training_plan.core.models import AIPlan, PlanDay, WorkoutStep
 from training_plan.engine.ai import parse_plan
+from training_plan.engine.pipeline import _apply_tss_gap_revision
 from training_plan.engine.validation import repair_postprocessed_plan, validate_postprocessed_plan
 
 
@@ -270,6 +272,71 @@ class TrustPipelineTests(unittest.TestCase):
             result.passed,
             f"Four protected hard days across a 29-day horizon should not fail the global hard-day cap: {result.hard_failures}",
         )
+
+    @patch("training_plan.engine.pipeline.generate_plan")
+    def test_tss_gap_revision_skips_when_plan_is_above_deficit_floor(self, mock_generate):
+        plan = self._valid_plan()
+        original_changes = ["TSS-AUDIT v1: 198 TSS"]
+
+        revised_plan, revised_changes = _apply_tss_gap_revision(
+            plan,
+            original_changes,
+            gen_provider="gemini",
+            generation_prompt="prompt",
+            postprocess_candidate=lambda candidate: (candidate, original_changes),
+            athlete=None,
+            base_tss_by_date={date.today().isoformat(): 198.0},
+            tss_budget=220.0,
+            review_context={},
+            attempt=1,
+        )
+
+        mock_generate.assert_not_called()
+        self.assertIs(revised_plan, plan)
+        self.assertEqual(revised_changes, original_changes)
+
+    @patch("training_plan.engine.pipeline.generate_plan")
+    def test_tss_gap_revision_discards_revision_that_hits_weekly_cap(self, mock_generate):
+        today = date.today().isoformat()
+        original_plan = self._valid_plan()
+        mock_generate.return_value = AIPlan(
+            stress_audit="ok",
+            summary="revised",
+            days=[
+                PlanDay(
+                    date=today,
+                    title="Extended ride",
+                    intervals_type="Ride",
+                    duration_min=90,
+                    description="Aerobic endurance",
+                    workout_steps=[
+                        WorkoutStep(duration_min=10, zone="Z1", description="Warmup"),
+                        WorkoutStep(duration_min=70, zone="Z2", description="Main set"),
+                        WorkoutStep(duration_min=10, zone="Z1", description="Cooldown"),
+                    ],
+                )
+            ],
+        )
+
+        revised_candidate, revised_changes = _apply_tss_gap_revision(
+            original_plan,
+            ["TSS-AUDIT v1: 150 TSS"],
+            gen_provider="gemini",
+            generation_prompt="prompt",
+            postprocess_candidate=lambda candidate: (
+                candidate,
+                ["  2026-01-01: -30min -> TAK v1", "TSS-AUDIT v1: 220 TSS"],
+            ),
+            athlete=None,
+            base_tss_by_date={today: 150.0},
+            tss_budget=220.0,
+            review_context={},
+            attempt=1,
+        )
+
+        self.assertIs(revised_candidate, original_plan)
+        self.assertTrue(any("TSS-DEFICIT VETO" in item for item in revised_changes))
+        self.assertFalse(any("TAK v1" in item for item in revised_changes))
 
 
 if __name__ == "__main__":

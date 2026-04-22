@@ -58,6 +58,7 @@ _INVALID_REVIEW_COMPETITIVE_MARGIN = float(os.getenv("PLAN_INVALID_REVIEW_COMPET
 _DEBUG_PARSE_FAILURES = os.getenv("PLAN_DEBUG_PARSE_FAILURES", "").strip().lower() in {"1", "true", "yes", "on"}
 _TSS_GAP_REVISION_MIN_MISSING = int(os.getenv("PLAN_TSS_GAP_REVISION_MIN_MISSING", "120"))
 _TSS_GAP_REVISION_MIN_PCT = float(os.getenv("PLAN_TSS_GAP_REVISION_MIN_PCT", "0.90"))
+_TSS_DEFICIT_VETO_PCT = 0.85
 
 
 _DEBUG_AI = os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG"
@@ -924,6 +925,15 @@ def _is_meaningful_improvement(previous_trace: PlanDecisionTrace | None, winner:
     return False
 
 
+def _count_weekly_tss_cap_rewrites(changes: list[str]) -> int:
+    markers = ("TAK V", "VOLYMSPARR", "VOLYMSPAR", "VOLYMSPÄRR")
+    return sum(
+        1
+        for change in (changes or [])
+        if any(marker in str(change or "").upper() for marker in markers)
+    )
+
+
 def _apply_tss_gap_revision(
     candidate_plan: AIPlan,
     candidate_changes: list[str],
@@ -948,15 +958,21 @@ def _apply_tss_gap_revision(
     """
     med = review_context.get("minimum_effective_dose") or {}
     med_global = med.get("mode", "READY") == "ACTIVE" and med.get("scope", "NONE") == "GLOBAL"
+    gap_fill_trigger_pct = min(_TSS_GAP_REVISION_MIN_PCT, _TSS_DEFICIT_VETO_PCT)
 
     planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
     total_tss = planned_tss + sum(base_tss_by_date.values())
+    original_plan = candidate_plan
+    original_changes = list(candidate_changes)
+    original_planned_tss = planned_tss
+    original_total_tss = total_tss
+    original_tss_cap_rewrites = _count_weekly_tss_cap_rewrites(original_changes)
 
     # Phase 1 — AI-driven gap fill (only when gap is large enough to matter)
     if (
         not med_global
         and tss_budget > 0
-        and total_tss < tss_budget * _TSS_GAP_REVISION_MIN_PCT
+        and total_tss < tss_budget * gap_fill_trigger_pct
     ):
         missing = round(tss_budget - total_tss)
         if missing >= _TSS_GAP_REVISION_MIN_MISSING:
@@ -982,11 +998,22 @@ def _apply_tss_gap_revision(
                 temperature=_REVISION_GENERATION_TEMPERATURE,
             )
             candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
-            planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
-            total_tss = planned_tss + sum(base_tss_by_date.values())
+            revised_tss_cap_rewrites = _count_weekly_tss_cap_rewrites(candidate_changes)
+            if revised_tss_cap_rewrites > original_tss_cap_rewrites:
+                log.info(
+                    "   [TSS-GAP] Revision triggered weekly-cap rewrites (TAK). "
+                    "Keeping the original candidate instead."
+                )
+                candidate_plan = original_plan
+                candidate_changes = original_changes
+                planned_tss = original_planned_tss
+                total_tss = original_total_tss
+            else:
+                planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
+                total_tss = planned_tss + sum(base_tss_by_date.values())
 
     # Phase 2 — annotate remaining deficit so the reviewer can see it
-    if tss_budget > 0 and total_tss < tss_budget * 0.85:
+    if tss_budget > 0 and total_tss < tss_budget * _TSS_DEFICIT_VETO_PCT:
         missing = round(tss_budget - total_tss)
         if med_global:
             candidate_changes.append(
