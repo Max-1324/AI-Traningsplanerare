@@ -134,6 +134,10 @@ def save_daily_note_to_icu(plan, changes, planner_insights=None):
         )
         if trace.review and trace.review.summary:
             lines_today.append(f"Review: {trace.review.summary}")
+        if trace.validator_summary:
+            lines_today.append(f"Validator: {trace.validator_summary}")
+        if trace.validator_failures:
+            lines_today.append("Validation fails: " + " | ".join(trace.validator_failures[:3]))
         if trace.rationale:
             lines_today.append(f"Why selected: {trace.rationale}")
         if trace.review and trace.review.must_fix:

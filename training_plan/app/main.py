@@ -2,6 +2,7 @@ import training_plan.core.common as common
 from concurrent.futures import ThreadPoolExecutor
 from training_plan.core.common import *
 from training_plan.core.cli import parse_args
+from training_plan.engine.context import PromptContext
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.integrations.services import *
@@ -11,6 +12,9 @@ from training_plan.engine.insights import *
 from training_plan.engine.postprocess import *
 from training_plan.engine.ai import *
 from training_plan.engine.pipeline import *
+from training_plan.engine.skeleton import build_week_skeleton
+from training_plan.engine.utils import time_available_minutes
+from training_plan.engine.validation import repair_postprocessed_plan, validate_postprocessed_plan
 
 args = None
 
@@ -83,7 +87,8 @@ def main(argv=None):
     atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb_val = lf.get("tsb",0.0)
     hrv         = calculate_hrv(wellness_clean)
     phase       = training_phase(races, date.today())
-    budgets     = {st: sport_budget(st, activities_clean, manual_workouts) for st in ("Run","RollerSki")}
+    _budget_sports = [s["intervals_type"] for s in SPORTS if s["injury_risk"] in ("medium", "high")]
+    budgets     = {st: sport_budget(st, activities_clean, manual_workouts) for st in _budget_sports}
 
     # ── MOTIVATIONSANALYS ────────────────────────────────────────────────────
     motivation = analyze_motivation(wellness_clean, activities_clean)
@@ -138,6 +143,17 @@ def main(argv=None):
         save_morning_wellness(morning, today_wellness=today_wellness)
     vetos   = biometric_vetoes(hrv, morning.get("life_stress",1))
 
+    # ── SKADEKLASSIFICERING ──────────────────────────────────────────────────
+    injury_note = morning.get("injury_today", "")
+    injury_profile = None
+    if injury_note:
+        injury_profile = classify_injury(args.provider, injury_note)
+        if injury_profile:
+            safe = ", ".join(injury_profile.get("safe_sports", []) if isinstance(injury_profile.get("safe_sports"), list) else [])
+            log.info("⚕️  Injury note: '%s' → %s (%s). Safe sports: %s",
+                     injury_note, injury_profile["profile_key"], injury_profile["severity"],
+                     safe or "see profile")
+
     # ── RETURN TO PLAY ───────────────────────────────────────────────────────
     # Använd den ofiltrerade aktivitetslistan här. En aktivitet med "dålig" data
     # (t.ex. för hög IF pga fel FTP) är fortfarande en aktivitet, inte en vilodag.
@@ -188,6 +204,7 @@ def main(argv=None):
     # ── 4: PASSBIBLIOTEK ─────────────────────────────────────────────────────
     workout_levels = state.get("workout_levels", {})
     workout_lib_text = get_next_workouts(workout_levels, phase["phase"])
+    progression_directive = build_progression_directive(workout_levels, phase["phase"])
     log.info(f"📚 Workout library: {', '.join(f'{k}=L{v}' for k,v in workout_levels.items())}")
 
     # ── 6: FTP-TEST ──────────────────────────────────────────────────────────
@@ -197,7 +214,32 @@ def main(argv=None):
 
     # ── PREHAB ───────────────────────────────────────────────────────────────
     vols_clean = sport_volumes(activities_clean)
-    dominant_sport = max(vols_clean, key=vols_clean.get) if vols_clean else "VirtualRide"
+    _default_sport = os.getenv("DEFAULT_SPORT", SPORTS[0]["intervals_type"] if SPORTS else "VirtualRide")
+    dominant_sport = max(vols_clean, key=vols_clean.get) if vols_clean else _default_sport
+
+    # Override dominant_sport from next A-race sport.
+    # Priority: 1) race.type field (set in Intervals.icu when creating the event)
+    #           2) manual tag in name: "A: Vätternrundan [Ride]"
+    _valid_sport_types = {s["intervals_type"] for s in ALL_SPORTS_CATALOG}
+    _future_races = sorted(
+        [r for r in races if r.get("start_date_local", "")[:10] > date.today().isoformat()],
+        key=lambda r: r.get("start_date_local", ""),
+    )
+    for _r in _future_races:
+        _rname = _r.get("name", "")
+        _is_a  = not ("b:" in _rname.lower() or "c:" in _rname.lower())
+        if not _is_a:
+            continue
+        # 1. Use type field from Intervals.icu
+        _race_sport = _r.get("type")
+        # 2. Fallback: manual tag [Sport] in name
+        if not _race_sport or _race_sport not in _valid_sport_types:
+            _m = re.search(r"\[(\w+)\]", _rname)
+            _race_sport = _m.group(1) if _m else None
+        if _race_sport and _race_sport in _valid_sport_types:
+            dominant_sport = _race_sport
+            log.info(f"🏁 Dominant sport set from A-race '{_rname}': {dominant_sport}")
+            break
     prehab = recommend_prehab(morning.get("injury_today", ""), dominant_sport)
     log.info(f"🤸 Prehab: {prehab['name']}")
 
@@ -215,7 +257,7 @@ def main(argv=None):
         log.warning(f"⚠️  Sport-ACWR DANGER: {', '.join(danger_sports)}")
 
     # ── RACE WEEK PROTOCOL ───────────────────────────────────────────────────
-    race_week = race_week_protocol(races, date.today())
+    race_week = race_week_protocol(races, date.today(), dominant_sport=dominant_sport)
     if race_week.get("is_active"):
         log.info(f"🏁 Race week active! {race_week['race_name']} in {race_week['days_to_race']}d")
 
@@ -287,7 +329,14 @@ def main(argv=None):
         development_needs=development_needs,
         race_demands=race_demands,
         coach_confidence=coach_confidence,
+        previous_state=state.get("minimum_effective_dose_state", {}),
     )
+    state["minimum_effective_dose_state"] = {
+        "policy_version": minimum_effective_dose.get("policy_version"),
+        "mode": minimum_effective_dose.get("mode"),
+        "scope": minimum_effective_dose.get("scope"),
+        "updated": date.today().isoformat(),
+    }
     execution_friction = build_execution_friction(
         constraints,
         manual_workouts,
@@ -431,26 +480,83 @@ def main(argv=None):
     if not prompt_morning.get("time_available"):
         prompt_morning["time_available"] = "No explicit time limit"
 
-    prompt = build_prompt(
-        activities, wellness_clean, fitness, races, weather, prompt_morning, args.horizon,
-        manual_workouts, athlete, hrv, budgets, tsb_bgt, vetos, phase,
-        existing_plan_summary, mesocycle, trajectory, compliance,
-        workout_lib_text, ftp_check, yesterday_analysis, constraints_text,
-        acwr_trend=acwr_trend, race_week=race_week, taper_score=taper_score,
+    # ── Build planning dates (needed for skeleton) ────────────────────────────
+    _all_dates = [date.today().isoformat()] + [
+        (date.today() + timedelta(days=i + 1)).isoformat() for i in range(args.horizon)
+    ]
+    _plan_dates = [d for d in _all_dates if d not in existing_plan_dates] or _all_dates
+
+    # ── Slot skeleton (improvement #1) ───────────────────────────────────────
+    week_skeleton = build_week_skeleton(
+        dates=_plan_dates,
+        mesocycle=mesocycle,
+        readiness=readiness or {},
+        race_week=race_week,
+        locked_dates=existing_plan_dates,
         rtp_status=rtp_status,
-        data_quality=dq, per_sport_acwr=sport_acwr, motivation=motivation,
-        prehab=prehab, pre_race_info=pre_race_advice,
-        autoregulation_signals=auto_signals, mesocycle_for_strength=mesocycle,
-        readiness=readiness, np_if_analysis=np_if_analysis, learned_patterns=learned_patterns,
-        exclude_dates=existing_plan_dates, development_needs=development_needs,
-        block_objective=block_objective, race_demands=race_demands,
-        session_quality=session_quality, coach_confidence=coach_confidence,
-        polarization=polarization, historical_validation=historical_validation,
-        outcome_tracking=outcome_tracking, planner_insights=planner_insights,
-        failure_memory=failure_memory_text,
     )
+
+    # ── Assemble PromptContext (improvement #2) ───────────────────────────────
+    prompt_ctx = PromptContext(
+        activities=activities,
+        wellness=wellness_clean,
+        fitness=fitness,
+        races=races,
+        weather=weather,
+        morning=prompt_morning,
+        horizon=args.horizon,
+        manual_workouts=manual_workouts,
+        athlete=athlete,
+        hrv=hrv,
+        budgets=budgets,
+        tss_budget=tsb_bgt,
+        vetos=vetos,
+        phase=phase,
+        existing_plan_summary=existing_plan_summary,
+        mesocycle=mesocycle,
+        trajectory=trajectory,
+        compliance=compliance,
+        workout_lib_text=workout_lib_text,
+        progression_directive=progression_directive,
+        ftp_check=ftp_check,
+        yesterday_analysis=yesterday_analysis,
+        constraints_text=constraints_text,
+        acwr_trend=acwr_trend,
+        race_week=race_week,
+        taper_score=taper_score,
+        rtp_status=rtp_status,
+        data_quality=dq,
+        per_sport_acwr=sport_acwr,
+        motivation=motivation,
+        prehab=prehab,
+        pre_race_info=pre_race_advice,
+        autoregulation_signals=auto_signals,
+        mesocycle_for_strength=mesocycle,
+        readiness=readiness,
+        np_if_analysis=np_if_analysis,
+        learned_patterns=learned_patterns,
+        exclude_dates=existing_plan_dates,
+        development_needs=development_needs,
+        block_objective=block_objective,
+        race_demands=race_demands,
+        session_quality=session_quality,
+        coach_confidence=coach_confidence,
+        polarization=polarization,
+        historical_validation=historical_validation,
+        outcome_tracking=outcome_tracking,
+        planner_insights=planner_insights,
+        failure_memory=failure_memory_text,
+        week_skeleton=week_skeleton,
+    )
+    prompt = build_prompt(prompt_ctx)
     review_context = {
         "today": date.today().isoformat(),
+        "locked_dates": existing_plan_dates,
+        "time_available_min": time_available_minutes(prompt_morning.get("time_available", "")),
+        "rtp_status": {
+            "is_active": bool(rtp_status.get("is_active")),
+            "days_off": rtp_status.get("days_off", 0),
+        },
         "phase": phase.get("phase"),
         "mesocycle": {
             "block_number": mesocycle.get("block_number"),
@@ -507,10 +613,13 @@ def main(argv=None):
     def apply_postprocess(candidate_plan):
         return post_process(
             candidate_plan, hrv, budgets, locked_dates, tsb_bgt, activities_clean, weather, athlete,
-            injury_note=morning.get('injury_today', ''), mesocycle=mesocycle,
+            injury_note=morning.get('injury_today', ''), injury_profile=injury_profile, mesocycle=mesocycle,
             constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
             per_sport_acwr_data=sport_acwr, motivation=motivation,
-            med_active=minimum_effective_dose.get("mode") == "ACTIVE",
+            med_active=(
+                minimum_effective_dose.get("mode") == "ACTIVE"
+                and minimum_effective_dose.get("scope") == "GLOBAL"
+            ),
             phase=phase, races=races, wellness=wellness_clean,
             base_tss_by_date=base_tss_by_date, horizon_days=args.horizon + 1,
             time_available_text=morning.get("time_available", ""),
@@ -535,7 +644,7 @@ def main(argv=None):
             tsb_bgt,
             review_context,
             max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "5")),
-            candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "2")),
+            candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "3")),
         )
     except Exception as e:
         log.error("❌ AI pipeline failed – all models exhausted or unreachable: %s", e)
@@ -544,6 +653,40 @@ def main(argv=None):
     # Rensa coach-feedback om det inte finns faktisk aktivitetsdata att ge feedback om
     if not yesterday_analysis:
         plan = plan.model_copy(update={"yesterday_feedback": ""})
+
+    final_validation = validate_postprocessed_plan(
+        plan,
+        athlete=athlete,
+        base_tss_by_date=base_tss_by_date,
+        tss_budget=tsb_bgt,
+        review_context=review_context,
+        postprocess_changes=changes,
+    )
+    if final_validation.hard_failures or final_validation.warnings:
+        repaired_plan, repair_actions = repair_postprocessed_plan(
+            plan,
+            review_context=review_context,
+            validation=final_validation,
+        )
+        if repair_actions:
+            plan = repaired_plan
+            changes.extend(repair_actions)
+            final_validation = validate_postprocessed_plan(
+                plan,
+                athlete=athlete,
+                base_tss_by_date=base_tss_by_date,
+                tss_budget=tsb_bgt,
+                review_context=review_context,
+                postprocess_changes=changes,
+            )
+    if not final_validation.passed:
+        log.error("❌ Final deterministic validation blocked the save path: %s", final_validation.summary)
+        for item in final_validation.hard_failures[:5]:
+            log.error("   %s", item)
+        sys.exit(1)
+    if final_validation.warnings:
+        log.warning("⚠️ Final deterministic validation warnings: %s", " | ".join(final_validation.warnings[:3]))
+
     planned_total_tss = sum(estimate_tss_coggan(d, athlete) for d in plan.days) + sum(base_tss_by_date.values())
     planned_daily_tss = planned_total_tss / max(args.horizon + 1, 1)
     planned_ramp = ctl_ramp_from_daily_tss(ctl, planned_daily_tss)
@@ -637,37 +780,55 @@ def main(argv=None):
 
     elif mode == "extend":
         # Behåll befintliga datum och lägg bara till saknade, men tillåt dubbelpass om datumet kan ersättas säkert.
-        existing_count = {}
+        existing_by_date: dict[str, list] = {}
         started_dates = set()
         for w in ai_workouts:
             d = w.get("start_date_local","")[:10]
             if not d:
                 continue
-            existing_count[d] = existing_count.get(d, 0) + 1
+            existing_by_date.setdefault(d, []).append(w)
             if event_has_started(w, now_local):
                 started_dates.add(d)
+        existing_count = {d: len(ws) for d, ws in existing_by_date.items()}
 
-        new_count = {}
+        new_plan_by_date: dict[str, list] = {}
         for day in plan.days:
             if plan_day_has_started(day, now_local):
                 continue
-            new_count[day.date] = new_count.get(day.date, 0) + 1
+            new_plan_by_date.setdefault(day.date, []).append(day)
+        new_count = {d: len(days_list) for d, days_list in new_plan_by_date.items()}
 
-        dates_to_delete = {
-            day_str for day_str, cnt in new_count.items()
-            if existing_count.get(day_str, 0) > 0
-            and cnt > existing_count.get(day_str, 0)
-            and day_str not in started_dates
-        }
+        # Delete if: new plan has more events than existing, OR
+        # existing event is a NOTE/Rest but new plan has a real workout on that date, OR
+        # there are duplicate NOTE events on the same date (from repeated runs)
+        dates_to_delete = set()
+        for day_str, existing_ws in existing_by_date.items():
+            if day_str in started_dates:
+                continue
+            new_days_here = new_plan_by_date.get(day_str, [])
+            new_cnt = len(new_days_here)
+            new_has_workout = any(d.intervals_type != "Rest" and d.duration_min > 0 for d in new_days_here)
+            existing_notes = [w for w in existing_ws if w.get("category") == "NOTE"]
+            existing_workouts = [w for w in existing_ws if w.get("category") == "WORKOUT"]
+            # Too many events vs new plan
+            if new_cnt > 0 and len(existing_ws) > new_cnt:
+                dates_to_delete.add(day_str)
+            # Existing is only a Rest note but new plan has a real workout
+            elif new_has_workout and existing_notes and not existing_workouts:
+                dates_to_delete.add(day_str)
+            # Duplicate Rest notes (more than 1 NOTE with no workout)
+            elif len(existing_notes) > 1 and not existing_workouts:
+                dates_to_delete.add(day_str)
+
         if dates_to_delete:
             to_del = [
                 {"id": w["id"]}
-                for w in ai_workouts
-                if w.get("start_date_local","")[:10] in dates_to_delete and not event_has_started(w, now_local)
+                for d, ws in existing_by_date.items() if d in dates_to_delete
+                for w in ws if not event_has_started(w, now_local)
             ]
             for chunk in [to_del[i:i+50] for i in range(0, len(to_del), 50)]:
                 requests.put(f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete", auth=AUTH, timeout=15, json=chunk).raise_for_status()
-            log.info(f"  Replacing {len(to_del)} event(s) with double sessions on: {', '.join(sorted(dates_to_delete))}")
+            log.info(f"  Cleaned up {len(to_del)} stale/duplicate event(s) on: {', '.join(sorted(dates_to_delete))}")
 
         existing_dates = {d for d in existing_count if d not in dates_to_delete}
         days_to_save = [

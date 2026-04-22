@@ -28,11 +28,11 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
 
     for w in wellness:
         d = w.get("id", "")[:10]
-        hrv = w.get("hrv")
+        hrv = w.get("hrv") or 0
         sleep = w.get("sleepSecs") or 0
-        if hrv is None or hrv == 0:
+        if hrv == 0:
             bad_wellness_dates.add(d)
-            warnings.append(f"HRV missing/zero {d} – excluded from HRV analysis")
+            warnings.append(f"HRV not logged {d} – excluded from HRV analysis")
         elif hrv > 200:
             bad_wellness_dates.add(d)
             warnings.append(f"Unreasonable HRV {hrv}ms {d} – likely measurement error, filtered")
@@ -110,11 +110,14 @@ def analyze_motivation(wellness: list, activities: list) -> dict:
     }
 
 def calculate_hrv(wellness):
-    vals = [w.get("hrv") for w in wellness if w.get("hrv") is not None]
+    vals = [w.get("hrv") for w in wellness if (w.get("hrv") or 0) > 0]
     if len(vals) < 7:
         return {"today": None, "avg7d": None, "avg60d": None, "cv7d": None,
                 "state": "INSUFFICIENT_DATA", "trend": "UNKNOWN", "stability": "UNKNOWN", "deviation_pct": 0.0}
-    today = vals[-1]; last7 = vals[-7:]; avg7 = sum(last7)/len(last7); avg60 = sum(vals)/len(vals)
+    last7 = vals[-7:]; avg7 = sum(last7)/len(last7); avg60 = sum(vals)/len(vals)
+    # Om dagens HRV inte är loggad än (saknas eller är 0 i API-svaret), använd 7d-snittet
+    today_raw = (wellness[-1].get("hrv") or 0) if wellness else 0
+    today = today_raw if today_raw > 0 else round(avg7, 1)
     cv7 = (math.sqrt(sum((x-avg7)**2 for x in last7)/len(last7)) / avg7 * 100) if avg7 else 0
     
     dev_7d = (avg7 - avg60) / avg60 if avg60 else 0
@@ -486,6 +489,16 @@ def sport_volumes(activities):
         except: continue
     return vols
 
+_MIN_SPORT_BUDGET: dict[str, int] = {
+    "Run":       int(os.getenv("MIN_BUDGET_RUN_MIN",       "60")),
+    "RollerSki": int(os.getenv("MIN_BUDGET_ROLLERSKI_MIN", "90")),
+}
+# Default floors by injury_risk for sports not explicitly listed above.
+# Medium-risk sports (RollerSki, NordicSki) get 90min; high-risk (Run) 60min;
+# low-risk sports (Ride, VirtualRide, Swim, WeightTraining) get no floor.
+_RISK_MIN_FLOOR = {"low": 0, "medium": 90, "high": 60}
+
+
 def sport_budget(sport_type, activities, manual_workouts) -> dict:
     RISK_GROWTH = {"low": 1.20, "medium": 1.15, "high": 1.10}
     sport_info  = next((s for s in SPORTS if s["intervals_type"] == sport_type), {})
@@ -501,8 +514,12 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
         (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
         if a.get("type") == sport_type and safe_date(a) >= cutoff_7d
     )
-    basis   = (past_7d + past_14d / 2) / 1.5
-    budget  = max(basis * growth, 60)
+    basis      = (past_7d + past_14d / 2) / 1.5
+    min_floor  = _MIN_SPORT_BUDGET.get(
+        sport_type,
+        _RISK_MIN_FLOOR.get(risk_level, 60),
+    )
+    budget     = max(basis * growth, min_floor)
     locked  = sum(w.get("moving_time", 0) / 60
                   for w in manual_workouts if w.get("type") == sport_type)
     remaining = max(0, budget - locked)
@@ -815,7 +832,7 @@ def training_phase(races, today):
 # RACE WEEK PROTOCOL
 # ══════════════════════════════════════════════════════════════════════════════
 
-def race_week_protocol(races: list, today: date) -> dict:
+def race_week_protocol(races: list, today: date, dominant_sport: str = "") -> dict:
     """
     Generates day-specific race-week protocol (last 7 days before race).
 
@@ -846,13 +863,32 @@ def race_week_protocol(races: list, today: date) -> dict:
     if days_to_race > 7 or days_to_race <= 0:
         return {"is_active": False, "protocol": [], "race_name": race_name, "days_to_race": days_to_race}
 
+    # Pick the sport to use for pre-race sessions.
+    # Prefer an indoor/low-impact variant of the dominant sport for controlled taper sessions.
+    _indoor_map = {
+        "Ride":      "VirtualRide",
+        "Run":       "Run",
+        "RollerSki": "VirtualRide",
+        "NordicSki": "VirtualRide",
+        "Swim":      "Swim",
+    }
+    _sport_types = {s["intervals_type"] for s in SPORTS}
+    _ds = dominant_sport or (SPORTS[0]["intervals_type"] if SPORTS else "VirtualRide")
+    _prerace_sport = _indoor_map.get(_ds, _ds)
+    # Fall back to VirtualRide if chosen sport isn't available
+    if _prerace_sport not in _sport_types:
+        _prerace_sport = next(
+            (s["intervals_type"] for s in SPORTS if s.get("injury_risk") == "low"),
+            "VirtualRide",
+        )
+
     # Build day-specific protocol
     protocol = []
 
     day_templates = {
         6: {
             "title": f"🏁 Pre-race: Last medium session ({race_name} in 6d)",
-            "type": "VirtualRide", "dur": 90, "slot": "MAIN",
+            "type": _prerace_sport, "dur": 90, "slot": "MAIN",
             "steps": [
                 {"d": 20, "z": "Z2", "desc": "Warm-up"},
                 {"d": 30, "z": "Z2", "desc": "Endurance - focus on feel"},
@@ -865,8 +901,8 @@ def race_week_protocol(races: list, today: date) -> dict:
             "desc": "Last session with substance. No records - just confirm form. Race nutrition strategy: test CHO intake."
         },
         5: {
-            "title": f"🏁 Pre-race: Easy bike + quick strength ({race_name} in 5d)",
-            "type": "VirtualRide", "dur": 45, "slot": "MAIN",
+            "title": f"🏁 Pre-race: Easy {_prerace_sport} + quick strength ({race_name} in 5d)",
+            "type": _prerace_sport, "dur": 45, "slot": "MAIN",
             "steps": [
                 {"d": 15, "z": "Z2", "desc": "Warm-up"},
                 {"d": 20, "z": "Z2", "desc": "Easy - keep legs moving"},
@@ -881,7 +917,7 @@ def race_week_protocol(races: list, today: date) -> dict:
         },
         3: {
             "title": f"🏁 Pre-race: Activation ({race_name} in 3d)",
-            "type": "VirtualRide", "dur": 55, "slot": "MAIN",
+            "type": _prerace_sport, "dur": 55, "slot": "MAIN",
             "steps": [
                 {"d": 15, "z": "Z2", "desc": "Warm-up - easy"},
                 {"d": 3, "z": "Z4", "desc": "Activation 1 - wake up legs"},
@@ -895,8 +931,8 @@ def race_week_protocol(races: list, today: date) -> dict:
             "desc": "ACTIVATION! Short, sharp Z4 efforts wake up the nervous system. Max effort 7/10. Not heavy."
         },
         2: {
-            "title": f"🏁 Pre-race: Spin ({race_name} in 2d)",
-            "type": "VirtualRide", "dur": 30, "slot": "MAIN",
+            "title": f"🏁 Pre-race: Easy {_prerace_sport} ({race_name} in 2d)",
+            "type": _prerace_sport, "dur": 30, "slot": "MAIN",
             "steps": [
                 {"d": 10, "z": "Z1", "desc": "Easy"},
                 {"d": 10, "z": "Z2", "desc": "Light pressure - nothing more"},
@@ -906,7 +942,7 @@ def race_week_protocol(races: list, today: date) -> dict:
         },
         1: {
             "title": f"🏁 Pre-race: Rest/Short activation ({race_name} TOMORROW!)",
-            "type": "VirtualRide", "dur": 20, "slot": "MAIN",
+            "type": _prerace_sport, "dur": 20, "slot": "MAIN",
             "steps": [
                 {"d": 10, "z": "Z1", "desc": "Extremely easy"},
                 {"d": 1, "z": "Z5", "desc": "30s sprint - race-pace reminder"},
@@ -918,7 +954,7 @@ def race_week_protocol(races: list, today: date) -> dict:
         },
         0: {
             "title": f"🏁 RACE DAY: {race_name}!",
-            "type": "Ride", "dur": 0, "slot": "MAIN", "steps": [],
+            "type": _ds, "dur": 0, "slot": "MAIN", "steps": [],
             "desc": f"RACE DAY! {race_name}. Warm-up 15-20min. Eat breakfast 3h before. 90g CHO/h during. Good luck! 💪"
         },
     }
@@ -1153,12 +1189,13 @@ def parse_zones(athlete):
             if zs: lines.append(f"    HR zones: {zs}")
     return "\n".join(lines) if lines else "  No sport settings found."
 
-def env_nutrition(temp_max, duration_min, first_zone):
+def env_nutrition(temp_max, duration_min, first_zone, all_zones=None):
     advice = []
-    low_int = first_zone in ("Z1","Z2","Zone 1","Zone 2")
+    zones = all_zones if all_zones else [first_zone]
+    entirely_low = all(z in ("Z1", "Z2", "Zone 1", "Zone 2") for z in zones)
     if temp_max > 25: advice.append("HEAT: +200ml/h. Electrolytes (>=800mg Na/l).")
     elif temp_max < 0: advice.append("COLD: Drink according to schedule. Keep drink lukewarm.")
-    if low_int and duration_min < 90: advice.append("TRAIN LOW: Opportunity to ride fasted for fat adaptation.")
+    if entirely_low and duration_min < 90: advice.append("TRAIN LOW: Opportunity to ride fasted for fat adaptation.")
     return advice
 
 def biometric_vetoes(hrv, life_stress):
@@ -1250,7 +1287,7 @@ def compute_tss_reference(activities: list) -> str:
     Falls back to theoretical zone-formula values if there is too little data for
     a given sport type.
     """
-    _SPORTS = ("VirtualRide", "Ride", "Run", "RollerSki")
+    _SPORTS = tuple(s["intervals_type"] for s in SPORTS if s["intervals_type"] not in ("WeightTraining", "Rest"))
     _MIN_DURATION_H = 20 / 60   # exclude sessions < 20 min
     _MIN_TSS = 10
     _MAX_TSS_PER_H = 200        # sanity cap

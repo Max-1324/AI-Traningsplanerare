@@ -290,7 +290,8 @@ def build_minimum_effective_dose(ctl: float,
                                  block_objective: dict | None = None,
                                  development_needs: dict | None = None,
                                  race_demands: dict | None = None,
-                                 coach_confidence: dict | None = None) -> dict:
+                                 coach_confidence: dict | None = None,
+                                 previous_state: dict | None = None) -> dict:
     readiness = readiness or {}
     motivation = motivation or {}
     compliance = compliance or {}
@@ -299,11 +300,105 @@ def build_minimum_effective_dose(ctl: float,
     race_demands = race_demands or {}
     coach_confidence = coach_confidence or {}
 
-    low_readiness = readiness.get("score", 60) < 60
+    # MED v2: reduce sensitivity and avoid flapping around readiness ~60.
+    # - Global MED: only when readiness is genuinely low (<55) OR other strong risk triggers exist.
+    # - Local MED: for borderline readiness (<58) or 58-59 with an extra fatigue flag; affects mainly today+tomorrow.
+    # - Hysteresis: keep LOCAL MED until readiness >=62 to avoid day-to-day flapping.
+    policy_version = 2
+    previous_state = previous_state or {}
+    prev_version = previous_state.get("policy_version")
+    prev_mode = previous_state.get("mode", "READY")
+    prev_scope = previous_state.get("scope", "NONE")
+    prev_updated = previous_state.get("updated")
+    prev_recent = False
+    if prev_updated:
+        try:
+            days_since = (date.today() - date.fromisoformat(str(prev_updated)[:10])).days
+            prev_recent = 0 <= days_since <= 3
+        except Exception:
+            prev_recent = False
+    if prev_version != policy_version or not prev_recent:
+        prev_mode = "READY"
+        prev_scope = "NONE"
+
+    readiness_score = readiness.get("score", 60)
+    readiness_raw = readiness.get("raw_inputs") if isinstance(readiness.get("raw_inputs"), dict) else {}
+    sleep_hours = readiness_raw.get("sleep_hours")
+    hrv_deviation_pct = readiness_raw.get("hrv_deviation_pct")
+    rhr_slope_7d = readiness_raw.get("rhr_slope_7d")
+    avg_rpe_last5 = readiness_raw.get("avg_rpe_last5")
+    avg_feel_last5 = readiness_raw.get("avg_feel_last5")
+
+    extra_fatigue_flags: list[str] = []
+    try:
+        if sleep_hours is not None and float(sleep_hours) < 6.0:
+            extra_fatigue_flags.append("sleep<6h")
+    except Exception:
+        pass
+    try:
+        if hrv_deviation_pct is not None and float(hrv_deviation_pct) <= -8.0:
+            extra_fatigue_flags.append("hrv_dev<=-8%")
+    except Exception:
+        pass
+    try:
+        if rhr_slope_7d is not None and float(rhr_slope_7d) >= 0.30:
+            extra_fatigue_flags.append("rhr_rising")
+    except Exception:
+        pass
+    try:
+        if avg_rpe_last5 is not None and float(avg_rpe_last5) >= 7.0:
+            extra_fatigue_flags.append("rpe_high")
+    except Exception:
+        pass
+    try:
+        if avg_feel_last5 is not None and float(avg_feel_last5) >= 3.5:
+            extra_fatigue_flags.append("feel_low")
+    except Exception:
+        pass
+
     low_compliance = compliance.get("weighted_completion_rate", 100) < 80
     low_confidence = coach_confidence.get("level") == "LOW"
     low_motivation = motivation.get("state") in ("FATIGUED", "BURNOUT_RISK")
-    med_active = low_readiness or low_compliance or low_confidence or low_motivation
+
+    # Decide MED mode + scope
+    mode = "READY"
+    scope = "NONE"
+    rationale: list[str] = []
+
+    if low_compliance or low_confidence or low_motivation:
+        mode = "ACTIVE"
+        scope = "GLOBAL"
+        if low_compliance:
+            rationale.append("compliance suggests simpler structure")
+        if low_confidence:
+            rationale.append("coach confidence is limited")
+        if low_motivation:
+            rationale.append("motivation is fragile")
+    elif readiness_score < 55:
+        mode = "ACTIVE"
+        scope = "GLOBAL"
+        rationale.append("readiness is low (<55) – reduce overall load")
+    else:
+        # Borderline readiness: apply MED locally (today+tomorrow) and keep normal load beyond.
+        prev_local = prev_mode == "ACTIVE" and prev_scope == "LOCAL"
+        if prev_local and readiness_score < 62:
+            mode = "ACTIVE"
+            scope = "LOCAL"
+            rationale.append("borderline readiness – keep MED local until readiness >= 62")
+        else:
+            if readiness_score < 58:
+                mode = "ACTIVE"
+                scope = "LOCAL"
+                rationale.append("borderline readiness (<58) – reduce only today/tomorrow")
+            elif readiness_score < 60 and extra_fatigue_flags:
+                mode = "ACTIVE"
+                scope = "LOCAL"
+                rationale.append(
+                    "borderline readiness (58-59) + extra fatigue signal – reduce only today/tomorrow"
+                )
+
+    med_active = mode == "ACTIVE"
+    med_global = med_active and scope == "GLOBAL"
 
     must_hit = _dedupe_keep_order(
         list(block_objective.get("must_hit_sessions", []))
@@ -311,30 +406,35 @@ def build_minimum_effective_dose(ctl: float,
         + list(race_demands.get("must_have_sessions", []))
     )
     weekly_floor = round(max(ctl * 6.4, tss_budget * 0.65))
-    weekly_target = round(tss_budget * (0.80 if med_active else 0.90))
+    weekly_target = round(tss_budget * (0.80 if med_global else 0.90))
     if weekly_target < weekly_floor:
         weekly_target = weekly_floor
 
+    mode_label = mode if not med_active else f"{mode} ({scope})"
+    scope_hint = ""
+    if mode == "ACTIVE" and scope == "LOCAL":
+        scope_hint = " Keep today+tomorrow conservative, but plan day 3+ normally."
+
     summary = (
-        f"Minimum effective dose {'ACTIVE' if med_active else 'READY'}: "
+        f"Minimum effective dose {mode_label}: "
         f"protect {min(len(must_hit), 3)} key stimuli and keep total load around {weekly_floor}-{weekly_target} TSS."
+        + scope_hint
     )
     return {
-        "mode": "ACTIVE" if med_active else "READY",
+        "policy_version": policy_version,
+        "mode": mode,
+        "scope": scope,
         "weekly_tss_floor": weekly_floor,
         "weekly_tss_target": weekly_target,
         "must_hit_sessions": must_hit[:4],
         "summary": summary,
-        "rationale": [
-            reason
-            for reason, active in [
-                ("readiness is not high enough for full volume", low_readiness),
-                ("compliance suggests simpler structure", low_compliance),
-                ("coach confidence is limited", low_confidence),
-                ("motivation is fragile", low_motivation),
-            ]
-            if active
-        ],
+        "rationale": rationale,
+        "fatigue_flags": extra_fatigue_flags,
+        "previous": {
+            "mode": prev_mode,
+            "scope": prev_scope,
+            "updated": prev_updated,
+        },
     }
 
 
@@ -389,9 +489,13 @@ def build_execution_friction(constraints: list[dict] | None,
         score += 1.0
         factors.append("time availability is modest")
 
-    if minimum_effective_dose.get("mode") == "ACTIVE":
+    med_mode = minimum_effective_dose.get("mode")
+    med_scope = minimum_effective_dose.get("scope")
+    if med_mode == "ACTIVE" and med_scope == "GLOBAL":
         score += 1.0
         factors.append("minimum effective dose mode is active")
+    elif med_mode == "ACTIVE" and med_scope == "LOCAL":
+        factors.append("borderline readiness: keep today+tomorrow conservative")
 
     for slot, data in learned_patterns.get("time_of_day", {}).items():
         total = data.get("count", 0)
@@ -450,7 +554,10 @@ def build_training_frequency_target(horizon_days: int,
     readiness_score = readiness.get("score", 60)
     completion = compliance.get("weighted_completion_rate", 100)
     friction_score = execution_friction.get("score", 3)
-    med_active = minimum_effective_dose.get("mode") == "ACTIVE"
+    med_active = (
+        minimum_effective_dose.get("mode") == "ACTIVE"
+        and minimum_effective_dose.get("scope") == "GLOBAL"
+    )
     is_deload = bool(mesocycle.get("is_deload"))
 
     load_ratio = 0.70 if horizon_days >= 10 else 0.75

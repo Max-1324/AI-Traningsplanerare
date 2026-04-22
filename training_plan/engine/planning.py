@@ -1,14 +1,25 @@
 from training_plan.core.common import *
+from training_plan.core.models import AppState
 from training_plan.engine.libraries import *
 from training_plan.engine.utils import safe_date_str
 
 def load_state() -> dict:
+    """Load and validate the persistent state file.
+
+    Validates the raw JSON against AppState so that every key has an explicit
+    default. Unknown keys from older state files are preserved (extra="allow").
+    Returns a plain dict so all existing dict-access patterns work unchanged.
+    """
+    raw: dict = {}
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            raw = json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return {}
+    try:
+        return AppState.model_validate(raw).model_dump()
+    except Exception:
+        return AppState().model_dump()
 
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
@@ -241,6 +252,14 @@ _SESSION_CATEGORY_LABELS = {
 
 
 def session_duration_min(item: dict) -> int:
+    direct_min = item.get("duration_min")
+    try:
+        if direct_min is not None:
+            value = int(round(float(direct_min)))
+            if value > 0:
+                return value
+    except Exception:
+        pass
     secs = item.get("moving_time") or item.get("elapsed_time") or 0
     return round(secs / 60) if secs else 0
 
@@ -1193,6 +1212,45 @@ def get_next_workouts(levels: dict, phase: str) -> str:
         if rec_level < len(wk_def["levels"]):
             nxt = wk_def["levels"][rec_level]
             lines.append(f"    → NEXT LEVEL ({rec_level+1}): {nxt['label']} ({nxt['total_min']}min)")
+    return "\n".join(lines)
+
+
+def build_progression_directive(levels: dict, phase: str) -> str:
+    """
+    Return a tightly-scoped progression object for the AI prompt.
+
+    For each workout type relevant to the current phase, shows:
+      - Current level label (what to do now)
+      - Exact step sequence (copy-paste ready)
+      - Target: next level label and what it will unlock
+
+    The AI should copy the current-level steps verbatim into workout_steps.
+    Only progress to the next level after the athlete masters the current one (RPE ≤ 7).
+    """
+    lines = ["PROGRESSION DIRECTIVE – copy current-level steps verbatim into workout_steps:"]
+    for wk_key, wk_def in WORKOUT_LIBRARY.items():
+        if phase not in wk_def.get("phase", []):
+            continue
+        current_level = levels.get(wk_key, 1)
+        max_level = len(wk_def["levels"])
+        rec_level = min(current_level, max_level)
+        lvl = wk_def["levels"][rec_level - 1]
+        steps_detail = " → ".join(f"{s['d']}min {s['z']} ({s['desc']})" for s in lvl["steps"])
+        lines.append(
+            f"\n  [{wk_key}] {wk_def['name']} ({', '.join(wk_def['sport'])})"
+            f"\n    CURRENT (Level {rec_level}/{max_level}): {lvl['label']} — {lvl['total_min']}min total"
+            f"\n    Steps: {steps_detail}"
+        )
+        if rec_level < max_level:
+            nxt = wk_def["levels"][rec_level]
+            nxt_steps = " → ".join(f"{s['d']}min {s['z']}" for s in nxt["steps"])
+            lines.append(
+                f"    TARGET (Level {rec_level + 1}): {nxt['label']} — {nxt['total_min']}min total"
+                f"\n    Next steps: {nxt_steps}"
+                f"\n    Unlock condition: athlete completes current level with RPE ≤ 7"
+            )
+        else:
+            lines.append(f"    STATUS: Max level reached — maintain quality, vary execution context.")
     return "\n".join(lines)
 
 

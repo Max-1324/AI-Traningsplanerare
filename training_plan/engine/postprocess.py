@@ -120,6 +120,34 @@ def _trim_workout_steps(day: PlanDay, new_duration: int) -> list[WorkoutStep]:
     return trimmed
 
 
+def _fit_workout_steps_to_duration(day: PlanDay, new_duration: int) -> list[WorkoutStep]:
+    """Resize workout steps to match a new session duration without breaking structure."""
+    if new_duration <= 0 or not day.workout_steps:
+        return []
+
+    current_total = sum(step.duration_min for step in day.workout_steps)
+    if current_total >= new_duration:
+        return _trim_workout_steps(day, new_duration)
+
+    steps = [step.model_copy() for step in day.workout_steps]
+    extra = new_duration - current_total
+
+    # Prefer extending the main aerobic/quality block rather than the warmup/cooldown.
+    candidate_indices = [
+        idx for idx, step in enumerate(steps)
+        if step.zone not in {"Z1"} and step.zone not in INTENSE
+    ]
+    if not candidate_indices:
+        candidate_indices = [idx for idx, step in enumerate(steps) if step.zone not in {"Z1"}]
+    if not candidate_indices:
+        candidate_indices = [len(steps) - 1]
+
+    target_idx = max(candidate_indices, key=lambda idx: steps[idx].duration_min)
+    target_step = steps[target_idx]
+    steps[target_idx] = target_step.model_copy(update={"duration_min": target_step.duration_min + extra})
+    return steps
+
+
 def enforce_hard_easy(days):
     from datetime import date as _date
     changes = []
@@ -154,34 +182,224 @@ def enforce_hard_easy(days):
             )
     return days, changes
 
-def apply_injury_rules(days, injury_note: str):
+INJURY_PROFILES: dict[str, dict] = {
+    "knee": {
+        "label": "Knee",
+        "avoid_sports": {"Run"},
+        "safe_sports":  {"VirtualRide", "RollerSki"},   # RollerSki double-poling is knee-friendly
+        "primary_replacement": "VirtualRide",
+        "duration_cap_moderate": 60,
+        "rehab_exercises": [
+            {"name": "Terminal knee extension (band)", "sets": "3x20", "rest": "30s",
+             "description": "Band around back of knee. Start at 30° flex, extend fully. Slow and controlled."},
+            {"name": "Straight leg raise", "sets": "3x15", "rest": "30s",
+             "description": "Lie flat, tighten quad, lift leg to 45°. Hold 2s at top."},
+            {"name": "Wall sit (isometric)", "sets": "3x30s", "rest": "45s",
+             "description": "Back against wall, 90° knee angle. Stop immediately if pain >3/10."},
+            {"name": "Clamshell (side-lying)", "sets": "3x20/side", "rest": "30s",
+             "description": "Hip external rotation, keep feet together. Targets hip abductors to offload knee."},
+            {"name": "Step-down (eccentric)", "sets": "3x10/leg", "rest": "45s",
+             "description": "Stand on step, slowly lower opposite foot to floor. Control the descent (3s down)."},
+        ],
+    },
+    "hip": {
+        "label": "Hip/Glute",
+        "avoid_sports": {"Run"},
+        "safe_sports":  {"VirtualRide", "RollerSki"},
+        "primary_replacement": "VirtualRide",
+        "duration_cap_moderate": 60,
+        "rehab_exercises": [
+            {"name": "Glute bridge (isometric hold)", "sets": "3x10x5s", "rest": "30s",
+             "description": "Lie on back, press hips up and hold 5s. Keep core tight."},
+            {"name": "Clamshell", "sets": "3x20/side", "rest": "30s",
+             "description": "Side-lying hip abduction. Avoid rotating the pelvis."},
+            {"name": "Hip flexor stretch (half-kneeling)", "sets": "3x45s/side", "rest": "20s",
+             "description": "Half-kneeling, tuck pelvis, lean forward gently. Hold without pain."},
+            {"name": "Side-lying hip abduction", "sets": "3x15/side", "rest": "30s",
+             "description": "Slow raise to 30°. Do not allow pelvis to tilt."},
+        ],
+    },
+    "back": {
+        "label": "Back/Lower back",
+        "avoid_sports": {"Run", "Ride"},
+        "safe_sports":  {"VirtualRide"},
+        "primary_replacement": "VirtualRide",
+        "duration_cap_moderate": 45,
+        "rehab_exercises": [
+            {"name": "Cat-cow (mobility)", "sets": "3x10", "rest": "20s",
+             "description": "On all fours. Arch up (cat) then dip (cow). Slow and rhythmic."},
+            {"name": "Dead bug", "sets": "3x8/side", "rest": "30s",
+             "description": "On back, arms up, legs at 90°. Lower opposite arm+leg keeping lower back flat."},
+            {"name": "Bird dog", "sets": "3x10/side", "rest": "30s",
+             "description": "On all fours. Extend opposite arm and leg simultaneously. Hold 3s."},
+            {"name": "Prone press-up (McKenzie)", "sets": "3x10", "rest": "20s",
+             "description": "Lie face down, press up on hands only. Hips stay on floor. Stop if pain radiates to leg."},
+        ],
+    },
+    "shoulder": {
+        "label": "Shoulder/Arm",
+        "avoid_sports": {"Ride", "VirtualRide"},
+        "safe_sports":  {"Run"},
+        "primary_replacement": "Run",
+        "duration_cap_moderate": 45,
+        "rehab_exercises": [
+            {"name": "Pendulum swing", "sets": "3x30s/side", "rest": "20s",
+             "description": "Lean forward, let arm hang and make small circles. Gravity traction."},
+            {"name": "External rotation (band)", "sets": "3x15/side", "rest": "30s",
+             "description": "Elbow at 90°, rotate outward against band. Slow return."},
+            {"name": "Scapular retraction", "sets": "3x15", "rest": "20s",
+             "description": "Squeeze shoulder blades together, hold 3s. Keep shoulders away from ears."},
+            {"name": "Wall angel", "sets": "3x10", "rest": "30s",
+             "description": "Stand against wall, arms at 90°, slide up and down. Keep entire back flat."},
+        ],
+    },
+    "calf_achilles": {
+        "label": "Calf/Achilles",
+        "avoid_sports": {"Run", "RollerSki"},
+        "safe_sports":  {"VirtualRide", "Ride"},
+        "primary_replacement": "VirtualRide",
+        "duration_cap_moderate": 45,
+        "rehab_exercises": [
+            {"name": "Eccentric calf raise (Alfredson)", "sets": "3x15/leg", "rest": "45s",
+             "description": "Rise on two legs, lower slowly on one (3s down). Use step edge for full range. Skip if acute pain."},
+            {"name": "Soleus calf raise (seated)", "sets": "3x20", "rest": "30s",
+             "description": "Seated, knee at 90°. Rise on ball of foot slowly. Targets deeper soleus."},
+            {"name": "Ankle alphabet", "sets": "2x/side", "rest": "20s",
+             "description": "Draw the alphabet in the air with your foot. Improves proprioception."},
+        ],
+    },
+    "shin": {
+        "label": "Shin splints",
+        "avoid_sports": {"Run"},
+        "safe_sports":  {"VirtualRide", "Ride", "RollerSki"},
+        "primary_replacement": "VirtualRide",
+        "duration_cap_moderate": 60,
+        "rehab_exercises": [
+            {"name": "Toe raises (tibialis raise)", "sets": "3x20", "rest": "30s",
+             "description": "Stand, lift toes off floor keeping heels down. Slow and controlled."},
+            {"name": "Calf raises (to balance shin load)", "sets": "3x20", "rest": "30s",
+             "description": "Standard calf raise. Balances anterior/posterior lower leg load."},
+            {"name": "Arch strengthening (towel scrunch)", "sets": "3x30s/foot", "rest": "20s",
+             "description": "Scrunch a towel with toes. Strengthens foot intrinsics."},
+        ],
+    },
+    "generic": {
+        "label": "General discomfort",
+        "avoid_sports": {"Run"},
+        "safe_sports":  {"VirtualRide"},
+        "primary_replacement": "VirtualRide",
+        "duration_cap_moderate": 45,
+        "rehab_exercises": [
+            {"name": "Foam roll (affected area)", "sets": "2x60s", "rest": "20s",
+             "description": "Slow rolling, pause on tender spots for 10s. Avoid rolling directly on joints."},
+            {"name": "Light mobility (full body)", "sets": "2x10/movement", "rest": "15s",
+             "description": "Leg swings, arm circles, hip circles. Keep within pain-free range."},
+        ],
+    },
+}
+
+
+def _parse_sets_reps(raw: str) -> tuple[int, str]:
+    """Parse '3x20' or '3×20/leg' into (sets=3, reps='20') or (sets=3, reps='20/leg')."""
+    m = re.match(r"(\d+)\s*[x×]\s*(.+)", str(raw).strip())
+    if m:
+        return int(m.group(1)), m.group(2).strip()
+    return 3, str(raw)
+
+
+def _parse_rest_sec(raw: str) -> int:
+    """Parse '30s' or '45' into an integer number of seconds."""
+    m = re.match(r"(\d+)", str(raw or "").strip())
+    return int(m.group(1)) if m else 60
+
+
+def _inject_rehab_session(days: list, profile: dict, injury_note: str) -> list:
+    """Insert a rehab WeightTraining session on the first available rest day."""
+    exercises = profile.get("rehab_exercises", [])
+    if not exercises:
+        return days
+    rehab_steps = []
+    for ex in exercises:
+        sets, reps = _parse_sets_reps(ex.get("sets", "3x10"))
+        rehab_steps.append(StrengthStep(
+            exercise=ex["name"],
+            sets=sets,
+            reps=reps,
+            rest_sec=_parse_rest_sec(ex.get("rest", "30s")),
+            notes=ex.get("description", ""),
+        ))
+    for i, day in enumerate(days):
+        if day.intervals_type == "Rest" or day.duration_min == 0:
+            rehab_day = day.model_copy(update={
+                "title": f"Injury rehab – {profile['label']}",
+                "intervals_type": "WeightTraining",
+                "duration_min": 20,
+                "description": (
+                    f"⚕️ Rehab session for: {injury_note}\n"
+                    f"Keep all movements pain-free. Stop any exercise that causes >3/10 pain.\n"
+                    f"Consult a physio if symptoms worsen or do not improve within 5–7 days."
+                ),
+                "workout_steps": [],
+                "strength_steps": rehab_steps,
+                "vetoed": False,
+            })
+            days[i] = rehab_day
+            return days
+    return days
+
+
+def apply_injury_rules(days, injury_note: str, injury_profile: dict | None = None):
     if not injury_note or injury_note.lower() in ("", "nej", "n", "inga"):
         return days, []
-    inj = injury_note.lower()
-    avoid_map = [
-        (["knä", "höft", "lår", "vad", "fot", "ankel", "knee", "hip", "thigh", "calf", "foot", "ankle"],  {"Run", "RollerSki"},     "VirtualRide"),
-        (["axel", "armbåge", "handled", "arm", "shoulder", "elbow", "wrist"],           {"Ride", "VirtualRide"},  "Run"),
-        (["rygg", "ländrygg", "nacke", "back", "lower back", "neck"],                   {"Run", "Ride"},          "VirtualRide"),
-        (["skena", "shin", "splints"],                               {"Run"},                  "VirtualRide"),
-    ]
-    affected, replacement = set(), "VirtualRide"
-    for keywords, sports, repl in avoid_map:
-        if any(k in inj for k in keywords):
-            affected |= sports
-            replacement = repl
-    if not affected:
-        affected = {"Run", "RollerSki"}
+
+    # Use AI-classified profile if available, otherwise fall back to keyword matching
+    if injury_profile and injury_profile.get("profile_key") in INJURY_PROFILES:
+        profile = INJURY_PROFILES[injury_profile["profile_key"]]
+        severity = injury_profile.get("severity", "MILD")
+        avoid_sports = profile["avoid_sports"]
+        replacement = profile["primary_replacement"]
+    else:
+        # Keyword fallback (original logic)
+        inj = injury_note.lower()
+        avoid_map = [
+            (["knä", "höft", "lår", "knee", "hip", "thigh"],     {"Run"},             "VirtualRide"),
+            (["vad", "fot", "ankel", "calf", "foot", "ankle"],   {"Run", "RollerSki"},"VirtualRide"),
+            (["axel", "armbåge", "handled", "shoulder", "elbow", "wrist"], {"Ride", "VirtualRide"}, "Run"),
+            (["rygg", "nacke", "back", "neck"],                   {"Run", "Ride"},     "VirtualRide"),
+            (["skena", "shin", "splints"],                        {"Run"},             "VirtualRide"),
+        ]
+        avoid_sports, replacement, severity = set(), "VirtualRide", "MILD"
+        for keywords, sports, repl in avoid_map:
+            if any(k in inj for k in keywords):
+                avoid_sports |= sports
+                replacement = repl
+        if not avoid_sports:
+            avoid_sports = {"Run"}
+        profile = INJURY_PROFILES.get("generic", {})
+
+    # Cap duration based on severity
+    dur_cap = profile.get("duration_cap_moderate", 60) if severity in ("MODERATE", "SEVERE") else 90
+
     changes = []
     for i, day in enumerate(days):
-        if day.intervals_type in affected:
-            new_dur = min(day.duration_min, 45)
+        if day.intervals_type in avoid_sports:
+            new_dur = min(day.duration_min, dur_cap)
             days[i] = day.model_copy(update={
                 "title":          f"{day.title} [→ {replacement}, injury]",
                 "intervals_type": replacement,
                 "duration_min":   new_dur,
-                "description":    day.description + f"\n\n⚠️ Adapted due to injury report: '{injury_note}'",
+                "description":    day.description + f"\n\n⚠️ Adapted due to injury: '{injury_note}'",
             })
-            changes.append(f"INJURY: {day.date} '{day.intervals_type}' → '{replacement}' ({new_dur}min)")
+            changes.append(f"INJURY: {day.date} '{day.intervals_type}' → '{replacement}' ({new_dur}min, {severity})")
+
+    if changes:
+        days = _inject_rehab_session(days, profile, injury_note)
+        label = profile.get("label", "injury")
+        safe = ", ".join(profile.get("safe_sports", set()))
+        changes.insert(0,
+            f"INJURY-PROFILE ({label}, {severity}): avoiding {avoid_sports} | safe: {safe} | "
+            f"rehab session injected on first rest day"
+        )
     return days, changes
 
 def enforce_hrv(days, hrv):
@@ -503,6 +721,27 @@ def enforce_today_time_budget(days: list[PlanDay], time_available_text: str) -> 
 # NÄRINGSSTYRNING (periodiserad)
 # ══════════════════════════════════════════════════════════════════════════════
 
+_CHO_PER_HOUR_RE = re.compile(r"(\d{1,3})\s*[-–]\s*(\d{1,3})\s*g\s*CHO/h", re.IGNORECASE)
+
+
+def _extract_cho_per_hour_target(text: str) -> str | None:
+    if not text:
+        return None
+    m = _CHO_PER_HOUR_RE.search(text)
+    if not m:
+        return None
+    try:
+        lo = int(m.group(1))
+        hi = int(m.group(2))
+    except Exception:
+        return None
+    if lo <= 0 or hi <= 0:
+        return None
+    if lo > hi:
+        lo, hi = hi, lo
+    return f"{lo}-{hi}g CHO/h"
+
+
 def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[int],
                                        workout_day, tss_estimate: float,
                                        weight_kg: float | None = None) -> str:
@@ -512,6 +751,7 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
     """
     dur = workout_day.duration_min
     sport = workout_day.intervals_type
+    manual_cho_target = _extract_cho_per_hour_target(getattr(workout_day, "nutrition", "") or "")
 
     if sport in ("Rest", "WeightTraining") or dur < 30:
         return ""
@@ -525,7 +765,8 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
 
     # Tävlingsdag
     if days_to_race == 0:
-        return ("RACE DAY: Start 300ml sports drink. 60-90g CHO/h during the race (gels + bars). "
+        cho = manual_cho_target or "60-90g CHO/h"
+        return (f"RACE DAY: Start 300ml sports drink. {cho} during the race (gels + bars). "
                 "500mg Na/h. Caffeine 200mg at t-1h. Drink 500ml at finish.")
 
     # Kolhydratladning 3 dagar före
@@ -536,16 +777,19 @@ def calculate_nutrition_periodization(phase_name: str, days_to_race: Optional[in
 
     # Hög TSS-dag
     if tss_estimate > 100:
+        during = "" if manual_cho_target else " During: 60-90g CHO/h."
         return (f"HIGH-CARB: {round(tss_estimate)} TSS planned – {cho_range(6, 8)} today. "
-                f"Breakfast: oatmeal + banana + honey. During: 60-90g CHO/h.")
+                f"Breakfast: oatmeal + banana + honey.{during}")
 
     # Basfas + Z2-pass (fasted training OK)
-    is_z2_only = all(s.zone in ("Z1", "Z2") for s in workout_day.workout_steps) if workout_day.workout_steps else True
-    if phase_name in ("Base", "Grundtraning") and is_z2_only and 60 <= dur <= 90:
+    is_z2_only = all(s.zone in ("Z1", "Z2") for s in workout_day.workout_steps) if workout_day.workout_steps else False
+    if phase_name in ("Base", "Grundtraning") and is_z2_only and 60 <= dur <= 90 and not manual_cho_target:
         return ("FASTED OK: Morning session 60-90min Z2 can be done fasted for fat adaptation. "
                 "Max 30g CHO/h if you are hungry. Have a gel ready.")
 
     # Standard baserat på duration
+    if manual_cho_target:
+        return ""
     if dur < 60:
         return ""
     elif dur <= 90:
@@ -566,13 +810,14 @@ def add_env_nutrition(days, weather, phase=None, races=None, athlete=None, welln
         if day.duration_min < 60 or day.intervals_type in ("Rest","WeightTraining"): continue
         w = wmap.get(day.date, {})
         fz = day.workout_steps[0].zone if day.workout_steps else "Z2"
+        all_zones = [s.zone for s in day.workout_steps] if day.workout_steps else []
 
         if day.slot == "AM":
             temp = w.get("temp_morning", w.get("temp_min", 10))
         else:
             temp = w.get("temp_afternoon", w.get("temp_max", 15))
 
-        extra = env_nutrition(temp, day.duration_min, fz)
+        extra = env_nutrition(temp, day.duration_min, fz, all_zones=all_zones)
         nutr_parts = [day.nutrition] if day.nutrition else []
         if extra:
             nutr_parts.append(" ".join(extra))
@@ -604,7 +849,34 @@ def add_env_nutrition(days, weather, phase=None, races=None, athlete=None, welln
             days[i] = day.model_copy(update={"nutrition": new_nutr})
     return days
 
-def enforce_strength_limit(days, max_strength=2, min_gap=2):
+_HIGH_ZONES = {"Z3", "Z4", "Z5", "Z6", "Z7", "Zone 3", "Zone 4", "Zone 5", "Zone 6", "Zone 7"}
+
+def strip_train_low_contradiction(days: list) -> tuple[list, list]:
+    """Remove TRAIN LOW lines from sessions that contain Z3+ steps — prevents contradictory advice."""
+    changes = []
+    for i, day in enumerate(days):
+        if not day.workout_steps:
+            continue
+        if not any(s.zone in _HIGH_ZONES for s in day.workout_steps):
+            continue
+
+        def _strip(text: str) -> str:
+            if not text or "TRAIN LOW" not in text:
+                return text
+            return "\n".join(l for l in text.splitlines() if not l.strip().startswith("TRAIN LOW")).strip()
+
+        new_desc = _strip(day.description)
+        new_nutr = _strip(day.nutrition)
+        if new_desc != day.description or new_nutr != day.nutrition:
+            days[i] = day.model_copy(update={"description": new_desc, "nutrition": new_nutr})
+            changes.append(f"TRAIN-LOW-STRIP: {day.date} – removed contradictory TRAIN LOW from intensity session")
+    return days, changes
+
+
+def enforce_strength_limit(days, max_strength=None, min_gap=None):
+    max_strength = max_strength if max_strength is not None else _MAX_STRENGTH_PER_PLAN
+    min_gap      = min_gap      if min_gap      is not None else _MIN_STRENGTH_GAP_DAYS
+    fallback     = _pick_fallback_sport(avoid="WeightTraining")
     changes = []
     strength_count = 0
     last_strength_idx = -99
@@ -613,48 +885,69 @@ def enforce_strength_limit(days, max_strength=2, min_gap=2):
         too_close  = (i - last_strength_idx) < min_gap
         too_many   = strength_count >= max_strength
         if too_many or too_close:
-            reason = "strength limit (max 2)" if too_many else f"too close (< {min_gap} days since last)"
+            reason = f"strength limit (max {max_strength})" if too_many else f"too close (< {min_gap} days since last)"
             days[i] = day.model_copy(update={
-                "title":          day.title + f" -> Zwift Z1 ({reason})",
-                "intervals_type": "VirtualRide",
+                "title":          day.title + f" -> {fallback} Z1 ({reason})",
+                "intervals_type": fallback,
                 "duration_min":   45,
-                "workout_steps":  [WorkoutStep(duration_min=45, zone="Z1", description="Easy recovery spinning @ <120W")],
+                "workout_steps":  [WorkoutStep(duration_min=45, zone="Z1", description="Easy aerobic recovery – no intensity")],
                 "strength_steps": [],
                 "description":    day.description + f"\n\n⚠️ Converted – {reason}.",
                 "vetoed": True,
             })
-            changes.append(f"STRENGTH_LIMIT: {day.date} -> Zwift Z1 ({reason})")
+            changes.append(f"STRENGTH_LIMIT: {day.date} -> {fallback} Z1 ({reason})")
         else:
             strength_count  += 1
             last_strength_idx = i
     return days, changes
 
-def enforce_rollski_limit(days, max_per_week=1):
+def enforce_rollski_limit(days, max_per_week=None):
+    max_per_week = max_per_week if max_per_week is not None else _MAX_ROLLSKI_PER_WEEK
+    fallback     = _pick_fallback_sport(avoid="RollerSki")
     changes = []
     rollski_days = [(i, day) for i, day in enumerate(days) if day.intervals_type == "RollerSki"]
-    seen_weeks = set()
+    seen_weeks: dict[int, int] = {}
     to_convert = set()
     for i, day in rollski_days:
         week = datetime.strptime(day.date, "%Y-%m-%d").isocalendar()[1]
-        if week in seen_weeks:
+        seen_weeks[week] = seen_weeks.get(week, 0) + 1
+        if seen_weeks[week] > max_per_week:
             to_convert.add(i)
-        else:
-            seen_weeks.add(week)
     for i in to_convert:
         day = days[i]
         days[i] = day.model_copy(update={
-            "title":          day.title + " -> Cycling (roller ski limit)",
-            "intervals_type": "Ride",
-            "description":    day.description + "\n\n⚠️ Converted – max 1 roller ski session/week.",
+            "title":          day.title + f" -> {fallback} (roller ski limit)",
+            "intervals_type": fallback,
+            "description":    day.description + f"\n\n⚠️ Converted – max {max_per_week} roller ski session(s)/week.",
             "vetoed": True,
         })
-        changes.append(f"ROLLERSKI_LIMIT: {day.date} -> Ride (max 1/week)")
+        changes.append(f"ROLLERSKI_LIMIT: {day.date} -> {fallback} (max {max_per_week}/week)")
     return days, changes
 
 
 _MIN_DURATION = MIN_DURATION_BY_SPORT
 _TSS_REPAIR_TARGET_PCT = float(os.getenv("POSTPROCESS_TSS_REPAIR_TARGET_PCT", "0.95"))
 _INTENSE_ZONES = {"Z4", "Z5", "Z6", "Z7"}
+
+# Configurable limits (can be overridden in .env)
+_MAX_ROLLSKI_PER_WEEK   = int(os.getenv("MAX_ROLLSKI_PER_WEEK",    "1"))
+_MAX_STRENGTH_PER_PLAN  = int(os.getenv("MAX_STRENGTH_PER_PLAN",   "2"))
+_MIN_STRENGTH_GAP_DAYS  = int(os.getenv("MIN_STRENGTH_GAP_DAYS",   "2"))
+
+# Fallback sport when a sport is over ACWR limit or exceeds rollski/strength limits.
+# Picks lowest injury-risk available sport, with env override.
+def _pick_fallback_sport(avoid: str | None = None) -> str:
+    override = os.getenv("FALLBACK_SPORT", "").strip()
+    if override:
+        return override
+    risk_order = {"low": 0, "medium": 1, "high": 2}
+    candidates = [
+        s for s in SPORTS
+        if s["intervals_type"] not in ("WeightTraining", "Rest", avoid)
+    ]
+    if not candidates:
+        return "VirtualRide"
+    return min(candidates, key=lambda s: risk_order.get(s.get("injury_risk", "medium"), 1))["intervals_type"]
 
 
 def _consolidate_steps(day: PlanDay) -> PlanDay:
@@ -726,7 +1019,8 @@ def _extend_day_for_tss(day: PlanDay, extra_min: int, note: str) -> PlanDay:
 def repair_low_tss(days: list[PlanDay], budget: float, athlete: dict,
                    base_tss_by_date: dict[str, float] | None = None,
                    target_pct: float = _TSS_REPAIR_TARGET_PCT,
-                   med_active: bool = False) -> tuple[list[PlanDay], list[str]]:
+                   med_active: bool = False,
+                   budgets: dict | None = None) -> tuple[list[PlanDay], list[str]]:
     if med_active or budget <= 0 or not athlete:
         return days, []
 
@@ -798,6 +1092,22 @@ def repair_low_tss(days: list[PlanDay], budget: float, athlete: dict,
             changes.append(f"TSS-REPAIR: {day.date} +{added_here}min aerobic volume ({category})")
 
     if current_total < target_total:
+        # Pick the sport with most remaining budget; fall back to VirtualRide
+        _repair_sport = "VirtualRide"
+        if budgets:
+            accumulated_in_plan: dict[str, int] = {}
+            for d in result:
+                if d.intervals_type in budgets and d.duration_min > 0:
+                    accumulated_in_plan[d.intervals_type] = (
+                        accumulated_in_plan.get(d.intervals_type, 0) + d.duration_min
+                    )
+            best_remaining = 0
+            for st, b in budgets.items():
+                remaining = b["remaining"] - accumulated_in_plan.get(st, 0)
+                if remaining > best_remaining:
+                    best_remaining = remaining
+                    _repair_sport = st
+
         for idx, day in enumerate(result):
             if current_total >= target_total:
                 break
@@ -810,7 +1120,7 @@ def repair_low_tss(days: list[PlanDay], budget: float, athlete: dict,
             added_session = PlanDay(
                 date=day.date,
                 title="Aerobic Base [TSS repair]",
-                intervals_type="VirtualRide",
+                intervals_type=_repair_sport,
                 duration_min=45,
                 description="Added by Python post-process to close a significant TSS gap without increasing intensity.",
                 workout_steps=[
@@ -824,7 +1134,7 @@ def repair_low_tss(days: list[PlanDay], budget: float, athlete: dict,
             delta = estimate_tss_coggan(added_session, athlete)
             result[idx] = added_session
             current_total += delta
-            changes.append(f"TSS-REPAIR: {day.date} rest -> 45min Z2 aerobic support")
+            changes.append(f"TSS-REPAIR: {day.date} rest -> 45min Z2 {_repair_sport} aerobic support")
 
     if changes:
         changes.insert(0, f"TSS-REPAIR: lifted estimated total load toward {round(target_total)} TSS target before final audit.")
@@ -835,9 +1145,15 @@ def enforce_min_duration(days: list) -> list:
     for i, day in enumerate(days):
         if day.vetoed:
             continue
+        category = classify_session_category(day.model_dump())
+        if category == "recovery":
+            continue
         min_dur = _MIN_DURATION.get(day.intervals_type)
         if min_dur and 0 < day.duration_min < min_dur:
-            days[i] = day.model_copy(update={"duration_min": min_dur})
+            updates = {"duration_min": min_dur}
+            if day.workout_steps:
+                updates["workout_steps"] = _fit_workout_steps_to_duration(day, min_dur)
+            days[i] = day.model_copy(update=updates)
             log.debug(f"enforce_min_duration: {day.date} {day.intervals_type} {day.duration_min}→{min_dur}min")
     return days
 
@@ -945,9 +1261,9 @@ def enforce_per_sport_acwr_veto(days: list, per_sport: dict) -> tuple:
     for i, day in enumerate(days):
         if day.intervals_type not in danger_sports:
             continue
-        sport = day.intervals_type
-        fallback = "VirtualRide" if sport in ("Run", "RollerSki") else "Run"
-        ratio = per_sport[sport]["ratio"]
+        sport    = day.intervals_type
+        fallback = _pick_fallback_sport(avoid=sport)
+        ratio    = per_sport[sport]["ratio"]
         days[i] = day.model_copy(update={
             "intervals_type": fallback,
             "title": f"{day.title} [ACWR-VETO {sport}→{fallback}]",
@@ -961,7 +1277,7 @@ def enforce_per_sport_acwr_veto(days: list, per_sport: dict) -> tuple:
 
 
 def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlete,
-                 injury_note="", mesocycle=None, constraints=None, today_wellness=None,
+                 injury_note="", injury_profile=None, mesocycle=None, constraints=None, today_wellness=None,
                  rtp_status=None, per_sport_acwr_data=None, motivation=None,
                  med_active=False,
                  phase=None, races=None, wellness=None, base_tss_by_date=None, horizon_days=None,
@@ -983,15 +1299,15 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
     days, c = enforce_hrv(days, hrv);                 all_c += c
     if motivation:
         days, c = enforce_motivation_state(days, motivation); all_c += c
-    days, c2 = apply_injury_rules(days, injury_note);  all_c += c2
+    days, c2 = apply_injury_rules(days, injury_note, injury_profile=injury_profile);  all_c += c2
     if constraints:
         days, c = enforce_schedule_constraints(days, constraints); all_c += c
     if per_sport_acwr_data:
         days, c = enforce_per_sport_acwr_veto(days, per_sport_acwr_data); all_c += c
     days, c = enforce_sport_budget(days, budgets);     all_c += c
     days, c = enforce_hard_easy(days);                 all_c += c
-    days, c = enforce_strength_limit(days, max_strength=2); all_c += c
-    days, c = enforce_rollski_limit(days, max_per_week=1);  all_c += c
+    days, c = enforce_strength_limit(days); all_c += c
+    days, c = enforce_rollski_limit(days);  all_c += c
     if mesocycle:
         days, c = enforce_deload(days, mesocycle, athlete);  all_c += c
     days, c = repair_low_tss(
@@ -1000,10 +1316,12 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
         athlete,
         base_tss_by_date=base_tss_by_date,
         med_active=med_active,
+        budgets=budgets,
     ); all_c += c
     days, c = enforce_tss(days, budget, athlete, base_tss_by_date=base_tss_by_date, horizon_days=horizon_days); all_c += c
     days     = ensure_warmup(days)
     days     = add_env_nutrition(days, weather, phase=phase, races=races, athlete=athlete, wellness=wellness)
+    days, c  = strip_train_low_contradiction(days); all_c += c
     days     = enforce_min_duration(days)
     days, c = enforce_today_time_budget(days, time_available_text); all_c += c
     days     = [_consolidate_steps(d) for d in days]

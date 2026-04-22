@@ -1,9 +1,12 @@
 import training_plan.core.common as common
 from training_plan.core.common import *
+from training_plan.engine.context import PromptContext
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.engine.analysis import *
+from training_plan.engine.skeleton import format_skeleton_for_prompt
 from training_plan.engine.utils import strip_planner_comment_block, read_wellness_score
+from groq import Groq
 
 PLANNER_COMMENT_START = "[AI_MORNING]"
 PLANNER_COMMENT_END = "[/AI_MORNING]"
@@ -295,21 +298,128 @@ def morning_questions(auto, today_wellness, yesterday_planned, yesterday_actuals
     return answers
 
 
-def build_prompt(activities, wellness, fitness, races, weather, morning, horizon,
-                 manual_workouts, athlete, hrv, budgets, tsb_bgt, vetos, phase,
-                 existing_plan_summary="  No existing plan.",
-                 mesocycle=None, trajectory=None, compliance=None,
-                 workout_lib_text="", ftp_check=None,
-                 yesterday_analysis="", constraints_text="",
-                 acwr_trend=None, race_week=None, taper_score=None, rtp_status=None,
-                 data_quality=None, per_sport_acwr=None, motivation=None,
-                 prehab=None, pre_race_info=None, autoregulation_signals=None,
-                 mesocycle_for_strength=None,
-                 readiness=None, np_if_analysis=None, learned_patterns="",
-                 exclude_dates=None, development_needs=None, block_objective=None,
-                 race_demands=None, session_quality=None, coach_confidence=None,
-                 polarization=None, historical_validation=None,
-                 outcome_tracking=None, planner_insights=None, failure_memory=""):
+def _build_key_session_directive(
+    block_objective: dict,
+    development_needs: dict,
+    minimum_effective_dose: dict,
+    mesocycle: dict | None,
+    planning_day_count: int,
+) -> str:
+    """
+    Produce a KEY / SUPPORT / RECOVERY priority table for the AI prompt.
+
+    KEY sessions are the 2-3 quality workouts that must be protected.
+    SUPPORT sessions fill the volume around them.
+    RECOVERY sessions are mandatory low-intensity or rest slots.
+    """
+    block_objective = block_objective or {}
+    development_needs = development_needs or {}
+    minimum_effective_dose = minimum_effective_dose or {}
+    mesocycle = mesocycle or {}
+
+    is_deload = mesocycle.get("is_deload", False)
+    weeks = max(1, round(planning_day_count / 7))
+
+    # Gather candidate key sessions from multiple sources, in priority order
+    key_candidates: list[str] = []
+    for src in (
+        block_objective.get("must_hit_sessions", []),
+        minimum_effective_dose.get("must_hit_sessions", []),
+        development_needs.get("must_hit_sessions", []),
+    ):
+        for s in src:
+            if s and s not in key_candidates:
+                key_candidates.append(s)
+
+    flex_sessions: list[str] = block_objective.get("flex_sessions", [])
+
+    # During deload: cap key sessions at 1 per week, no high-intensity
+    max_key = weeks * 1 if is_deload else weeks * 2
+    key_sessions = key_candidates[:max_key] or ([] if is_deload else ["Zone 2 endurance"])
+    support_sessions = flex_sessions[:3] or ["Zone 2 endurance fill"]
+
+    primary_focus = (
+        block_objective.get("primary_focus")
+        or development_needs.get("primary_focus")
+        or "durability"
+    )
+
+    deload_note = "\n  ⚠️ DELOAD WEEK: No Z4+ in KEY slots. Reduce volume 35-40%." if is_deload else ""
+
+    lines = [
+        "SESSION PRIORITY FOR THIS PLAN:",
+        f"  Primary coaching focus: {primary_focus}{deload_note}",
+        "  KEY sessions (protect these — schedule first, never skip, never stack back-to-back):",
+    ]
+    for ks in key_sessions:
+        lines.append(f"    • {ks}")
+    lines.append("  SUPPORT sessions (volume fillers around KEY sessions — can be shortened if fatigued):")
+    for ss in support_sessions:
+        lines.append(f"    • {ss}")
+    lines.append("  RECOVERY slots (mandatory — never replace with a key session):")
+    lines.append(f"    • {max(1, weeks)} rest or Z1 day(s) per week, placed the day after each KEY session.")
+    lines.append("  Scheduling rule: KEY → RECOVERY → SUPPORT → repeat. Never place two KEY sessions on consecutive days.")
+
+    return "\n".join(lines)
+
+
+def build_prompt(ctx: PromptContext) -> str:
+    """Build the main generation prompt from a PromptContext.
+
+    The function body is unchanged from the old 38-parameter version.
+    Parameters are simply destructured from `ctx` at the top so all
+    existing internal references continue to work without modification.
+    """
+    # ── Destructure PromptContext → local names (old signature mapped 1-to-1) ─
+    activities          = ctx.activities
+    wellness            = ctx.wellness
+    fitness             = ctx.fitness
+    races               = ctx.races
+    weather             = ctx.weather
+    morning             = ctx.morning
+    horizon             = ctx.horizon
+    manual_workouts     = ctx.manual_workouts
+    athlete             = ctx.athlete
+    hrv                 = ctx.hrv
+    budgets             = ctx.budgets
+    tsb_bgt             = ctx.tss_budget
+    vetos               = ctx.vetos
+    phase               = ctx.phase
+    existing_plan_summary   = ctx.existing_plan_summary
+    mesocycle               = ctx.mesocycle
+    trajectory              = ctx.trajectory
+    compliance              = ctx.compliance
+    workout_lib_text        = ctx.workout_lib_text
+    progression_directive   = ctx.progression_directive
+    ftp_check               = ctx.ftp_check
+    yesterday_analysis      = ctx.yesterday_analysis
+    constraints_text        = ctx.constraints_text
+    acwr_trend              = ctx.acwr_trend
+    race_week               = ctx.race_week
+    taper_score             = ctx.taper_score
+    rtp_status              = ctx.rtp_status
+    data_quality            = ctx.data_quality
+    per_sport_acwr          = ctx.per_sport_acwr
+    motivation              = ctx.motivation
+    prehab                  = ctx.prehab
+    pre_race_info           = ctx.pre_race_info
+    autoregulation_signals  = ctx.autoregulation_signals
+    mesocycle_for_strength  = ctx.mesocycle_for_strength
+    readiness               = ctx.readiness
+    np_if_analysis          = ctx.np_if_analysis
+    learned_patterns        = ctx.learned_patterns
+    exclude_dates           = ctx.exclude_dates
+    development_needs       = ctx.development_needs
+    block_objective         = ctx.block_objective
+    race_demands            = ctx.race_demands
+    session_quality         = ctx.session_quality
+    coach_confidence        = ctx.coach_confidence
+    polarization            = ctx.polarization
+    historical_validation   = ctx.historical_validation
+    outcome_tracking        = ctx.outcome_tracking
+    planner_insights        = ctx.planner_insights
+    failure_memory          = ctx.failure_memory
+
     today = date.today()
     lf = fitness[-1] if fitness else {}
     atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb = lf.get("tsb",0.0)
@@ -345,8 +455,8 @@ def build_prompt(activities, wellness, fitness, races, weather, morning, horizon
     well_lines = []
     for w in wellness[-14:]:
         sh = fmt(w.get("sleepSecs",0)/3600 if w.get("sleepSecs") else None,"h")
-        well_lines.append(f"  {w.get('id','')[:10]} | Sleep:{sh} | RestHR:{fmt(w.get('restingHR'),'bpm')} | "
-                          f"SleepHR:{fmt(w.get('avgSleepingHR'),'bpm')} | HRV:{fmt(w.get('hrv'),'ms')} | Steps:{fmt(w.get('steps'))}")
+        well_lines.append(f"  {w.get('id','')[:10]} | Sleep:{sh} | RestHR:{fmt(w.get('restingHR') or None,'bpm')} | "
+                          f"SleepHR:{fmt(w.get('avgSleepingHR') or None,'bpm')} | HRV:{fmt(w.get('hrv') or None,'ms')} | Steps:{fmt(w.get('steps') or None)}")
 
     # FIX #3: Inkludera duration/distance/description för manuella pass
     manual_lines = []
@@ -484,7 +594,17 @@ FTP-STATUS:
   {'Schedule FTP test within 5 days (rested day, TSB > 0).' if ftp_check['needs_test'] else ''}
 {ftp_proto}"""
     lib_text = ""
-    if workout_lib_text:
+    if progression_directive:
+        lib_text = f"""
+{progression_directive}
+
+INSTRUCTIONS FOR PROGRESSION DIRECTIVE:
+  Copy the CURRENT-level steps verbatim into workout_steps for every interval session.
+  Do NOT invent your own interval formats — use only the steps listed above.
+  Only move to the TARGET level after the athlete completes the current level with RPE <= 7.
+  Tempo and long rides may be adapted in duration, but must start from the library template.
+"""
+    elif workout_lib_text:
         lib_text = f"""
 {workout_lib_text}
 
@@ -572,6 +692,20 @@ BLOCK OBJECTIVE:
   Must-hit-sessions: {' | '.join(block_objective.get('must_hit_sessions', [])) or 'None'}
   Flex-sessions: {' | '.join(block_objective.get('flex_sessions', [])) or 'None'}
 """
+
+    # ── Slot skeleton section ─────────────────────────────────────────────────
+    skeleton_text = ""
+    if ctx.week_skeleton:
+        skeleton_text = "\n" + format_skeleton_for_prompt(ctx.week_skeleton) + "\n"
+
+    # KEY/SUPPORT/RECOVERY priority directive — built from existing context
+    key_session_directive = _build_key_session_directive(
+        block_objective=block_objective,
+        development_needs=development_needs,
+        minimum_effective_dose=minimum_effective_dose,
+        mesocycle=mesocycle,
+        planning_day_count=planning_day_count,
+    )
 
     race_demands_text = ""
     if race_demands:
@@ -802,6 +936,21 @@ INSTRUCTION: Give 3-5 sentences feedback in the "yesterday_feedback" field:
   If the athlete asks for a double session (two sports same day) - ALWAYS create two SEPARATE JSON objects with the same date but slot "AM" and "PM". NEVER combine into one object.
 """ if athlete_note else ""
 
+    # ── Dynamic sports section ────────────────────────────────────────────────
+    _active_types = {s["intervals_type"] for s in SPORTS}
+    _catalog_types = {s["intervals_type"] for s in ALL_SPORTS_CATALOG
+                      if s["intervals_type"] not in ("WeightTraining",)}
+    _unavailable = _catalog_types - _active_types
+    _unavailable_text = (
+        "⚠️ NOT available: " + ", ".join(sorted(_unavailable)) + "."
+        if _unavailable else ""
+    )
+    _rollski_note = (
+        "🎿 ROLLER SKIING: The athlete does double poling. Mention this in the description "
+        "and adapt technique focus accordingly (shoulder rotation, core activation, rhythm in the pole plant)."
+        if "RollerSki" in _active_types else ""
+    )
+
     return f"""You are a modern elite coach who maximizes adaptation and performance within safe boundaries.
 Dates to plan: {', '.join(dates)}.
 REQUIREMENTS: Include ALL dates above in the "days" array - including rest days.
@@ -820,7 +969,8 @@ Each plan must have:
   - Other sessions as FLEX sessions: supporting, feasible and easy to scale back
   - Clear connection between development needs, race demands and choice of sessions
   - If the benchmark system says a checkpoint is due and the daily form allows: schedule it within the horizon
-  - If minimum effective dose is ACTIVE: choose the smallest plan that still protects must-hit sessions
+  - If minimum effective dose is ACTIVE (GLOBAL): choose the smallest overall plan that still protects must-hit sessions
+  - If minimum effective dose is ACTIVE (LOCAL): keep TODAY and TOMORROW conservative, but plan day 3+ normally (do not undercut total load)
   - Keep the plan aligned with the season plan, not just the next week
 
 REGENERATE ENTIRE PLAN if:
@@ -841,6 +991,7 @@ YESTERDAY'S SESSION: {yday}
 {weekly_instruction}
 {meso_text}
 {block_text}
+{skeleton_text}{key_session_directive}
 {traj_text}
 {comp_text}
 {failure_memory_text}
@@ -886,9 +1037,10 @@ TRAINING:
 {season_plan_text}
 
 TSS BUDGET AND CHEAT SHEET:
-  TOTAL GOAL: {tsb_bgt} TSS over {planning_day_count} plan days.
+  TOTAL GOAL: {tsb_bgt} TSS over {planning_day_count} plan days ({round(planning_day_count / 7, 1)} weeks).
   {'Locked manual sessions already consume approx ' + str(round(sum(w.get("planned_load", 0) or 0 for w in manual_workouts))) + ' TSS.' if manual_workouts else ''}
   Aim for 95-100% ({round(tsb_bgt * 0.95)}-{tsb_bgt} TSS) TOTAL. Under 90% ({round(tsb_bgt * 0.90)}) = too little for optimal development.
+  WEEKLY TARGET: ~{round(tsb_bgt * 7 / planning_day_count)} TSS/week. Each week should land between {round(tsb_bgt * 7 / planning_day_count * 0.80)}-{round(tsb_bgt * 7 / planning_day_count * 1.15)} TSS. Do not leave any week empty or far below this floor — uneven distribution wastes mesocycle potential.
   {'⚠️ DELOAD: Budget is already reduced by 40%.' if mesocycle and mesocycle.get('is_deload') else ''}
   TSS CHEAT SHEET (IF² × 100 formula — use this for stress_audit):
     Z2 endurance:   60min=49 | 75min=61 | 90min=73 | 2h=98 | 2.5h=122 | 3h=147 | 3.5h=171 | 4h=196 | 5h=245 TSS
@@ -929,9 +1081,8 @@ Weather rules:
 {strength_text}
 {prehab_text}
 SPORTS:
-⚠️ NordicSki NOT available.
-🚴 MAIN SPORT: Cycling. 🎿 RollerSki max 1/week. 🏃 Running sparingly. Strength max 2/10d.
-🎿 ROLLER SKIING: The athlete does double poling. Mention this in the description and adapt technique focus accordingly (shoulder rotation, core activation, rhythm in the pole plant).
+{_unavailable_text}
+{_rollski_note}
 {chr(10).join(f"  {s['name']} ({s['intervals_type']}): {s.get('comment','')}" for s in SPORTS)}
 
 LOCKED DATES: {locked_str}
@@ -971,6 +1122,7 @@ ABSOLUTE SYSTEM RULES (These will otherwise be forced by Python later!):
 9. RTP NAMING: NEVER use "RTP" or "Return to Play" in session names unless "RETURN TO PLAY PROTOCOL ACTIVATED" is explicitly shown.
 10. MUST-HIT SESSIONS: Protect the block's most important sessions even if you have to scale down others.
 11. FILLER SESSIONS FORBIDDEN: If a session does not clearly drive adaptation or active recovery, remove it.
+12. SLOT SKELETON: If a WEEKLY SLOT SKELETON is shown above, respect FIXED dates and follow GUIDED suggestions. You MAY override a GUIDED slot (e.g. two consecutive intensity days for a training-camp simulation) but MUST justify the override in the session description. Unexplained deviations will be penalised in review.
 
 MIN SESSION DURATIONS:
   Ride: min 75min. VirtualRide: min 45min. RollerSki: min 60min. Run: min 30min. Strength: min 30min.
@@ -1190,6 +1342,67 @@ def call_ai(provider, prompt, temperature: float | None = None):
             log.debug(f"Raw Ollama keys: {list(data.keys())}")
 
         return response
+    elif provider == "groq":
+
+        key = os.getenv("GROQ_API_KEY", "")
+        if not key:
+            sys.exit("Set GROQ_API_KEY.")
+
+        client = Groq(api_key=key)
+
+        models_str = os.getenv("GROQ_MODELS")
+        model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
+
+        active_models = [m for m in model_queue if m not in _EXHAUSTED_MODELS]
+        if not active_models:
+            log.warning("All Groq models exhausted. Falling back to Mistral.")
+            return call_ai("mistral", prompt)
+
+        log.info(f"Sending to Groq ({len(active_models)} models in queue)...")
+
+        last_err = None
+
+        for current_model in active_models:
+            for attempt in range(1, 4):
+                try:
+                    _maybe_wait_for_rate_limit(provider, current_model)
+                    log.info(f"   Trying {current_model} (attempt {attempt})...")
+
+                    kwargs = {
+                        "model": current_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+
+                    if temperature is not None:
+                        kwargs["temperature"] = temperature
+
+                    response = client.chat.completions.create(**kwargs)
+                    content = response.choices[0].message.content
+
+                    os.environ["_USED_MODEL"] = current_model
+                    _mark_rate_limited(provider, current_model)
+
+                    return content
+
+                except Exception as e:
+                    last_err = e
+                    status = getattr(e, "status_code", getattr(e, "code", 0))
+
+                    # Groq rate limit / overload handling
+                    if status in (429, 503) or "429" in str(e) or "503" in str(e):
+                        if attempt < 3:
+                            wait_time = 20 * attempt
+                            log.warning(f"   {current_model} {status} – waiting {wait_time}s...")
+                            time.sleep(wait_time)
+                        else:
+                            log.warning(f"   {current_model} failed ({status}) – marking as exhausted.")
+                            _EXHAUSTED_MODELS.add(current_model)
+                            break
+                    else:
+                        log.warning(f"   {current_model} failed ({status}): {e}")
+                        break
+
+        raise last_err
     
 def parse_plan(raw: str) -> AIPlan:
     clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -1244,25 +1457,10 @@ def parse_plan(raw: str) -> AIPlan:
             except Exception:
                 pass
             continue
-    log.error("❌ Could not parse AI response. Fallback to rest day.")
-    log.warning(f"Raw AI response (first 500 chars):\n{raw[:500]}")
-    try:
-        fallback_day = PlanDay(
-            date=date.today().isoformat(), title="Rest (AI error)",
-            intervals_type="Rest", duration_min=0, distance_km=0.0,
-            description="AI response could not be parsed. Re-run the script.",
-            nutrition="", workout_steps=[], strength_steps=[], slot="MAIN",
-        )
-        return AIPlan(
-            stress_audit="AI parsing failed.",
-            summary="⚠️ Could not parse AI response. Try again.",
-            yesterday_feedback="",
-            weekly_feedback="",
-            manual_workout_nutrition=[], days=[fallback_day],
-        )
-    except Exception as fallback_err:
-        log.error(f"❌ Fallback failed: {fallback_err}")
-        sys.exit(1)
+    preview = (raw or "")[:500]
+    log.error("❌ Could not parse AI response into AIPlan JSON.")
+    log.warning(f"Raw AI response (first 500 chars):\n{preview}")
+    raise ValueError("AI response could not be parsed into a valid AIPlan.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VISNING
@@ -1366,6 +1564,10 @@ def print_plan(plan, changes, mesocycle=None, trajectory=None,
         )
         if trace.review and trace.review.summary:
             print(f"  {trace.review.summary}")
+        if trace.validator_summary:
+            print(f"  Validator: {trace.validator_summary}")
+        if trace.validator_failures:
+            print(f"  Validation fails: {' | '.join(trace.validator_failures[:3])}")
         if trace.rationale:
             print(f"  Why selected: {trace.rationale}")
         if trace.review and trace.review.must_fix:

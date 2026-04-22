@@ -8,17 +8,15 @@ from training_plan.core.models import AIPlan, PairwiseDecision, PlanDecisionTrac
 from training_plan.engine.ai import call_ai, parse_plan
 from training_plan.engine.planning import classify_session_category
 from training_plan.engine.postprocess import estimate_tss_coggan
+from training_plan.engine.validation import (
+    build_validation_review,
+    build_validation_scores,
+    repair_postprocessed_plan,
+    validate_postprocessed_plan,
+)
 
 _KEY_PLAN_CATEGORIES = {"ftp_test", "long_ride", "threshold", "vo2"}
-_INTENSITY_BY_ZONE = {
-    "Z1": 0.55,
-    "Z2": 0.70,
-    "Z3": 0.83,
-    "Z4": 0.95,
-    "Z5": 1.05,
-    "Z6": 1.15,
-    "Z7": 1.25,
-}
+# ZONE_INTENSITY imported from training_plan.core.catalogs via common *-import
 _CANDIDATE_VARIATIONS = [
     {
         "label": "Candidate A",
@@ -62,8 +60,63 @@ _TSS_GAP_REVISION_MIN_MISSING = int(os.getenv("PLAN_TSS_GAP_REVISION_MIN_MISSING
 _TSS_GAP_REVISION_MIN_PCT = float(os.getenv("PLAN_TSS_GAP_REVISION_MIN_PCT", "0.90"))
 
 
+_DEBUG_AI = os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG"
+
+
+def _debug_ai_call(label: str, prompt: str, raw: str) -> None:
+    if not _DEBUG_AI:
+        return
+    preview_prompt = prompt[:3000] + ("\n...[truncated]" if len(prompt) > 3000 else "")
+    preview_raw = raw[:3000] + ("\n...[truncated]" if len(raw) > 3000 else "")
+    log.debug("---- %s PROMPT ----\n%s\n---- %s PROMPT END ----", label, preview_prompt, label)
+    log.debug("---- %s RESPONSE ----\n%s\n---- %s RESPONSE END ----", label, preview_raw, label)
+
+
+def classify_injury(provider: str, injury_text: str) -> dict | None:
+    """Classify a free-text injury description into a structured profile using AI.
+    Returns None on failure so callers can fall back to keyword matching."""
+    if not injury_text or injury_text.lower() in ("", "nej", "n", "inga", "no"):
+        return None
+    prompt = f"""You are a sports medicine triage assistant. Classify the athlete's injury description.
+
+Injury description: "{injury_text}"
+
+Return ONLY valid JSON with this exact schema:
+{{
+  "profile_key": "knee|hip|back|shoulder|calf_achilles|shin|generic",
+  "severity": "MILD|MODERATE|SEVERE",
+  "double_poling_safe": true,
+  "note": "one sentence — what body part, likely cause, and key restriction"
+}}
+
+Rules:
+- "knee" = knee pain of any kind
+- "hip" = hip, glute, or groin pain
+- "back" = spine, lower back, or neck
+- "shoulder" = shoulder, elbow, or wrist
+- "calf_achilles" = calf, achilles, or heel
+- "shin" = shin splints or anterior lower leg
+- "generic" = unclear or multiple areas
+- MILD = activity possible with adaptation | MODERATE = significant restriction | SEVERE = rest required
+- double_poling_safe = true if the injury does NOT involve the shoulder/arm/wrist"""
+
+    try:
+        raw = call_ai(provider, prompt, temperature=0.0)
+        _debug_ai_call("INJURY-CLASSIFY", prompt, raw or "")
+        payload = json.loads(raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip())
+        if payload.get("profile_key") in {"knee","hip","back","shoulder","calf_achilles","shin","generic"}:
+            log.info("⚕️ Injury classified: %s (%s) – %s",
+                     payload["profile_key"], payload.get("severity"), payload.get("note"))
+            return payload
+    except Exception as exc:
+        log.warning("Injury classification failed (%s) – falling back to keyword matching.", exc)
+    return None
+
+
 def generate_plan(provider: str, prompt: str, temperature: float | None = None) -> AIPlan:
-    return parse_plan(call_ai(provider, prompt, temperature=temperature))
+    raw = call_ai(provider, prompt, temperature=temperature)
+    _debug_ai_call("GENERATE", prompt, raw or "")
+    return parse_plan(raw)
 
 
 def _extract_json_payload(raw: str) -> dict:
@@ -130,7 +183,7 @@ def _weighted_plan_intensity(day: PlanDay) -> float | None:
 
     weighted = 0.0
     for step in day.workout_steps:
-        weighted += step.duration_min * _INTENSITY_BY_ZONE.get(step.zone.upper(), 0.70)
+        weighted += step.duration_min * ZONE_INTENSITY.get(step.zone.upper(), 0.70)
     return round(weighted / total, 2)
 
 
@@ -229,11 +282,12 @@ def _candidate_specs(candidate_count: int) -> list[dict]:
 
 def build_candidate_prompt(base_prompt: str, candidate_spec: dict, attempt: int, total_candidates: int) -> str:
     instructions = "\n".join(f"- {line}" for line in candidate_spec["instructions"])
+    round_label = "initial generation" if attempt == 1 else f"revision round {attempt}"
     return f"""
-YOU MUST CREATE {candidate_spec['label']} out of {total_candidates} in the selection for revision round {attempt}.
+ROLE: You are generating {candidate_spec['label']} of {total_candidates} competing candidates ({round_label}).
 
-The purpose is to give review/scoring multiple real alternatives to choose from.
-Therefore, create a meaningfully different candidate, not just small cosmetic changes.
+The candidates will be reviewed and scored independently. The best one wins.
+Therefore your plan must be genuinely distinct — not a cosmetic copy of another candidate.
 
 FOCUS FOR THIS CANDIDATE:
 {candidate_spec['focus']}
@@ -241,8 +295,8 @@ FOCUS FOR THIS CANDIDATE:
 
 REQUIREMENTS:
 - Keep exactly the same JSON schema as the brief requires.
-- Do not copy the same plan as the other candidates with just minor word swaps.
-- The difference must be visible in prioritization, simplicity, key sessions, or risk profile.
+- The difference from other candidates must be visible in session prioritization, volume distribution, intensity profile, or risk appetite.
+- Do not pad sessions or add filler just to meet TSS — extend real sessions instead.
 
 BRIEF:
 {base_prompt}
@@ -287,6 +341,11 @@ IMPORTANT:
 - NEVER use `must_fix` to warn about behaviors (e.g. "make sure this doesn't become a habit") or future concerns. A `must_fix` may ONLY point to a concrete, physiological error in the plan.
 - NEVER use `must_fix` for nutrition advice or vague power target personalization ("personalize based on physiology"). Power targets are only a `must_fix` if you can point to a specific session with concretely wrong watt values (e.g. "4×8min set to 280W but FTP is 230W"). Vague personalization advice belongs in `coaching_advice`.
 - If you have philosophical advice, warnings about the future, or minor feedback, put them in `coaching_advice` instead of `must_fix`.
+
+CALIBRATION — read this before you assign ratings:
+- CRITICAL is reserved for true structural violations: physiological impossibility, injury risk, direct contradiction of race goal, or a session that is concretely wrong TODAY. If you are tempted to use CRITICAL for a future session, a minor imbalance, or a preference, use WEAK instead.
+- A plan that is reasonable and mostly sound deserves overall_verdict PASS even if it is not perfect. REVISE is for plans with at least one genuine must-fix. REJECT is for plans that are fundamentally broken and must be discarded.
+- An empty must_fix list is a valid and encouraged outcome for a good plan.
 
 KONTEXT:
 {_compact_context(review_context)}
@@ -407,11 +466,9 @@ def review_plan(provider: str, plan: AIPlan, athlete: dict | None,
     )
     # Use filtered context to reduce token waste
     filtered_context = filter_review_context(review_context)
-    raw = call_ai(
-        provider,
-        build_review_prompt(plan, athlete, base_tss_by_date, filtered_context, postprocess_changes),
-        temperature=_REVIEW_TEMPERATURE,
-    )
+    review_prompt = build_review_prompt(plan, athlete, base_tss_by_date, filtered_context, postprocess_changes)
+    raw = call_ai(provider, review_prompt, temperature=_REVIEW_TEMPERATURE)
+    _debug_ai_call("REVIEW", review_prompt, raw or "")
     return _parse_structured_response(raw, PlanReview, fallback, "Plan-review")
 
 
@@ -427,22 +484,20 @@ def compare_plans(provider: str, current_plan: AIPlan, current_trace: PlanDecisi
     if not current_trace.review or not current_trace.scores:
         return fallback
 
-    raw = call_ai(
-        provider,
-        build_pairwise_prompt(
-            current_plan,
-            current_trace.review,
-            current_trace.scores,
-            candidate_plan,
-            candidate_review,
-            candidate_scores,
-            athlete,
-            base_tss_by_date,
-            review_context,
-            candidate_changes,
-        ),
-        temperature=_PAIRWISE_TEMPERATURE,
+    pairwise_prompt = build_pairwise_prompt(
+        current_plan,
+        current_trace.review,
+        current_trace.scores,
+        candidate_plan,
+        candidate_review,
+        candidate_scores,
+        athlete,
+        base_tss_by_date,
+        review_context,
+        candidate_changes,
     )
+    raw = call_ai(provider, pairwise_prompt, temperature=_PAIRWISE_TEMPERATURE)
+    _debug_ai_call("PAIRWISE", pairwise_prompt, raw or "")
     return _parse_structured_response(raw, PairwiseDecision, fallback, "Plan-pairwise")
 
 
@@ -514,8 +569,12 @@ def compute_scores_from_review(review: PlanReview) -> PlanScores:
 
 def decide_plan(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> tuple[str, str]:
     postprocess_changes = postprocess_changes or []
-    veto_triggers = ["HARD-EASY", "TAK v", "VOLYMSPÄRR", "STYRKEGRÄNS", "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET", "TSS-UNDERSKOTT VETO"]
-    vetos_found = [c for c in postprocess_changes if any(t in c for t in veto_triggers)]
+    veto_triggers = [
+        "HARD-EASY", "TAK V", "VOLYMSPÄRR", "VOLYMSPARR", "STYRKEGRÄNS",
+        "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET",
+        "TIME BUDGET", "TSS-UNDERSKOTT VETO", "TSS-DEFICIT VETO",
+    ]
+    vetos_found = [c for c in postprocess_changes if any(t in c.upper() for t in veto_triggers)]
 
     dimensions = [
         review.goal_alignment,
@@ -559,8 +618,8 @@ def decide_plan(review: PlanReview, scores: PlanScores, postprocess_changes: lis
         and scores.effectiveness >= 7
         and scores.specificity >= 7
         and scores.risk <= 5
-        and scores.simplicity >= 6
-        and scores.confidence >= 4
+        and scores.simplicity >= 5
+        and scores.confidence >= 3
         and not review.must_fix
         and critical_count == 0
         and weak_count <= 1
@@ -669,8 +728,12 @@ Return ONLY the exact same AIPlan JSON schema that the original prompt requires.
 
 def _candidate_rank(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> float:
     postprocess_changes = postprocess_changes or []
-    veto_triggers = ["HARD-EASY", "TAK v", "VOLYMSPÄRR", "STYRKEGRÄNS", "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET", "TSS-UNDERSKOTT VETO"]
-    vetos_found = sum(1 for c in postprocess_changes if any(t in c for t in veto_triggers))
+    veto_triggers = [
+        "HARD-EASY", "TAK V", "VOLYMSPÄRR", "VOLYMSPARR", "STYRKEGRÄNS",
+        "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET",
+        "TIME BUDGET", "TSS-UNDERSKOTT VETO", "TSS-DEFICIT VETO",
+    ]
+    vetos_found = sum(1 for c in postprocess_changes if any(t in c.upper() for t in veto_triggers))
     invalid_review_penalty = _INVALID_REVIEW_RANK_PENALTY if _is_invalid_review_fallback(review) else 0.0
 
     verdict_bonus = {"PASS": 2.0, "REVISE": 0.5, "REJECT": -2.0}
@@ -861,6 +924,85 @@ def _is_meaningful_improvement(previous_trace: PlanDecisionTrace | None, winner:
     return False
 
 
+def _apply_tss_gap_revision(
+    candidate_plan: AIPlan,
+    candidate_changes: list[str],
+    gen_provider: str,
+    generation_prompt: str,
+    postprocess_candidate: Callable[[AIPlan], tuple[AIPlan, list[str]]],
+    athlete: dict | None,
+    base_tss_by_date: dict[str, float],
+    tss_budget: float,
+    review_context: dict,
+    attempt: int,
+) -> tuple[AIPlan, list[str]]:
+    """Check whether the plan is significantly under the TSS budget and, if so,
+    issue a single focused AI revision to close the gap.
+
+    This is a named pipeline phase rather than an inlined inner loop so that:
+    - The extra AI call is visible in the call stack and logs.
+    - The phase can be disabled or tuned independently.
+    - The candidate generation loop stays readable.
+
+    Returns the (possibly revised) plan and updated changes list.
+    """
+    med = review_context.get("minimum_effective_dose") or {}
+    med_global = med.get("mode", "READY") == "ACTIVE" and med.get("scope", "NONE") == "GLOBAL"
+
+    planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
+    total_tss = planned_tss + sum(base_tss_by_date.values())
+
+    # Phase 1 — AI-driven gap fill (only when gap is large enough to matter)
+    if (
+        not med_global
+        and tss_budget > 0
+        and total_tss < tss_budget * _TSS_GAP_REVISION_MIN_PCT
+    ):
+        missing = round(tss_budget - total_tss)
+        if missing >= _TSS_GAP_REVISION_MIN_MISSING:
+            log.info(
+                "   [TSS-GAP] Candidate is %s TSS under budget (%s/%s) — "
+                "issuing load-balancing revision...",
+                missing,
+                round(total_tss),
+                round(tss_budget),
+            )
+            tss_gap_prompt = build_tss_gap_revision_prompt(
+                generation_prompt,
+                candidate_plan,
+                missing,
+                total_tss,
+                tss_budget,
+                candidate_changes,
+                attempt,
+            )
+            candidate_plan = generate_plan(
+                gen_provider,
+                tss_gap_prompt,
+                temperature=_REVISION_GENERATION_TEMPERATURE,
+            )
+            candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
+            planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
+            total_tss = planned_tss + sum(base_tss_by_date.values())
+
+    # Phase 2 — annotate remaining deficit so the reviewer can see it
+    if tss_budget > 0 and total_tss < tss_budget * 0.85:
+        missing = round(tss_budget - total_tss)
+        if med_global:
+            candidate_changes.append(
+                f"TSS-INFO: Plan gives {round(total_tss)} TSS (budget {round(tss_budget)}). "
+                f"Approved due to low form (MED=ACTIVE), but do not reduce further."
+            )
+        else:
+            candidate_changes.append(
+                f"TSS-DEFICIT VETO: Plan only reaches {round(total_tss)} TSS "
+                f"(budget {round(tss_budget)}). You are missing {missing} TSS. "
+                f"Extend endurance sessions or add aerobic volume!"
+            )
+
+    return candidate_plan, candidate_changes
+
+
 def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt: str,
                       postprocess_candidate: Callable[[AIPlan], tuple[AIPlan, list[str]]],
                       athlete: dict | None, base_tss_by_date: dict[str, float],
@@ -910,6 +1052,9 @@ def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt
             round_candidate_specs = candidate_specs[:1]
 
         round_results = []
+        round_best_plan: AIPlan | None = None
+        round_best_trace: PlanDecisionTrace | None = None
+        round_best_rank: float = float("-inf")
         for candidate_spec in round_candidate_specs:
             candidate_prompt = build_candidate_prompt(
                 round_base_prompt,
@@ -917,116 +1062,168 @@ def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt
                 attempt,
                 len(round_candidate_specs),
             )
-            candidate_plan = generate_plan(
-                gen_provider,
-                candidate_prompt,
-                temperature=generation_temperature,
-            )
-            candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
-
-            med_mode = review_context.get("minimum_effective_dose", {}).get("mode", "READY")
-            planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
-            total_tss = planned_tss + sum(base_tss_by_date.values())
-
-            if (
-                med_mode != "ACTIVE"
-                and tss_budget > 0
-                and total_tss < tss_budget * _TSS_GAP_REVISION_MIN_PCT
-            ):
-                missing = round(tss_budget - total_tss)
-                if missing >= _TSS_GAP_REVISION_MIN_MISSING:
-                    log.info(
-                        "   TSS-gap revision: candidate is %s TSS under budget (%s/%s). Asking AI to rebalance load...",
-                        missing,
-                        round(total_tss),
-                        round(tss_budget),
-                    )
-                    tss_gap_prompt = build_tss_gap_revision_prompt(
-                        generation_prompt,
-                        candidate_plan,
-                        missing,
-                        total_tss,
-                        tss_budget,
-                        candidate_changes,
-                        attempt,
-                    )
-                    candidate_plan = generate_plan(
-                        gen_provider,
-                        tss_gap_prompt,
-                        temperature=_REVISION_GENERATION_TEMPERATURE,
-                    )
-                    candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
-                    planned_tss = sum(estimate_tss_coggan(d, athlete) for d in candidate_plan.days) if athlete else 0
-                    total_tss = planned_tss + sum(base_tss_by_date.values())
-
-            if tss_budget > 0 and total_tss < tss_budget * 0.85:
-                missing = round(tss_budget - total_tss)
-                if med_mode == "ACTIVE":
-                    candidate_changes.append(f"TSS-INFO: Plan gives {round(total_tss)} TSS (budget {round(tss_budget)}). Approved due to low form (MED=ACTIVE), but do not reduce further.")
-                else:
-                    candidate_changes.append(f"TSS-DEFICIT VETO: Plan only reaches {round(total_tss)} TSS (budget {round(tss_budget)}). You are missing {missing} TSS. Extend endurance sessions or add aerobic volume!")
-
-            review = review_plan(
-                review_provider,
-                candidate_plan,
-                athlete,
-                base_tss_by_date,
-                review_context,
-                candidate_changes,
-            )
-            # Use deterministic scoring instead of AI call (saves 33% of API calls)
-            scores = compute_scores_from_review(review)
-            action, rationale = decide_plan(review, scores, candidate_changes)
-            rank = _candidate_rank(review, scores, candidate_changes)
-            pairwise = None
-            if (
-                current_plan
-                and _should_run_pairwise(previous_best_trace, scores, review, candidate_changes)
-            ):
-                pairwise = compare_plans(
-                    review_provider,
-                    current_plan,
-                    previous_best_trace,
+            try:
+                candidate_plan = generate_plan(
+                    gen_provider,
+                    candidate_prompt,
+                    temperature=generation_temperature,
+                )
+                candidate_plan, candidate_changes = postprocess_candidate(candidate_plan)
+                candidate_plan, candidate_changes = _apply_tss_gap_revision(
                     candidate_plan,
-                    review,
-                    scores,
+                    candidate_changes,
+                    gen_provider,
+                    generation_prompt,
+                    postprocess_candidate,
                     athlete,
                     base_tss_by_date,
+                    tss_budget,
                     review_context,
-                    candidate_changes,
+                    attempt,
                 )
-                rank += _pairwise_rank_adjustment(pairwise)
-            round_results.append({
-                "label": candidate_spec["label"],
-                "focus": candidate_spec["focus"],
-                "plan": candidate_plan,
-                "changes": list(candidate_changes),
-                "review": review,
-                "scores": scores,
-                "action": action,
-                "rationale": rationale,
-                "rank": rank,
-                "pairwise": pairwise,
-            })
-            candidate_reason = _candidate_change_reason(previous_best_trace, round_results[-1])
-            log.info(
-                "🧪 %s -> %s | Effect %s/10 | Risk %s/10 | Spec %s/10 | Simplicity %s/10 | Confidence %s/10",
-                candidate_spec["label"],
-                action,
-                scores.effectiveness,
-                scores.risk,
-                scores.specificity,
-                scores.simplicity,
-                scores.confidence,
-            )
-            log.info("   Δ %s", _score_delta_text(previous_best_trace.scores if previous_best_trace else None, scores))
-            log.info("   Why: %s", candidate_reason)
-            if pairwise:
-                log.info("   Pairwise: %s", _pairwise_reason_text(pairwise))
+
+                validation = validate_postprocessed_plan(
+                    candidate_plan,
+                    athlete=athlete,
+                    base_tss_by_date=base_tss_by_date,
+                    tss_budget=tss_budget,
+                    review_context=review_context,
+                    postprocess_changes=candidate_changes,
+                )
+                if validation.hard_failures or validation.warnings:
+                    repaired_plan, repair_actions = repair_postprocessed_plan(
+                        candidate_plan,
+                        review_context=review_context,
+                        validation=validation,
+                    )
+                    if repair_actions:
+                        candidate_plan = repaired_plan
+                        candidate_changes.extend(repair_actions)
+                        validation = validate_postprocessed_plan(
+                            candidate_plan,
+                            athlete=athlete,
+                            base_tss_by_date=base_tss_by_date,
+                            tss_budget=tss_budget,
+                            review_context=review_context,
+                            postprocess_changes=candidate_changes,
+                        )
+                if validation.passed:
+                    review = review_plan(
+                        review_provider,
+                        candidate_plan,
+                        athlete,
+                        base_tss_by_date,
+                        review_context,
+                        candidate_changes,
+                    )
+                    # Use deterministic scoring instead of AI call (saves 33% of API calls)
+                    scores = compute_scores_from_review(review)
+                    action, rationale = decide_plan(review, scores, candidate_changes)
+                else:
+                    review = build_validation_review(validation)
+                    scores = build_validation_scores(validation)
+                    action = "REJECT"
+                    rationale = validation.summary
+
+                rank = _candidate_rank(review, scores, candidate_changes)
+                pairwise = None
+                # Pairwise reference: within round 1 compare against the best candidate so far in this
+                # round; in revision rounds compare against the carried-over best from previous rounds.
+                pairwise_ref_plan = round_best_plan or current_plan
+                pairwise_ref_trace = round_best_trace or previous_best_trace
+                if (
+                    validation.passed
+                    and pairwise_ref_plan
+                    and _should_run_pairwise(pairwise_ref_trace, scores, review, candidate_changes)
+                ):
+                    pairwise = compare_plans(
+                        review_provider,
+                        pairwise_ref_plan,
+                        pairwise_ref_trace,
+                        candidate_plan,
+                        review,
+                        scores,
+                        athlete,
+                        base_tss_by_date,
+                        review_context,
+                        candidate_changes,
+                    )
+                    rank += _pairwise_rank_adjustment(pairwise)
+                if rank > round_best_rank:
+                    round_best_rank = rank
+                    round_best_plan = candidate_plan
+                    round_best_trace = PlanDecisionTrace(
+                        action=action,
+                        rationale=rationale,
+                        iterations_run=attempt,
+                        used_with_override=False,
+                        selected_candidate=candidate_spec["label"],
+                        validator_summary=validation.summary,
+                        validator_failures=list(validation.hard_failures),
+                        validator_warnings=list(validation.warnings),
+                        review=review,
+                        scores=scores,
+                    )
+                round_results.append({
+                    "label": candidate_spec["label"],
+                    "focus": candidate_spec["focus"],
+                    "plan": candidate_plan,
+                    "changes": list(candidate_changes),
+                    "review": review,
+                    "scores": scores,
+                    "action": action,
+                    "rationale": rationale,
+                    "rank": rank,
+                    "pairwise": pairwise,
+                    "validation": validation,
+                })
+                candidate_reason = _candidate_change_reason(previous_best_trace, round_results[-1])
+                log.info(
+                    "🧪 %s -> %s | Effect %s/10 | Risk %s/10 | Spec %s/10 | Simplicity %s/10 | Confidence %s/10",
+                    candidate_spec["label"],
+                    action,
+                    scores.effectiveness,
+                    scores.risk,
+                    scores.specificity,
+                    scores.simplicity,
+                    scores.confidence,
+                )
+                log.info("   Δ %s", _score_delta_text(previous_best_trace.scores if previous_best_trace else None, scores))
+                log.info("   Why: %s", candidate_reason)
+                if validation.hard_failures:
+                    log.info("   Validator: %s", validation.summary)
+                    for item in validation.hard_failures[:3]:
+                        log.info("   Validation fail: %s", item)
+                elif validation.warnings:
+                    log.info("   Validator: %s", validation.summary)
+                    for item in validation.warnings[:2]:
+                        log.info("   Validation warning: %s", item)
+                repair_lines = [item for item in candidate_changes if item.startswith("AUTO-REPAIR:")]
+                if repair_lines:
+                    for item in repair_lines[:4]:
+                        log.info("   %s", item)
+                if pairwise:
+                    log.info("   Pairwise: %s", _pairwise_reason_text(pairwise))
+            except Exception as exc:
+                log.warning("   %s skipped after generation/review failure: %s", candidate_spec["label"], exc)
+                continue
+
+        if not round_results:
+            if best_candidate is not None:
+                log.warning("⚠️ Round %s produced no usable candidates. Keeping previous best candidate.", attempt)
+                break
+            raise RuntimeError("No valid plan candidates could be generated or parsed.")
 
         round_summary = [
             _candidate_round_line(
                 result["label"], result["action"], result["scores"], result["review"], result["focus"]
+            ) + (
+                f" | Validator FAIL ({len(result['validation'].hard_failures)})"
+                if result["validation"].hard_failures else
+                (
+                    f" | Validator WARN ({len(result['validation'].warnings)})"
+                    if result["validation"].warnings else ""
+                )
             ) + (
                 f" | {_pairwise_reason_text(result['pairwise'])}"
                 if result.get("pairwise") else ""
@@ -1059,6 +1256,9 @@ def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt
             selected_candidate=winner["label"],
             historical_validation_summary=review_context.get("historical_validation_summary", ""),
             outcome_tracking_summary=review_context.get("outcome_tracking_summary", ""),
+            validator_summary=winner["validation"].summary,
+            validator_failures=list(winner["validation"].hard_failures),
+            validator_warnings=list(winner["validation"].warnings),
             review=winner["review"],
             scores=winner["scores"],
             candidate_pool_summary=round_summary,
@@ -1101,6 +1301,9 @@ def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt
 
     assert best_candidate is not None
     best_plan, best_changes, best_trace, _ = best_candidate
+    if best_trace.validator_failures:
+        log.error("❌ No candidate passed deterministic validation. Refusing override write path.")
+        raise RuntimeError("No candidate passed deterministic validation.")
     best_trace = best_trace.model_copy(update={
         "used_with_override": True,
         "revision_history": list(revision_history) + [
@@ -1151,6 +1354,9 @@ def record_plan_decision(state: dict, plan: AIPlan, trace: PlanDecisionTrace,
         "target_event": (race_demands or {}).get("target_name", ""),
         "review": trace.review.model_dump(exclude_none=True) if trace.review else {},
         "scores": trace.scores.model_dump(exclude_none=True) if trace.scores else {},
+        "validator_summary": trace.validator_summary,
+        "validator_failures": list(trace.validator_failures),
+        "validator_warnings": list(trace.validator_warnings),
         "rationale": trace.rationale,
         "summary": plan.summary,
     }

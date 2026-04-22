@@ -1,0 +1,8 @@
+{
+  "_comment": "Sanitized athlete profile for regression tests. FTP values are representative, not real.",
+  "id": "TEST_CYCLIST_001",
+  "sportSettings": [
+    {"types": ["Ride", "VirtualRide"], "ftp": 260},
+    {"types": ["Run"], "ftp": 350}
+  ]
+}

@@ -20,6 +20,7 @@ except ImportError:
 load_dotenv()
 
 from training_plan.core.catalogs import (  # noqa: E402
+    ALL_SPORTS_CATALOG,
     CONSTRAINT_PREFIXES,
     EMOJIS,
     INTENSE,
@@ -27,9 +28,13 @@ from training_plan.core.catalogs import (  # noqa: E402
     SPORT_NAME_MAP,
     SPORTS,
     VALID_TYPES,
+    VALID_ZONES,
     WARMUP_BY_SPORT,
     WARMUP_DEFAULT,
     YR_CODES,
+    ZONE_CANONICAL,
+    ZONE_INTENSITY,
+    ZONE_ORDER,
 )
 from training_plan.core.config import (  # noqa: E402
     AI_TAG,
@@ -49,7 +54,7 @@ from training_plan.core.config import (  # noqa: E402
     TARGET_CTL,
     get_used_model,
 )
-from training_plan.core.models import AIPlan, PlanDay, WorkoutStep  # noqa: E402
+from training_plan.core.models import AIPlan, PlanDay, StrengthStep, WorkoutStep  # noqa: E402
 
 logging.basicConfig(
     level=logging.DEBUG if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG" else logging.INFO,

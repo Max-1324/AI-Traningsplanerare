@@ -10,6 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache/restore@v4
+        with:
+          path: .coach_state.json
+          key: coach-state-${{ github.run_id }}
+          restore-keys: |
+            coach-state-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -26,3 +32,8 @@ jobs:
           ATHLETE_LON: ${{ secrets.ATHLETE_LON }}
           ATHLETE_LOCATION: ${{ secrets.ATHLETE_LOCATION }}
           CONTACT_EMAIL: ${{ secrets.CONTACT_EMAIL }}
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('.coach_state.json') != ''
+        with:
+          path: .coach_state.json
+          key: coach-state-${{ github.run_id }}

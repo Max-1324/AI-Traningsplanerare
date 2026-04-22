@@ -158,6 +158,9 @@ class PlanDecisionTrace(BaseModel):
     selected_candidate: str = ""
     historical_validation_summary: str = ""
     outcome_tracking_summary: str = ""
+    validator_summary: str = ""
+    validator_failures: list[str] = Field(default_factory=list)
+    validator_warnings: list[str] = Field(default_factory=list)
     review: Optional[PlanReview] = None
     scores: Optional[PlanScores] = None
     candidate_pool_summary: list[str] = Field(default_factory=list)
@@ -180,7 +183,9 @@ class PlanDay(BaseModel):
     @field_validator("intervals_type")
     @classmethod
     def valid_sport(cls, value: str) -> str:
-        return value if value in VALID_TYPES else "Rest"
+        if value not in VALID_TYPES:
+            raise ValueError(f"Unsupported intervals_type: {value}")
+        return value
 
     @field_validator("date")
     @classmethod
@@ -235,3 +240,45 @@ class AIPlan(BaseModel):
     manual_workout_nutrition: list[ManualNutrition] = Field(default_factory=list)
     days: list[PlanDay]
     decision_trace: Optional[PlanDecisionTrace] = None
+
+
+class PlanValidationResult(BaseModel):
+    passed: bool = True
+    summary: str = ""
+    hard_failures: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+# ── Persistent state schema ───────────────────────────────────────────────────
+
+class FailureMemoryItem(BaseModel):
+    score: float = 0.0
+    count: int = 0
+    last_seen: str = ""
+    example: str = ""
+    label: str = ""
+
+
+class FailureMemoryBucket(BaseModel):
+    patterns: dict[str, FailureMemoryItem] = Field(default_factory=dict)
+    last_updated: str = ""
+
+
+class AppState(BaseModel):
+    """Typed schema for the persistent JSON state file.
+
+    load_state() validates raw JSON against this model so that every key
+    has an explicit default. Callers still receive a plain dict (via
+    model_dump()) so existing dict-access patterns throughout the codebase
+    are unchanged.
+    """
+    mesocycle_block: int = 1
+    mesocycle_week: int = 1
+    mesocycle_last_update: str = ""
+    workout_levels: dict[str, int] = Field(default_factory=dict)
+    failure_memory: dict = Field(default_factory=dict)
+    learned_patterns: dict = Field(default_factory=dict)
+    minimum_effective_dose_state: dict = Field(default_factory=dict)
+    planner_insights: dict = Field(default_factory=dict)
+
+    model_config = {"extra": "allow"}  # preserve unknown keys from old state files
