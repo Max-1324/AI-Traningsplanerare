@@ -58,7 +58,12 @@ _INVALID_REVIEW_COMPETITIVE_MARGIN = float(os.getenv("PLAN_INVALID_REVIEW_COMPET
 _DEBUG_PARSE_FAILURES = os.getenv("PLAN_DEBUG_PARSE_FAILURES", "").strip().lower() in {"1", "true", "yes", "on"}
 _TSS_GAP_REVISION_MIN_MISSING = int(os.getenv("PLAN_TSS_GAP_REVISION_MIN_MISSING", "120"))
 _TSS_GAP_REVISION_MIN_PCT = float(os.getenv("PLAN_TSS_GAP_REVISION_MIN_PCT", "0.90"))
-_TSS_DEFICIT_VETO_PCT = 0.85
+_TSS_DEFICIT_VETO_PCT = float(os.getenv("PLAN_TSS_DEFICIT_VETO_PCT", "0.85"))
+_VETO_TRIGGERS = [
+    "HARD-EASY", "TAK V", "VOLYMSPÄRR", "VOLYMSPARR", "STYRKEGRÄNS",
+    "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET",
+    "TIME BUDGET", "TSS-UNDERSKOTT VETO", "TSS-DEFICIT VETO",
+]
 
 
 _DEBUG_AI = os.getenv("LOG_LEVEL", "INFO").upper() == "DEBUG"
@@ -570,12 +575,7 @@ def compute_scores_from_review(review: PlanReview) -> PlanScores:
 
 def decide_plan(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> tuple[str, str]:
     postprocess_changes = postprocess_changes or []
-    veto_triggers = [
-        "HARD-EASY", "TAK V", "VOLYMSPÄRR", "VOLYMSPARR", "STYRKEGRÄNS",
-        "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET",
-        "TIME BUDGET", "TSS-UNDERSKOTT VETO", "TSS-DEFICIT VETO",
-    ]
-    vetos_found = [c for c in postprocess_changes if any(t in c.upper() for t in veto_triggers)]
+    vetos_found = [c for c in postprocess_changes if any(t in c.upper() for t in _VETO_TRIGGERS)]
 
     dimensions = [
         review.goal_alignment,
@@ -729,12 +729,7 @@ Return ONLY the exact same AIPlan JSON schema that the original prompt requires.
 
 def _candidate_rank(review: PlanReview, scores: PlanScores, postprocess_changes: list[str] = None) -> float:
     postprocess_changes = postprocess_changes or []
-    veto_triggers = [
-        "HARD-EASY", "TAK V", "VOLYMSPÄRR", "VOLYMSPARR", "STYRKEGRÄNS",
-        "RULLSKIDSGRÄNS", "ACWR-VETO", "HRV-VETO", "TIDSBUDGET",
-        "TIME BUDGET", "TSS-UNDERSKOTT VETO", "TSS-DEFICIT VETO",
-    ]
-    vetos_found = sum(1 for c in postprocess_changes if any(t in c.upper() for t in veto_triggers))
+    vetos_found = sum(1 for c in postprocess_changes if any(t in c.upper() for t in _VETO_TRIGGERS))
     invalid_review_penalty = _INVALID_REVIEW_RANK_PENALTY if _is_invalid_review_fallback(review) else 0.0
 
     verdict_bonus = {"PASS": 2.0, "REVISE": 0.5, "REJECT": -2.0}

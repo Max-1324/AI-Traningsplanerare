@@ -15,6 +15,8 @@ TARGET_CTL = int(os.getenv("TARGET_CTL", "85"))
 AI_TAG = "ai-generated"
 NUTRITION_TAG = "Nutritionsrad (AI):"
 REPORT_TAG = "veckorapport-ai"
+PLANNER_COMMENT_START = "[AI_MORNING]"
+PLANNER_COMMENT_END = "[/AI_MORNING]"
 STATE_FILE = Path(".coach_state.json")
 CACHE_FILE = Path(".weather_cache.json")
 

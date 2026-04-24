@@ -148,6 +148,7 @@ EMOJIS = {
     "Ride": "🚴",
     "VirtualRide": "🖥️",
     "Run": "🏃",
+    "Swim": "🏊",
     "WeightTraining": "💪",
     "Rest": "😴",
 }

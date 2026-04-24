@@ -6,10 +6,6 @@ from training_plan.engine.planning import *
 from training_plan.engine.analysis import *
 from training_plan.engine.skeleton import format_skeleton_for_prompt
 from training_plan.engine.utils import strip_planner_comment_block, read_wellness_score
-from groq import Groq
-
-PLANNER_COMMENT_START = "[AI_MORNING]"
-PLANNER_COMMENT_END = "[/AI_MORNING]"
 
 
 def sanitize(text, max_len=300):
@@ -153,63 +149,6 @@ def _read_wellness_injury(today_wellness):
             return None
         return f"Wellness injury score {score}/4"
     return None
-
-def _legacy_morning_questions_unused(auto, today_wellness, yesterday_planned, yesterday_actuals):
-    raw_comments = (today_wellness or {}).get("comments", "")
-    structured_comments = _parse_planner_comment_block(raw_comments)
-    free_comments = strip_planner_comment_block(raw_comments)
-    comment_time = _extract_time_available_from_comments(free_comments)
-    structured_time = _normalize_time_available(
-        structured_comments.get("time_available") or structured_comments.get("time") or ""
-    )
-    existing_time = structured_time if comment_time is None else comment_time
-    existing_stress = read_wellness_score(today_wellness, ("stress", "Stress"), default=1)
-    existing_injury = (
-        structured_comments.get("injury")
-        or structured_comments.get("injury_today")
-        or _read_wellness_injury(today_wellness)
-    )
-    existing_note = structured_comments.get("athlete_note") or structured_comments.get("note") or ""
-    notes = []
-    clean_free_comments = sanitize(free_comments, 250)
-    if clean_free_comments:
-        notes.append(clean_free_comments)
-    if existing_note and existing_note not in notes:
-        notes.append(existing_note)
-    answers = {
-        "life_stress": existing_stress,
-        "injury_today": existing_injury,
-        "athlete_note": " | ".join(notes),
-        "time_available": existing_time or "",
-    }
-    if auto:
-        if yesterday_planned and is_ai_generated(yesterday_planned):
-            answers["yesterday_completed"] = len(yesterday_actuals) > 0 if yesterday_actuals else False
-        return answers
-    print("\n" + "-"*50 + "\n  MORGONCHECK\n" + "-"*50)
-    if yesterday_planned and is_ai_generated(yesterday_planned):
-        name = yesterday_planned.get("name","träning")
-        if yesterday_actuals:
-            a = yesterday_actuals[0]
-            dur = round((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
-            print(f"\nIgår: {name} | Genomfört: {a.get('type','?')}, {dur}min, TSS {a.get('icu_training_load','?')}")
-            q = input("Hur kändes det? (bra/okej/tungt/för lätt) [bra]: ").strip() or "bra"
-            answers["yesterday_feeling"] = sanitize(q, 50); answers["yesterday_completed"] = True
-        else:
-            print(f"\nIgår planerat: {name} - ingen aktivitet hittades.")
-            r = input("Varför? (sjuk/trött/tidsbrist/annat): ").strip()
-            answers["yesterday_missed_reason"] = sanitize(r, 100); answers["yesterday_completed"] = False
-    t = input("\nTid för träning idag? [1h]: ").strip() or "1h"
-    answers["time_available"] = sanitize(t, 20)
-    s = input("Livsstress (1-5) [1]: ").strip()
-    try: answers["life_stress"] = max(1, min(5, int(s)))
-    except: pass
-    inj = input("Besvär/smärtor? (nej/beskriv) [nej]: ").strip()
-    if inj.lower() not in ("","nej","n"): answers["injury_today"] = sanitize(inj, 150)
-    note = input("Övrig anteckning till coachen (valfritt): ").strip()
-    answers["athlete_note"] = sanitize(note, 200)
-    print("-"*50)
-    return answers
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROMPT
@@ -1343,6 +1282,7 @@ def call_ai(provider, prompt, temperature: float | None = None):
 
         return response
     elif provider == "groq":
+        from groq import Groq
 
         key = os.getenv("GROQ_API_KEY", "")
         if not key:

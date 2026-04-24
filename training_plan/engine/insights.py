@@ -72,7 +72,7 @@ def build_capacity_map(activities: list[dict],
     threshold_score = _clamp(
         threshold_data.get("avg_score", 52)
         + min(threshold_data.get("count", 0), 3) * 5
-        - (12 if any("Tröskel-gap" in gap or "Tröskel-gap" in gap for gap in race_demands.get("gaps", [])) else 0)
+        - (12 if any("Threshold gap" in gap or "Tröskel-gap" in gap for gap in race_demands.get("gaps", [])) else 0)
     )
     vo2_score = _clamp(
         vo2_data.get("avg_score", 50)

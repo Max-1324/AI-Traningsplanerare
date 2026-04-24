@@ -48,6 +48,8 @@ from training_plan.core.config import (  # noqa: E402
     LOCATION,
     LON,
     NUTRITION_TAG,
+    PLANNER_COMMENT_END,
+    PLANNER_COMMENT_START,
     REPORT_TAG,
     RISK,
     STATE_FILE,

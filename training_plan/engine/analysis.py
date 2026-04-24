@@ -486,7 +486,8 @@ def sport_volumes(activities):
             if datetime.strptime(a["start_date_local"][:10], "%Y-%m-%d") >= cutoff:
                 t = a.get("type","Other")
                 vols[t] = vols.get(t,0) + ((a.get("moving_time") or a.get("elapsed_time") or 0)/60)
-        except: continue
+        except (ValueError, TypeError, KeyError):
+            continue
     return vols
 
 _MIN_SPORT_BUDGET: dict[str, int] = {

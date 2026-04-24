@@ -4,9 +4,10 @@ import os
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--provider", "-p", choices=["openai", "anthropic", "gemini", "ollama"], default=os.getenv("AI_PROVIDER", "gemini"))
-    parser.add_argument("--provider-gen", dest="provider_gen", choices=["openai", "anthropic", "gemini", "ollama"], default=os.getenv("AI_PROVIDER_gen_revision"), help="Provider for plan generation and revision (overrides --provider)")
-    parser.add_argument("--provider-review", dest="provider_review", choices=["openai", "anthropic", "gemini", "ollama"], default=os.getenv("AI_PROVIDER_review"), help="Provider for plan review (overrides --provider)")
+    _PROVIDERS = ["openai", "anthropic", "gemini", "ollama", "groq", "mistral"]
+    parser.add_argument("--provider", "-p", choices=_PROVIDERS, default=os.getenv("AI_PROVIDER", "gemini"))
+    parser.add_argument("--provider-gen", dest="provider_gen", choices=_PROVIDERS, default=os.getenv("AI_PROVIDER_gen_revision"), help="Provider for plan generation and revision (overrides --provider)")
+    parser.add_argument("--provider-review", dest="provider_review", choices=_PROVIDERS, default=os.getenv("AI_PROVIDER_review"), help="Provider for plan review (overrides --provider)")
     parser.add_argument("--days-history", type=int, default=60)
     parser.add_argument("--horizon", type=int, default=28)
     parser.add_argument("--auto", action="store_true")
