@@ -1,12 +1,11 @@
+from collections import Counter
+
 from training_plan.core.common import *
 from training_plan.engine.analysis import *
 from training_plan.engine.planning import *
 from training_plan.engine.postprocess import estimate_tss_coggan
 from training_plan.engine.ai import sanitize
 from training_plan.engine.utils import strip_planner_comment_block, read_wellness_score
-
-PLANNER_COMMENT_START = "[AI_MORNING]"
-PLANNER_COMMENT_END = "[/AI_MORNING]"
 
 
 
@@ -840,7 +839,6 @@ def fetch_weather(days):
             am_rain = round(sum(am_precip), 1) if am_precip else 0
             am_codes = day_data.get("am_codes", [])
             if am_codes:
-                from collections import Counter
                 am_code = Counter(am_codes).most_common(1)[0][0]
             else:
                 am_code = "unknown"
@@ -854,7 +852,6 @@ def fetch_weather(days):
             pm_rain = round(sum(pm_precip), 1) if pm_precip else 0
             pm_codes = day_data.get("pm_codes", [])
             if pm_codes:
-                from collections import Counter
                 pm_code = Counter(pm_codes).most_common(1)[0][0]
             else: 
                 pm_code = "unknown"
