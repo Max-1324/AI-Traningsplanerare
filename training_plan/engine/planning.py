@@ -14,15 +14,18 @@ def load_state() -> dict:
     if STATE_FILE.exists():
         try:
             raw = json.loads(STATE_FILE.read_text())
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Could not load state file %s: %s. Using defaults.", STATE_FILE, exc)
     try:
         return AppState.model_validate(raw).model_dump()
-    except Exception:
+    except Exception as exc:
+        log.warning("State file %s did not match schema: %s. Using defaults.", STATE_FILE, exc)
         return AppState().model_dump()
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    tmp_state = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    tmp_state.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    tmp_state.replace(STATE_FILE)
 
 
 _FAILURE_MEMORY_LIMIT = 8
@@ -611,7 +614,6 @@ def coach_confidence_analysis(data_quality: dict, activities: list, wellness: li
         advice = "Data looks robust - the coach can be offensive within safe boundaries."
     elif score >= 65:
         level = "MEDIUM"
-        level = "LOW"
         advice = "Sufficient data quality - good for coaching but some decisions should be pragmatic."
     else:
         level = "LOW"

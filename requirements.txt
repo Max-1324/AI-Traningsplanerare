@@ -15,6 +15,9 @@ groq>=0.4.0
 # Schema-validering av AI-svar
 pydantic>=2.0.0
 
+# Tester
+pytest>=8.0.0
+
 # Kompatibilitet för äldre Python-versioner (< 3.9)
 backports.zoneinfo; python_version < "3.9"
  

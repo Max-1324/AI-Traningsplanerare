@@ -536,10 +536,17 @@ def fetch_races(days_ahead=180):
 
 def get_taper_config(races: list, today: date) -> dict:
     """Hittar nästa tävling och bestämmer taper-längd baserat på prioritet i namnet (A/B/C)."""
-    future_races = sorted([
-        r for r in races
-        if datetime.strptime(r.get("start_date_local", "2099-01-01")[:10], "%Y-%m-%d").date() >= today
-    ], key=lambda r: r.get("start_date_local", ""))
+    future_races = []
+    for race in races:
+        start_date = (race.get("start_date_local") or "")[:10]
+        try:
+            race_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        except ValueError:
+            log.warning("Skipping race with invalid start_date_local: %s", race.get("start_date_local"))
+            continue
+        if race_date >= today:
+            future_races.append(race)
+    future_races.sort(key=lambda r: r.get("start_date_local", ""))
     if not future_races:
         return {"race": None, "taper_days": 14, "race_date": None}
     next_race = future_races[0]
@@ -876,13 +883,19 @@ def fetch_weather(days):
                 "weathercode": pm_code,
                 "rain_mm": total_rain,
             })
-        CACHE_FILE.write_text(json.dumps({"fetched": date.today().isoformat(), "data": result}))
+        cache_payload = json.dumps({"fetched": date.today().isoformat(), "data": result})
+        tmp_cache = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+        tmp_cache.write_text(cache_payload)
+        tmp_cache.replace(CACHE_FILE)
         return result
     except Exception as e:
         log.warning(f"Weather API (Yr) failed: {e}. Trying cache...")
         if CACHE_FILE.exists():
-            cached = json.loads(CACHE_FILE.read_text())
-            log.info(f"Using weather cache from {cached.get('fetched','?')}")
-            return cached.get("data", [])
+            try:
+                cached = json.loads(CACHE_FILE.read_text())
+                log.info(f"Using weather cache from {cached.get('fetched','?')}")
+                return cached.get("data", [])
+            except Exception as cache_error:
+                log.warning(f"Weather cache could not be read: {cache_error}")
         log.warning("No weather cache. Continuing without weather data.")
         return []

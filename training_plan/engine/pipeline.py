@@ -38,11 +38,11 @@ _CANDIDATE_VARIATIONS = [
     },
     {
         "label": "Candidate C",
-        "focus": "Aggressive race-specific preparation",
+        "focus": "Race-specific preparation",
         "instructions": [
-            "Prioritize race demands 3X heavier than block objective.",
-            "Cluster high-intensity sessions closer to race date; vary intensities (Z3→Z4→Z5).",
-            "Accept higher risk if TSS and specificity targets are met.",
+            "Weight race demands more heavily than the block objective when they conflict.",
+            "Use race-specific intensity distribution while respecting all safety rules and vetoes.",
+            "Keep risk acceptable; do not trade safety for TSS or specificity.",
         ],
     },
 ]
@@ -316,7 +316,7 @@ def build_review_prompt(plan: AIPlan, athlete: dict | None, base_tss_by_date: di
     return f"""
 ROLE: You are an independent and skeptical review coach for endurance planning.
 You did NOT create the plan below. Your task is to find errors, blind spots, unnecessary complexity, and overconfidence.
-Be especially vigilant of plans that optimize the wrong thing, hide filler sessions, or are safe despite weak data.
+Be especially vigilant of plans that optimize the wrong thing, hide filler sessions, or appear overconfident despite weak data.
 
 EVALUATE THE PLAN BASED ON:
 A. Goal alignment
@@ -345,7 +345,7 @@ IMPORTANT:
 - Even if the "primary_focus" for the block happens to be 'recovery', this ONLY applies short-term. You may NOT fail an FTP test or key session 4+ days into the future citing a 'recovery phase'.
 - Avoid conditional must-fixes (e.g. "change this IF form does not improve"). Either the session is a direct error today, or you approve it.
 - NEVER use `must_fix` to warn about behaviors (e.g. "make sure this doesn't become a habit") or future concerns. A `must_fix` may ONLY point to a concrete, physiological error in the plan.
-- NEVER use `must_fix` for nutrition advice or vague power target personalization ("personalize based on physiology"). Power targets are only a `must_fix` if you can point to a specific session with concretely wrong watt values (e.g. "4×8min set to 280W but FTP is 230W"). Vague personalization advice belongs in `coaching_advice`.
+- NEVER use `must_fix` for nutrition advice or vague power target personalization ("personalize based on physiology"). Power targets are only a `must_fix` if the provided context contains enough FTP/zone data to verify a specific error (e.g. "4×8min set to 280W but FTP is 230W"). Vague personalization advice belongs in `coaching_advice`.
 - If you have philosophical advice, warnings about the future, or minor feedback, put them in `coaching_advice` instead of `must_fix`.
 
 CALIBRATION — read this before you assign ratings:
@@ -509,7 +509,140 @@ def compare_plans(provider: str, current_plan: AIPlan, current_trace: PlanDecisi
 
 
 
-def compute_scores_from_review(review: PlanReview) -> PlanScores:
+def _parse_plan_date(value: str):
+    try:
+        return date.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _hard_plan_offsets(plan: AIPlan | None, today_str: str) -> list[int]:
+    if not plan:
+        return []
+    today = _parse_plan_date(today_str) or date.today()
+    offsets: list[int] = []
+    for day in plan.days:
+        day_date = _parse_plan_date(day.date)
+        if not day_date:
+            continue
+        if classify_plan_day(day) in _KEY_PLAN_CATEGORIES:
+            offsets.append((day_date - today).days)
+    return sorted(offsets)
+
+
+def _acute_fatigue_signal(review_context: dict | None) -> dict:
+    review_context = review_context or {}
+    readiness = review_context.get("readiness") or {}
+    raw = readiness.get("raw_inputs") if isinstance(readiness.get("raw_inputs"), dict) else {}
+    fatigue_flags: list[str] = []
+
+    score = readiness.get("score")
+    try:
+        if score is not None and float(score) < 55:
+            fatigue_flags.append("readiness<55")
+    except (TypeError, ValueError):
+        pass
+
+    checks = (
+        ("sleep<6h", raw.get("sleep_hours"), lambda v: float(v) < 6.0),
+        ("hrv_dev<=-8%", raw.get("hrv_deviation_pct"), lambda v: float(v) <= -8.0),
+        ("rhr_rising", raw.get("rhr_slope_7d"), lambda v: float(v) > 0.3),
+        ("rpe_high", raw.get("avg_rpe_last5"), lambda v: float(v) >= 7.5),
+        ("feel_low", raw.get("avg_feel_last5"), lambda v: float(v) >= 3.8),
+    )
+    for label, value, predicate in checks:
+        if value is None:
+            continue
+        try:
+            if predicate(value):
+                fatigue_flags.append(label)
+        except (TypeError, ValueError):
+            continue
+
+    return {
+        "active": bool(fatigue_flags),
+        "flags": fatigue_flags,
+    }
+
+
+def _fitness_trend_signal(review_context: dict | None) -> dict:
+    review_context = review_context or {}
+    trajectory = review_context.get("trajectory") or {}
+    performance_forecast = review_context.get("performance_forecast") or {}
+    minimum_effective_dose = review_context.get("minimum_effective_dose") or {}
+    signals: list[str] = []
+
+    required_weekly_tss = trajectory.get("required_weekly_tss")
+    try:
+        if required_weekly_tss is not None and float(required_weekly_tss) > 0:
+            signals.append("positive_load_target")
+    except (TypeError, ValueError):
+        pass
+
+    forecast_summary = str(performance_forecast.get("summary") or "").lower()
+    if any(token in forecast_summary for token in ("improve", "build", "trajectory")):
+        signals.append("positive_forecast")
+
+    med_global = (
+        minimum_effective_dose.get("mode") == "ACTIVE"
+        and minimum_effective_dose.get("scope") == "GLOBAL"
+    )
+    return {
+        "supports_progression": bool(signals) and not med_global,
+        "signals": signals,
+    }
+
+
+def _apply_fatigue_fitness_score_adjustments(
+    *,
+    plan: AIPlan | None,
+    review_context: dict | None,
+    effectiveness: int,
+    risk: int,
+    specificity: int,
+    confidence: int,
+    uncertainty_sources: list[str],
+) -> tuple[int, int, int, int, list[str], list[str]]:
+    """Separate acute readiness risk from longer-term fitness progression.
+
+    Acute fatigue should punish hard work only in the next 48h. A positive
+    fitness trend should preserve credit for future key sessions instead of
+    letting today's low readiness make the whole horizon look risky.
+    """
+    notes: list[str] = []
+    fatigue = _acute_fatigue_signal(review_context)
+    fitness = _fitness_trend_signal(review_context)
+    today_str = (review_context or {}).get("today") or date.today().isoformat()
+    hard_offsets = _hard_plan_offsets(plan, today_str)
+    hard_today_tomorrow = [offset for offset in hard_offsets if 0 <= offset <= 1]
+    future_hard = [offset for offset in hard_offsets if offset >= 2]
+
+    if fatigue["active"] and hard_today_tomorrow:
+        risk = min(10, risk + (3 if 0 in hard_today_tomorrow else 2))
+        confidence = max(1, confidence - 1)
+        uncertainty_sources.append("acute fatigue conflicts with hard work in the next 48h")
+        notes.append(
+            "acute fatigue raised risk because a hard/key session is scheduled today or tomorrow"
+        )
+    elif fatigue["active"] and future_hard and fitness["supports_progression"]:
+        effectiveness = min(10, effectiveness + 1)
+        specificity = min(10, specificity + 1)
+        notes.append(
+            "acute fatigue did not penalize future key sessions because they are outside the 48h fatigue window"
+        )
+
+    if fitness["supports_progression"] and not fatigue["active"] and future_hard:
+        confidence = min(10, confidence + 1)
+        notes.append("positive fitness trend supports keeping progression/key sessions later in the horizon")
+
+    return effectiveness, risk, specificity, confidence, uncertainty_sources, notes
+
+
+def compute_scores_from_review(
+    review: PlanReview,
+    plan: AIPlan | None = None,
+    review_context: dict | None = None,
+) -> PlanScores:
     """
     Deterministic scoring based on review dimensions instead of AI scoring.
     Eliminates redundant AI call while maintaining decision quality.
@@ -548,6 +681,24 @@ def compute_scores_from_review(review: PlanReview) -> PlanScores:
     confidence_base = 8
     confidence = max(2, confidence_base - uncertainty_count)
 
+    uncertainty_sources = list(review.uncertainty_sources or [])
+    (
+        effectiveness,
+        risk,
+        specificity,
+        confidence,
+        uncertainty_sources,
+        context_notes,
+    ) = _apply_fatigue_fitness_score_adjustments(
+        plan=plan,
+        review_context=review_context,
+        effectiveness=effectiveness,
+        risk=risk,
+        specificity=specificity,
+        confidence=confidence,
+        uncertainty_sources=uncertainty_sources,
+    )
+
     # Compute action hint based on verdict + dimensions
     if review.overall_verdict == "REJECT":
         action_hint = "REJECT"
@@ -567,8 +718,12 @@ def compute_scores_from_review(review: PlanReview) -> PlanScores:
         specificity=specificity,
         simplicity=simplicity,
         confidence=confidence,
-        rationale=f"Computed from review: {review.overall_verdict} ({', '.join(d.rating for d in [review.goal_alignment, review.key_sessions, review.load_and_risk, review.race_demands])})",
-        uncertainty_sources=review.uncertainty_sources or [],
+        rationale=(
+            f"Computed from review: {review.overall_verdict} "
+            f"({', '.join(d.rating for d in [review.goal_alignment, review.key_sessions, review.load_and_risk, review.race_demands])})"
+            + (f"; context adjustments: {' | '.join(context_notes)}" if context_notes else "")
+        ),
+        uncertainty_sources=uncertainty_sources,
         action_hint=action_hint,
     )
 
@@ -1139,7 +1294,11 @@ def run_plan_pipeline(gen_provider: str, review_provider: str, generation_prompt
                         candidate_changes,
                     )
                     # Use deterministic scoring instead of AI call (saves 33% of API calls)
-                    scores = compute_scores_from_review(review)
+                    scores = compute_scores_from_review(
+                        review,
+                        plan=candidate_plan,
+                        review_context=review_context,
+                    )
                     action, rationale = decide_plan(review, scores, candidate_changes)
                 else:
                     review = build_validation_review(validation)

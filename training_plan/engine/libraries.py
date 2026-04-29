@@ -307,7 +307,11 @@ def enforce_schedule_constraints(days: list[PlanDay], constraints: list[dict]) -
             if sport_blocked:
                 # Välj ersättning: bästa tillåtna sport
                 if allowed:
-                    replacement = list(allowed)[0]
+                    allowed_order = c.get("allowed_types", [])
+                    replacement = next(
+                        (s for s in ["VirtualRide", "Ride", "Run", "RollerSki", "WeightTraining"] if s in allowed),
+                        allowed_order[0] if allowed_order else "Rest",
+                    )
                 else:
                     # Om blocked, välj en icke-blockerad sport
                     fallback_order = ["VirtualRide", "Run", "Ride", "WeightTraining"]
@@ -318,13 +322,21 @@ def enforce_schedule_constraints(days: list[PlanDay], constraints: list[dict]) -
 
                 old_type = day.intervals_type
                 new_dur = min(day.duration_min, 60) if replacement == "Run" else day.duration_min
-                days[i] = day.model_copy(update={
+                updates = {
                     "intervals_type": replacement,
                     "duration_min": new_dur,
                     "title": f"{day.title} [→ {replacement}]",
                     "description": day.description + f"\n\n📅 Adjusted: {reason}. {old_type} → {replacement}.",
                     "vetoed": False,
-                })
+                }
+                if replacement == "Rest":
+                    updates.update({
+                        "duration_min": 0,
+                        "workout_steps": [],
+                        "strength_steps": [],
+                        "nutrition": "",
+                    })
+                days[i] = day.model_copy(update=updates)
                 changes.append(f"SCHEDULE: {day.date} {old_type} → {replacement} ({reason})")
                 break
 

@@ -109,7 +109,24 @@ def analyze_motivation(wellness: list, activities: list) -> dict:
         "summary": f"Motivation: {state} | Trend: {trend} | Avg feel: {avg_feel:.1f}/5 ({len(feel_vals)} sessions last 14d)",
     }
 
+def _wellness_sort_key(item: dict) -> str:
+    return (
+        str(item.get("id") or "")
+        or str(item.get("date") or "")
+        or str(item.get("start_date_local") or "")
+    )
+
+
+def _sorted_wellness(wellness: list) -> list:
+    return sorted(wellness or [], key=_wellness_sort_key)
+
+
+def _sorted_activities(activities: list) -> list:
+    return sorted(activities or [], key=lambda item: safe_date(item) or datetime.min)
+
+
 def calculate_hrv(wellness):
+    wellness = _sorted_wellness(wellness)
     vals = [w.get("hrv") for w in wellness if (w.get("hrv") or 0) > 0]
     if len(vals) < 7:
         return {"today": None, "avg7d": None, "avg60d": None, "cv7d": None,
@@ -142,6 +159,9 @@ def calculate_hrv(wellness):
 def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> dict:
     """Composite readiness score 0-100 based on HRV, sleep, resting HR trend, RPE, and feel."""
     def clamp(v, lo=0, hi=100): return max(lo, min(hi, v))
+
+    wellness = _sorted_wellness(wellness)
+    activities = _sorted_activities(activities)
 
     # HRV (35%) – deviation_pct: -30..+15 -> 0..100
     dev = hrv.get("deviation_pct", 0)
@@ -681,14 +701,14 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
         )
 
     if race_demands and race_demands.get("gaps"):
-        if any("Durability-gap" in g for g in race_demands["gaps"]):
+        if any("durability gap" in g.lower() for g in race_demands["gaps"]):
             add(
                 "durability",
                 84,
                 "Race demands show that long durability is still a clear bottleneck.",
                 ["1 long Z2 session", "progressive long ride", "train nutrition during long sessions"],
             )
-        if any("Fueling-gap" in g for g in race_demands["gaps"]):
+        if any("fueling gap" in g.lower() for g in race_demands["gaps"]):
             add(
                 "fueling",
                 74,
@@ -718,7 +738,7 @@ def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
 
     np_flags = (np_if_analysis or {}).get("flags", [])
     if np_flags:
-        if any("IF KONSEKVENT HÖG" in f or "FRONT-LOADING" in f for f in np_flags):
+        if any("IF CONSISTENTLY HIGH" in f or "IF KONSEKVENT HÖG" in f or "FRONT-LOADING" in f for f in np_flags):
             add(
                 "pacing",
                 72,
@@ -1274,6 +1294,101 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
         "\n  -> Give feedback: Was the plan followed? Right intensity? What can be improved? "
         "Was nutrition sufficient? Concrete tips."
     )
+
+
+# ── ATHLETE PROFILE ───────────────────────────────────────────────────────────
+
+def _parse_birth_date(value):
+    if not value:
+        return None
+    text = str(value)[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def athlete_profile(athlete: dict | None, wellness: list | None = None) -> dict:
+    """Extract coach-relevant athlete stats from intervals.icu data when present."""
+    athlete = athlete or {}
+    wellness = _sorted_wellness(wellness or [])
+
+    birth = (
+        _parse_birth_date(athlete.get("dob"))
+        or _parse_birth_date(athlete.get("dateOfBirth"))
+        or _parse_birth_date(athlete.get("birthDate"))
+        or _parse_birth_date(athlete.get("birthday"))
+    )
+    age = None
+    if birth:
+        today = date.today()
+        age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+
+    weight = athlete.get("weight") or athlete.get("weightKg")
+    if weight is None:
+        for w in reversed(wellness):
+            if w.get("weight"):
+                weight = w.get("weight")
+                break
+    try:
+        weight = round(float(weight), 1) if weight is not None else None
+    except (TypeError, ValueError):
+        weight = None
+
+    settings = athlete.get("sportSettings", []) if isinstance(athlete.get("sportSettings"), list) else []
+    ftp_by_sport = {}
+    max_hr_by_sport = {}
+    lthr_by_sport = {}
+    for setting in settings:
+        types = setting.get("types", []) if isinstance(setting.get("types"), list) else [setting.get("type")]
+        for sport in [item for item in types if item]:
+            if setting.get("ftp"):
+                ftp_by_sport[sport] = setting.get("ftp")
+            if setting.get("max_hr"):
+                max_hr_by_sport[sport] = setting.get("max_hr")
+            if setting.get("lthr"):
+                lthr_by_sport[sport] = setting.get("lthr")
+
+    cycling_ftp = next((ftp_by_sport[s] for s in ("Ride", "VirtualRide") if s in ftp_by_sport), None)
+    watts_per_kg = None
+    if cycling_ftp and weight:
+        try:
+            watts_per_kg = round(float(cycling_ftp) / weight, 2)
+        except (TypeError, ValueError, ZeroDivisionError):
+            watts_per_kg = None
+
+    return {
+        "name": athlete.get("name") or athlete.get("athleteName") or "",
+        "age": age,
+        "sex": athlete.get("sex") or athlete.get("gender"),
+        "weight_kg": weight,
+        "ftp_by_sport": ftp_by_sport,
+        "max_hr_by_sport": max_hr_by_sport,
+        "lthr_by_sport": lthr_by_sport,
+        "cycling_ftp_w_per_kg": watts_per_kg,
+    }
+
+
+def format_athlete_profile(athlete: dict | None, wellness: list | None = None) -> str:
+    profile = athlete_profile(athlete, wellness)
+    parts = []
+    if profile.get("age") is not None:
+        parts.append(f"Age {profile['age']}")
+    if profile.get("sex"):
+        parts.append(f"Sex/gender {profile['sex']}")
+    if profile.get("weight_kg") is not None:
+        parts.append(f"Weight {profile['weight_kg']}kg")
+    if profile.get("cycling_ftp_w_per_kg") is not None:
+        parts.append(f"Cycling FTP {profile['cycling_ftp_w_per_kg']}W/kg")
+    if profile.get("ftp_by_sport"):
+        ftp_text = ", ".join(f"{sport} {ftp}W" for sport, ftp in sorted(profile["ftp_by_sport"].items()))
+        parts.append(f"FTP by sport: {ftp_text}")
+    if profile.get("max_hr_by_sport"):
+        hr_text = ", ".join(f"{sport} {hr}bpm" for sport, hr in sorted(profile["max_hr_by_sport"].items()))
+        parts.append(f"Max HR by sport: {hr_text}")
+    if not parts:
+        return "No explicit age/weight/sex profile found; individualization relies on training history, zones, wellness, and compliance."
+    return " | ".join(parts)
 
 
 # ── TSS REFERENCE ─────────────────────────────────────────────────────────────

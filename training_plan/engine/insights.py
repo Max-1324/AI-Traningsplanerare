@@ -728,25 +728,46 @@ def build_block_learning(state: dict,
     next_bias = []
 
     if recent:
-        key_completion = _avg([
-            (entry.get("outcome") or {}).get("key_session_completion_rate", 0.0)
-            for entry in recent
-        ])
-        simple_hits = [
-            (entry.get("outcome") or {}).get("key_session_completion_rate", 0.0)
-            for entry in recent
-            if (entry.get("scores") or {}).get("simplicity", 0) >= 7
-        ]
-        complex_hits = [
-            (entry.get("outcome") or {}).get("key_session_completion_rate", 0.0)
-            for entry in recent
-            if (entry.get("scores") or {}).get("simplicity", 0) <= 5
-        ]
+        # Calculate key_completion safely
+        key_completion_rates = []
+        for entry in recent:
+            outcome = entry.get("outcome")
+            if outcome:
+                rate = outcome.get("key_session_completion_rate")
+                # Ensure rate is treated as float, defaulting to 0.0 if None or not a number
+                key_completion_rates.append(float(rate) if isinstance(rate, (float, int)) else 0.0)
+        
+        key_completion = _avg(key_completion_rates)
+
+        simple_hits = []
+        complex_hits = []
+        for entry in recent:
+            scores = entry.get("scores", {})
+            outcome = entry.get("outcome")
+            
+            # Capture completion rate for hits tracking
+            completion_rate = 0.0
+            if outcome and isinstance(outcome.get("key_session_completion_rate"), (float, int)):
+                 completion_rate = float(outcome["key_session_completion_rate"])
+
+            # Determine simplicity score, default to a neutral value if missing
+            simplicity = scores.get("simplicity")
+            if not isinstance(simplicity, (float, int)):
+                simplicity = 5 # Defaulting to middle ground if data is missing
+
+            if simplicity >= 7:
+                simple_hits.append(completion_rate)
+            elif simplicity <= 5:
+                complex_hits.append(completion_rate)
+        
+        avg_simple_hits = _avg(simple_hits)
+        avg_complex_hits = _avg(complex_hits)
+
         if key_completion >= 0.75:
             worked.append("Recent blocks converted key sessions into real training reasonably well.")
         else:
             did_not_work.append("Recent blocks did not land enough key sessions in practice.")
-        if simple_hits and complex_hits and _avg(simple_hits) > _avg(complex_hits) + 0.15:
+        if simple_hits and complex_hits and avg_simple_hits > avg_complex_hits + 0.15:
             worked.append("Simpler plans have translated better than more complex ones.")
             next_bias.append("Prefer cleaner structure over extra filler volume.")
 

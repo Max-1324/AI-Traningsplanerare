@@ -525,7 +525,7 @@ def estimate_tss_coggan(day, athlete: dict) -> float:
     _TSS_CACHE[cache_key] = result
     return result
 
-def enforce_tss(days, budget, athlete, floor_pct=1.00, ceil_pct=1.00, base_tss_by_date=None, horizon_days=None):
+def enforce_tss(days, budget, athlete, base_tss_by_date=None, horizon_days=None):
     """Enforcer TSS-golv och -tak per kalendervecka. base_tss_by_date = TSS från befintliga events per datum."""
     from datetime import date as _date
 

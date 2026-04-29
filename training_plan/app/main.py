@@ -31,10 +31,18 @@ def _fetch_initial_data(days_history: int, horizon: int) -> dict:
         "weather": lambda: fetch_weather(horizon),
     }
     results = {}
+    optional_defaults = {"races": [], "weather": []}
     with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
         future_map = {name: executor.submit(job) for name, job in jobs.items()}
         for name, future in future_map.items():
-            results[name] = future.result()
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                if name in optional_defaults:
+                    log.warning("Could not fetch %s: %s. Continuing with empty data.", name, exc)
+                    results[name] = optional_defaults[name]
+                    continue
+                raise RuntimeError(f"Could not fetch required Intervals.icu data '{name}': {exc}") from exc
     return results
 
 
@@ -62,7 +70,7 @@ def main(argv=None):
         all_events = initial_data["all_events"]
         weather = initial_data["weather"]
         log.info(f"  {len(activities)} activities | {len(wellness)} wellness | {len(races)} races | {len(planned)} planned")
-    except requests.HTTPError as e:
+    except (requests.RequestException, RuntimeError, ValueError) as e:
         log.error(f"API error: {e}"); sys.exit(1)
 
     state = load_state()
