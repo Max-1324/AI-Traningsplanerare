@@ -1,20 +1,123 @@
 import training_plan.core.common as common
+import os
+import re
+import requests
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from training_plan.core.common import *
+from datetime import date, timedelta
+
 from training_plan.core.cli import parse_args
+from training_plan.core.common import (
+    ALL_SPORTS_CATALOG,
+    ATHLETE_ID,
+    AUTH,
+    BASE,
+    SPORTS,
+    TARGET_CTL,
+    ensure_required_config,
+    log,
+)
 from training_plan.engine.context import PromptContext
-from training_plan.engine.libraries import *
-from training_plan.engine.planning import *
-from training_plan.integrations.services import *
-from training_plan.integrations.services import _stockholm_now_naive
-from training_plan.engine.analysis import *
-from training_plan.engine.insights import *
-from training_plan.engine.postprocess import *
-from training_plan.engine.ai import *
-from training_plan.engine.pipeline import *
+from training_plan.engine.libraries import format_constraints_for_prompt, parse_constraints_from_events
+from training_plan.engine.planning import (
+    WORKOUT_LIBRARY,
+    autoregulate_from_yesterday,
+    build_progression_directive,
+    check_and_advance_workout_progression,
+    coach_confidence_analysis,
+    compliance_analysis,
+    ctl_trajectory,
+    determine_mesocycle,
+    format_failure_memory,
+    format_learned_patterns,
+    ftp_test_check,
+    get_next_workouts,
+    is_ai_generated,
+    load_state,
+    polarization_analysis,
+    pre_race_logistics_advice,
+    race_demands_analysis,
+    recommend_prehab,
+    save_state,
+    session_quality_analysis,
+    update_failure_memory,
+    update_learned_patterns,
+)
+from training_plan.engine.analysis import (
+    acwr_trend_analysis,
+    analyze_motivation,
+    analyze_np_if,
+    analyze_yesterday,
+    biometric_vetoes,
+    calculate_hrv,
+    calculate_readiness_score,
+    check_return_to_play,
+    choose_target_ramp,
+    ctl_ramp_from_daily_tss,
+    development_needs_analysis,
+    per_sport_acwr,
+    race_week_protocol,
+    sport_budget,
+    sport_volumes,
+    taper_quality_score,
+    training_phase,
+    tss_budget,
+    update_block_objective,
+    validate_data_quality,
+)
+from training_plan.engine.insights import (
+    build_benchmark_system,
+    build_block_learning,
+    build_capacity_map,
+    build_execution_friction,
+    build_individualization_profile,
+    build_minimum_effective_dose,
+    build_nutrition_readiness,
+    build_performance_forecast,
+    build_race_readiness_score,
+    build_season_plan,
+    build_training_frequency_target,
+)
+from training_plan.engine.postprocess import estimate_tss_coggan, post_process
+from training_plan.engine.ai import (
+    build_prompt,
+    format_existing_plan,
+    morning_questions,
+    plan_update_mode,
+    print_plan,
+)
+from training_plan.engine.pipeline import (
+    classify_injury,
+    record_plan_decision,
+    run_plan_pipeline,
+    update_plan_outcome_tracking,
+)
 from training_plan.engine.skeleton import build_week_skeleton
 from training_plan.engine.utils import time_available_minutes
 from training_plan.engine.validation import repair_postprocessed_plan, validate_postprocessed_plan
+from training_plan.integrations.services import (
+    _stockholm_now_naive,
+    delete_ai_workouts,
+    event_has_started,
+    fetch_activities,
+    fetch_all_planned_events,
+    fetch_athlete,
+    fetch_fitness,
+    fetch_planned_workouts,
+    fetch_races,
+    fetch_weather,
+    fetch_wellness,
+    fetch_yesterday_actual,
+    generate_weekly_report,
+    get_taper_config,
+    plan_day_has_started,
+    save_daily_note_to_icu,
+    save_event,
+    save_morning_wellness,
+    save_weekly_report_to_icu,
+    save_workout,
+    update_manual_nutrition,
+)
 
 args = None
 
