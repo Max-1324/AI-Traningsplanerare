@@ -17,6 +17,7 @@ from training_plan.core.common import (
     ensure_required_config,
     log,
 )
+from training_plan.app.deterministic import build_ai_context, build_planner_inputs, finalize_deterministic_plan
 from training_plan.engine.context import PromptContext
 from training_plan.engine.libraries import format_constraints_for_prompt, parse_constraints_from_events
 from training_plan.engine.planning import (
@@ -93,8 +94,9 @@ from training_plan.engine.pipeline import (
     run_plan_pipeline,
     update_plan_outcome_tracking,
 )
+from training_plan.engine.planner import build_deterministic_plan
 from training_plan.engine.skeleton import build_week_skeleton
-from training_plan.engine.utils import time_available_minutes
+from training_plan.engine.utils import race_priority, time_available_minutes
 from training_plan.engine.validation import repair_postprocessed_plan, validate_postprocessed_plan
 from training_plan.integrations.services import (
     _stockholm_now_naive,
@@ -103,12 +105,12 @@ from training_plan.integrations.services import (
     fetch_activities,
     fetch_all_planned_events,
     fetch_athlete,
-    fetch_fitness,
     fetch_planned_workouts,
     fetch_races,
     fetch_weather,
     fetch_wellness,
     fetch_yesterday_actual,
+    fitness_from_wellness,
     generate_weekly_report,
     get_taper_config,
     plan_day_has_started,
@@ -127,10 +129,10 @@ def _fetch_initial_data(days_history: int, horizon: int) -> dict:
     jobs = {
         "athlete": lambda: fetch_athlete(),
         "wellness": lambda: fetch_wellness(days_history),
-        "fitness": lambda: fetch_fitness(days_history),
         "activities": lambda: fetch_activities(days_history),
         "races": lambda: fetch_races(365),
-        "planned": lambda: fetch_planned_workouts(horizon),
+        # At least 28 days ahead, so a full replan also removes old AI events beyond a short horizon.
+        "planned": lambda: fetch_planned_workouts(max(horizon, 28)),
         "all_events": lambda: fetch_all_planned_events(days_back=28),
         "weather": lambda: fetch_weather(horizon),
     }
@@ -147,6 +149,7 @@ def _fetch_initial_data(days_history: int, horizon: int) -> dict:
                     results[name] = optional_defaults[name]
                     continue
                 raise RuntimeError(f"Could not fetch required Intervals.icu data '{name}': {exc}") from exc
+    results["fitness"] = fitness_from_wellness(results["wellness"])  # same response, no second API call
     return results
 
 
@@ -178,8 +181,11 @@ def main(argv=None):
 
     state = load_state()
 
-    manual_workouts = [w for w in planned if not is_ai_generated(w) and w.get("category") == "WORKOUT"]
-    ai_workouts     = [w for w in planned if is_ai_generated(w)]
+    horizon_end     = (date.today() + timedelta(days=args.horizon)).isoformat()
+    in_horizon      = lambda w: w.get("start_date_local", "")[:10] <= horizon_end
+    manual_workouts = [w for w in planned if not is_ai_generated(w) and w.get("category") == "WORKOUT" and in_horizon(w)]
+    ai_workouts_all = [w for w in planned if is_ai_generated(w)]
+    ai_workouts     = [w for w in ai_workouts_all if in_horizon(w)]
     locked_dates    = {w.get("start_date_local","")[:10] for w in manual_workouts}
     if manual_workouts: log.info(f"  {len(manual_workouts)} manual sessions locked: {', '.join(sorted(locked_dates))}")
 
@@ -256,7 +262,7 @@ def main(argv=None):
     # ── SKADEKLASSIFICERING ──────────────────────────────────────────────────
     injury_note = morning.get("injury_today", "")
     injury_profile = None
-    if injury_note:
+    if injury_note and not (args.engine == "deterministic" and args.no_ai):
         injury_profile = classify_injury(args.provider, injury_note)
         if injury_profile:
             safe = ", ".join(injury_profile.get("safe_sports", []) if isinstance(injury_profile.get("safe_sports"), list) else [])
@@ -324,7 +330,7 @@ def main(argv=None):
 
     # ── PREHAB ───────────────────────────────────────────────────────────────
     vols_clean = sport_volumes(activities_clean)
-    _default_sport = os.getenv("DEFAULT_SPORT", SPORTS[0]["intervals_type"] if SPORTS else "VirtualRide")
+    _default_sport = os.getenv("DEFAULT_SPORT") or (SPORTS[0]["intervals_type"] if SPORTS else "VirtualRide")
     dominant_sport = max(vols_clean, key=vols_clean.get) if vols_clean else _default_sport
 
     # Override dominant_sport from next A-race sport.
@@ -337,8 +343,7 @@ def main(argv=None):
     )
     for _r in _future_races:
         _rname = _r.get("name", "")
-        _is_a  = not ("b:" in _rname.lower() or "c:" in _rname.lower())
-        if not _is_a:
+        if race_priority(_r) != "A":
             continue
         # 1. Use type field from Intervals.icu
         _race_sport = _r.get("type")
@@ -585,194 +590,257 @@ def main(argv=None):
             continue
         base_tss_by_date[d] = base_tss_by_date.get(d, 0) + (w.get("planned_load", 0) or 0)
 
+    # Use one configurable provider for all AI calls (generation, review, enrichment).
+    pipeline_provider = (
+        os.getenv("AI_PROVIDER_PIPELINE")
+        or args.provider_gen or args.provider_review or args.provider or "gemini"
+    ).lower()
+
+    # ── Deterministisk motor: bygg planen först (billigt, ingen AI) ──────────
+    det_inputs = det_result = None
+    mode_budget = tsb_bgt
+    if args.engine == "deterministic":
+        det_inputs = build_planner_inputs(
+            today=date.today(), horizon=args.horizon, ctl=ctl, tsb=tsb_val, mesocycle=mesocycle,
+            phase=phase, trajectory=trajectory, races=races, race_week=race_week, rtp_status=rtp_status,
+            state=state, dominant_sport=dominant_sport, weather=weather, constraints=constraints,
+            locked_dates=locked_dates, base_tss_by_date=base_tss_by_date, budgets=budgets,
+            sport_acwr=sport_acwr, hrv=hrv, readiness=readiness, wellness=wellness_clean,
+            activities=activities_clean, morning=morning, injury_profile=injury_profile,
+            development_needs=development_needs, ftp_check=ftp_check, motivation=motivation,
+        )
+        det_result = build_deterministic_plan(det_inputs)
+        mode_budget = det_result.horizon_tss_target
+        for target in det_result.week_targets:
+            log.info(f"🗓️ {target.summary()}")
+        if det_inputs.restriction_reason:
+            log.info(f"🟡 Easy today/tomorrow: {det_inputs.restriction_reason}")
+
     # ── Avgör uppdateringsläge FÖRE AI-anropen ───────────────────────────────
     # Allt som behövs finns redan här, så en komplett plan behöver inte kosta en hel AI-pipeline.
     # Måndagar körs pipelinen ändå eftersom veckorapporten använder AI:ns veckofeedback.
     mode, mode_reason = resolve_update_mode(
         ai_workouts, yesterday_actuals, yesterday_planned, hrv, wellness, activities, args.horizon,
-        base_tss_by_date=base_tss_by_date, tss_budget=tsb_bgt,
+        base_tss_by_date=base_tss_by_date, tss_budget=mode_budget,
     )
+    # Weekly replan once per Monday (the webhook server may run several times a day).
+    if (args.engine == "deterministic" and date.today().weekday() == 0 and mode != "full"
+            and state.get("last_weekly_replan") != date.today().isoformat()):
+        mode, mode_reason = "full", "Weekly replan (Monday): the new week is planned from fresh targets."
+    if args.engine == "deterministic" and date.today().weekday() == 0 and mode == "full":
+        state["last_weekly_replan"] = date.today().isoformat()  # saved together with the plan decision
     log.info(f"📋 Mode: {mode.upper()} – {mode_reason}")
-    if mode == "none" and not args.dry_run and date.today().weekday() != 0:
+    # Legacy needs its pipeline on Mondays for the weekly report; the deterministic engine already
+    # wrote it during the Monday replan.
+    if mode == "none" and not args.dry_run and (args.engine == "deterministic" or date.today().weekday() != 0):
         log.info("✅ %s Skipping AI pipeline.", mode_reason)
         print(f"\n✅ {mode_reason}\n")
         return
 
-    log.info(f"🤖 The coach is reviewing the plan and daily form...")
-    prompt_morning = dict(morning)
-    if not prompt_morning.get("time_available"):
-        prompt_morning["time_available"] = "No explicit time limit"
-
-    # ── Build planning dates (needed for skeleton) ────────────────────────────
-    _all_dates = [date.today().isoformat()] + [
-        (date.today() + timedelta(days=i + 1)).isoformat() for i in range(args.horizon)
-    ]
-    _plan_dates = [d for d in _all_dates if d not in existing_plan_dates] or _all_dates
-
-    # ── Slot skeleton (improvement #1) ───────────────────────────────────────
-    week_skeleton = build_week_skeleton(
-        dates=_plan_dates,
-        mesocycle=mesocycle,
-        readiness=readiness or {},
-        race_week=race_week,
-        locked_dates=existing_plan_dates,
-        rtp_status=rtp_status,
-    )
-
-    # ── Assemble PromptContext (improvement #2) ───────────────────────────────
-    prompt_ctx = PromptContext(
-        activities=activities,
-        wellness=wellness_clean,
-        fitness=fitness,
-        races=races,
-        weather=weather,
-        morning=prompt_morning,
-        horizon=args.horizon,
-        manual_workouts=manual_workouts,
-        athlete=athlete,
-        hrv=hrv,
-        budgets=budgets,
-        tss_budget=tsb_bgt,
-        vetos=vetos,
-        phase=phase,
-        existing_plan_summary=existing_plan_summary,
-        mesocycle=mesocycle,
-        trajectory=trajectory,
-        compliance=compliance,
-        workout_lib_text=workout_lib_text,
-        progression_directive=progression_directive,
-        ftp_check=ftp_check,
-        yesterday_analysis=yesterday_analysis,
-        constraints_text=constraints_text,
-        acwr_trend=acwr_trend,
-        race_week=race_week,
-        taper_score=taper_score,
-        rtp_status=rtp_status,
-        data_quality=dq,
-        per_sport_acwr=sport_acwr,
-        motivation=motivation,
-        prehab=prehab,
-        pre_race_info=pre_race_advice,
-        autoregulation_signals=auto_signals,
-        mesocycle_for_strength=mesocycle,
-        readiness=readiness,
-        np_if_analysis=np_if_analysis,
-        learned_patterns=learned_patterns,
-        exclude_dates=existing_plan_dates,
-        development_needs=development_needs,
-        block_objective=block_objective,
-        race_demands=race_demands,
-        session_quality=session_quality,
-        coach_confidence=coach_confidence,
-        polarization=polarization,
-        historical_validation=historical_validation,
-        outcome_tracking=outcome_tracking,
-        planner_insights=planner_insights,
-        failure_memory=failure_memory_text,
-        week_skeleton=week_skeleton,
-    )
-    prompt = build_prompt(prompt_ctx)
-    review_context = {
-        "today": date.today().isoformat(),
-        "locked_dates": existing_plan_dates,
-        "time_available_min": time_available_minutes(prompt_morning.get("time_available", "")),
-        "rtp_status": {
-            "is_active": bool(rtp_status.get("is_active")),
-            "days_off": rtp_status.get("days_off", 0),
-        },
-        "phase": phase.get("phase"),
-        "mesocycle": {
-            "block_number": mesocycle.get("block_number"),
-            "week_in_block": mesocycle.get("week_in_block"),
-            "is_deload": mesocycle.get("is_deload"),
-            "load_factor": mesocycle.get("load_factor"),
-        },
-        "trajectory": {
-            "message": trajectory.get("message"),
-            "required_weekly_tss": trajectory.get("required_weekly_tss"),
-            "required_daily_tss": trajectory.get("required_daily_tss"),
-        },
-        "block_objective": block_objective,
-        "development_needs": {
-            "summary": development_needs.get("summary"),
-            "must_hit_sessions": development_needs.get("must_hit_sessions", []),
-            "priorities": development_needs.get("priorities", [])[:3],
-        },
-        "race_demands": race_demands,
-        "readiness": readiness,
-        "motivation": motivation,
-        "compliance": {
-            "completion_rate": compliance.get("completion_rate"),
-            "intensity_missed": compliance.get("intensity_missed"),
-            "intensity_planned": compliance.get("intensity_planned"),
-        },
-        "coach_confidence": coach_confidence,
-        "session_quality": session_quality,
-        "capacity_map": {
-            "summary": capacity_map.get("summary"),
-            "weakest": capacity_map.get("weakest", []),
-            "strongest": capacity_map.get("strongest", []),
-        },
-        "performance_forecast": performance_forecast,
-        "race_readiness": race_readiness,
-        "nutrition_readiness": nutrition_readiness,
-        "minimum_effective_dose": minimum_effective_dose,
-        "execution_friction": execution_friction,
-        "training_frequency_target": training_frequency_target,
-        "benchmark_system": {
-            "summary": benchmark_system.get("summary"),
-            "benchmarks": benchmark_system.get("benchmarks", [])[:3],
-        },
-        "block_learning": block_learning,
-        "season_plan": {
-            "summary": season_plan.get("summary"),
-            "blocks": season_plan.get("blocks", [])[:4],
-        },
-        "historical_validation_summary": historical_validation.get("summary", ""),
-        "outcome_tracking_summary": outcome_tracking.get("summary", ""),
-        "failure_memory_summary": failure_memory_text,
-    }
-
-    def apply_postprocess(candidate_plan):
-        return post_process(
-            candidate_plan, hrv, budgets, locked_dates, tsb_bgt, activities_clean, weather, athlete,
-            injury_note=morning.get('injury_today', ''), injury_profile=injury_profile, mesocycle=mesocycle,
-            constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
-            per_sport_acwr_data=sport_acwr, motivation=motivation,
-            med_active=(
-                minimum_effective_dose.get("mode") == "ACTIVE"
-                and minimum_effective_dose.get("scope") == "GLOBAL"
+    if args.engine == "deterministic":
+        log.info("🧱 Deterministic planner built the plan%s.",
+                 "" if args.no_ai else f"; asking {pipeline_provider} to enrich it")
+        validation_context = {
+            "today": date.today().isoformat(),
+            "locked_dates": locked_dates,
+            "time_available_min": time_available_minutes(morning.get("time_available", "") or ""),
+            "rtp_status": {"is_active": bool(rtp_status.get("is_active")), "days_off": rtp_status.get("days_off", 0)},
+            "max_hard_days": det_result.max_hard_days,
+            "weekly_targets_applied": True,
+        }
+        validation_budget = 0 if (today_wellness or {}).get("sick") else det_result.horizon_tss_target
+        ai_context = build_ai_context(
+            inputs=det_inputs, result=det_result, ctl=ctl, atl=lf.get("atl", 0.0), tsb=tsb_val,
+            phase=phase, readiness=readiness, hrv=hrv, motivation=motivation,
+            development_needs=development_needs, races=races, weather=weather,
+            manual_workouts=manual_workouts, morning=morning, yesterday_analysis=yesterday_analysis,
+        )
+        plan, changes, decision_trace = finalize_deterministic_plan(
+            det_result,
+            mode=mode, ai_workouts=ai_workouts, provider=pipeline_provider, use_ai=not args.no_ai,
+            ai_context=ai_context,
+            safety_kwargs=dict(
+                hrv=hrv, budgets=budgets, locked=locked_dates, athlete=athlete, weather=weather,
+                today=date.today(), injury_note=morning.get("injury_today", ""), injury_profile=injury_profile,
+                constraints=constraints, today_wellness=today_wellness, per_sport_acwr_data=sport_acwr,
+                phase=phase, races=races, wellness=wellness_clean,
+                time_available_text=morning.get("time_available", ""),
             ),
-            phase=phase, races=races, wellness=wellness_clean,
-            base_tss_by_date=base_tss_by_date, horizon_days=args.horizon + 1,
-            time_available_text=morning.get("time_available", ""),
+            athlete=athlete, base_tss_by_date=base_tss_by_date,
+            validation_context=validation_context, validation_budget=validation_budget,
+        )
+        log.info("🧾 %s", decision_trace.rationale)
+    else:
+        log.info(f"🤖 The coach is reviewing the plan and daily form...")
+        prompt_morning = dict(morning)
+        if not prompt_morning.get("time_available"):
+            prompt_morning["time_available"] = "No explicit time limit"
+
+        # ── Build planning dates (needed for skeleton) ────────────────────────────
+        _all_dates = [date.today().isoformat()] + [
+            (date.today() + timedelta(days=i + 1)).isoformat() for i in range(args.horizon)
+        ]
+        _plan_dates = [d for d in _all_dates if d not in existing_plan_dates] or _all_dates
+
+        # ── Slot skeleton (improvement #1) ───────────────────────────────────────
+        week_skeleton = build_week_skeleton(
+            dates=_plan_dates,
+            mesocycle=mesocycle,
+            readiness=readiness or {},
+            race_week=race_week,
+            locked_dates=existing_plan_dates,
+            rtp_status=rtp_status,
         )
 
-    # Use one configurable provider for the full pipeline so generation, review,
-    # and pairwise judging stay aligned, while still being easy to switch in .env.
-    pipeline_provider = os.getenv(
-        "AI_PROVIDER_PIPELINE",
-        args.provider_gen or args.provider_review or args.provider or "gemini",
-    ).lower()
-    gen_provider = pipeline_provider
-    review_provider = pipeline_provider
-    try:
-        plan, changes, decision_trace = run_plan_pipeline(
-            gen_provider,
-            review_provider,
-            prompt,
-            apply_postprocess,
-            athlete,
-            base_tss_by_date,
-            tsb_bgt,
-            review_context,
-            max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "5")),
-            candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "3")),
+        # ── Assemble PromptContext (improvement #2) ───────────────────────────────
+        prompt_ctx = PromptContext(
+            activities=activities,
+            wellness=wellness_clean,
+            fitness=fitness,
+            races=races,
+            weather=weather,
+            morning=prompt_morning,
+            horizon=args.horizon,
+            manual_workouts=manual_workouts,
+            athlete=athlete,
+            hrv=hrv,
+            budgets=budgets,
+            tss_budget=tsb_bgt,
+            vetos=vetos,
+            phase=phase,
+            existing_plan_summary=existing_plan_summary,
+            mesocycle=mesocycle,
+            trajectory=trajectory,
+            compliance=compliance,
+            workout_lib_text=workout_lib_text,
+            progression_directive=progression_directive,
+            ftp_check=ftp_check,
+            yesterday_analysis=yesterday_analysis,
+            constraints_text=constraints_text,
+            acwr_trend=acwr_trend,
+            race_week=race_week,
+            taper_score=taper_score,
+            rtp_status=rtp_status,
+            data_quality=dq,
+            per_sport_acwr=sport_acwr,
+            motivation=motivation,
+            prehab=prehab,
+            pre_race_info=pre_race_advice,
+            autoregulation_signals=auto_signals,
+            mesocycle_for_strength=mesocycle,
+            readiness=readiness,
+            np_if_analysis=np_if_analysis,
+            learned_patterns=learned_patterns,
+            exclude_dates=existing_plan_dates,
+            development_needs=development_needs,
+            block_objective=block_objective,
+            race_demands=race_demands,
+            session_quality=session_quality,
+            coach_confidence=coach_confidence,
+            polarization=polarization,
+            historical_validation=historical_validation,
+            outcome_tracking=outcome_tracking,
+            planner_insights=planner_insights,
+            failure_memory=failure_memory_text,
+            week_skeleton=week_skeleton,
         )
-    except Exception as e:
-        log.error("❌ AI pipeline failed – all models exhausted or unreachable: %s", e)
-        log.error("   Try again in a few minutes, or switch provider with --provider.")
-        sys.exit(1)
+        prompt = build_prompt(prompt_ctx)
+        review_context = {
+            "today": date.today().isoformat(),
+            "locked_dates": existing_plan_dates,
+            "time_available_min": time_available_minutes(prompt_morning.get("time_available", "")),
+            "rtp_status": {
+                "is_active": bool(rtp_status.get("is_active")),
+                "days_off": rtp_status.get("days_off", 0),
+            },
+            "phase": phase.get("phase"),
+            "mesocycle": {
+                "block_number": mesocycle.get("block_number"),
+                "week_in_block": mesocycle.get("week_in_block"),
+                "is_deload": mesocycle.get("is_deload"),
+                "load_factor": mesocycle.get("load_factor"),
+            },
+            "trajectory": {
+                "message": trajectory.get("message"),
+                "required_weekly_tss": trajectory.get("required_weekly_tss"),
+                "required_daily_tss": trajectory.get("required_daily_tss"),
+            },
+            "block_objective": block_objective,
+            "development_needs": {
+                "summary": development_needs.get("summary"),
+                "must_hit_sessions": development_needs.get("must_hit_sessions", []),
+                "priorities": development_needs.get("priorities", [])[:3],
+            },
+            "race_demands": race_demands,
+            "readiness": readiness,
+            "motivation": motivation,
+            "compliance": {
+                "completion_rate": compliance.get("completion_rate"),
+                "intensity_missed": compliance.get("intensity_missed"),
+                "intensity_planned": compliance.get("intensity_planned"),
+            },
+            "coach_confidence": coach_confidence,
+            "session_quality": session_quality,
+            "capacity_map": {
+                "summary": capacity_map.get("summary"),
+                "weakest": capacity_map.get("weakest", []),
+                "strongest": capacity_map.get("strongest", []),
+            },
+            "performance_forecast": performance_forecast,
+            "race_readiness": race_readiness,
+            "nutrition_readiness": nutrition_readiness,
+            "minimum_effective_dose": minimum_effective_dose,
+            "execution_friction": execution_friction,
+            "training_frequency_target": training_frequency_target,
+            "benchmark_system": {
+                "summary": benchmark_system.get("summary"),
+                "benchmarks": benchmark_system.get("benchmarks", [])[:3],
+            },
+            "block_learning": block_learning,
+            "season_plan": {
+                "summary": season_plan.get("summary"),
+                "blocks": season_plan.get("blocks", [])[:4],
+            },
+            "historical_validation_summary": historical_validation.get("summary", ""),
+            "outcome_tracking_summary": outcome_tracking.get("summary", ""),
+            "failure_memory_summary": failure_memory_text,
+        }
+
+        def apply_postprocess(candidate_plan):
+            return post_process(
+                candidate_plan, hrv, budgets, locked_dates, tsb_bgt, activities_clean, weather, athlete,
+                injury_note=morning.get('injury_today', ''), injury_profile=injury_profile, mesocycle=mesocycle,
+                constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
+                per_sport_acwr_data=sport_acwr, motivation=motivation,
+                med_active=(
+                    minimum_effective_dose.get("mode") == "ACTIVE"
+                    and minimum_effective_dose.get("scope") == "GLOBAL"
+                ),
+                phase=phase, races=races, wellness=wellness_clean,
+                base_tss_by_date=base_tss_by_date, horizon_days=args.horizon + 1,
+                time_available_text=morning.get("time_available", ""),
+            )
+
+        gen_provider = pipeline_provider
+        review_provider = pipeline_provider
+        try:
+            plan, changes, decision_trace = run_plan_pipeline(
+                gen_provider,
+                review_provider,
+                prompt,
+                apply_postprocess,
+                athlete,
+                base_tss_by_date,
+                tsb_bgt,
+                review_context,
+                max_iterations=int(os.getenv("PLAN_REVIEW_MAX_ITERATIONS", "5")),
+                candidate_count=int(os.getenv("PLAN_CANDIDATE_COUNT", "3")),
+            )
+        except Exception as e:
+            log.error("❌ AI pipeline failed – all models exhausted or unreachable: %s", e)
+            log.error("   Try again in a few minutes, or switch provider with --provider.")
+            sys.exit(1)
+        validation_context, validation_budget = review_context, tsb_bgt
     # Rensa coach-feedback om det inte finns faktisk aktivitetsdata att ge feedback om
     if not yesterday_analysis:
         plan = plan.model_copy(update={"yesterday_feedback": ""})
@@ -781,14 +849,15 @@ def main(argv=None):
         plan,
         athlete=athlete,
         base_tss_by_date=base_tss_by_date,
-        tss_budget=tsb_bgt,
-        review_context=review_context,
+        tss_budget=validation_budget,
+        review_context=validation_context,
         postprocess_changes=changes,
     )
-    if final_validation.hard_failures or final_validation.warnings:
+    # The deterministic engine already fell back to its own valid plan; repair is for AI-built plans.
+    if args.engine == "legacy" and (final_validation.hard_failures or final_validation.warnings):
         repaired_plan, repair_actions = repair_postprocessed_plan(
             plan,
-            review_context=review_context,
+            review_context=validation_context,
             validation=final_validation,
         )
         if repair_actions:
@@ -798,8 +867,8 @@ def main(argv=None):
                 plan,
                 athlete=athlete,
                 base_tss_by_date=base_tss_by_date,
-                tss_budget=tsb_bgt,
-                review_context=review_context,
+                tss_budget=validation_budget,
+                review_context=validation_context,
                 postprocess_changes=changes,
             )
     if not final_validation.passed:
@@ -873,7 +942,7 @@ def main(argv=None):
 
     if mode == "full":
         started_ai = [w for w in ai_workouts if event_has_started(w, now_local)]
-        deleted = delete_ai_workouts(ai_workouts, now_local)
+        deleted = delete_ai_workouts(ai_workouts_all, now_local)
         if deleted: log.info(f"  Deleted {deleted} old AI workouts")
         if started_ai:
             log.info(f"  Keeping {len(started_ai)} AI events that have already started/occurred")

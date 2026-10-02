@@ -149,6 +149,10 @@ def _sorted_activities(activities: list) -> list:
     return sorted(activities or [], key=lambda item: safe_date(item) or datetime.min)
 
 
+_HRV_MIN_BASELINE = 14   # days of HRV before the last week needed for a personal baseline
+_HRV_MIN_SWC = 0.02      # ≈2%: keeps very stable athletes from flagging on noise
+
+
 def calculate_hrv(wellness):
     wellness = _sorted_wellness(wellness)
     vals = [w.get("hrv") for w in wellness if (w.get("hrv") or 0) > 0]
@@ -163,10 +167,37 @@ def calculate_hrv(wellness):
     
     dev_7d = (avg7 - avg60) / avg60 if avg60 else 0
     dev_today = (today - avg60) / avg60 if avg60 else 0
-    
-    trend = "DOWN" if dev_7d < -0.05 else ("UP" if dev_7d > 0.05 else "STABLE")
     stability = "VERY_STABLE" if cv7 < 8 else ("STABLE" if cv7 < 12 else "UNSTABLE")
-    
+
+    result = {"today": today, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
+              "cv7d": round(cv7,1), "stability": stability, "deviation_pct": round(dev_today*100,1)}
+
+    baseline = vals[:-7]
+    if len(baseline) >= _HRV_MIN_BASELINE:
+        # Plews/Altini: compare the 7-day rolling mean of ln(rMSSD) with the athlete's own
+        # baseline (excluding the last 7 days). The "normal" band is ± the smallest
+        # worthwhile change (SWC = 0.5 × SD of the baseline).
+        ln_base = [math.log(v) for v in baseline]
+        mean_b = sum(ln_base) / len(ln_base)
+        sd_b = math.sqrt(sum((x - mean_b) ** 2 for x in ln_base) / len(ln_base))
+        swc = max(0.5 * sd_b, _HRV_MIN_SWC)
+        z7 = (sum(math.log(v) for v in last7) / len(last7) - mean_b) / swc
+        z_today = (math.log(today) - mean_b) / swc
+        if z7 < -2 or z_today < -4:
+            state = "LOW"
+        elif z7 < -1:
+            state = "SLIGHTLY_LOW"
+        elif z7 > 2:
+            state = "HIGH"
+        else:
+            state = "NORMAL"
+        trend = "DOWN" if z7 < -1 else ("UP" if z7 > 1 else "STABLE")
+        result.update({"state": state, "trend": trend, "method": "ln_rmssd_swc",
+                       "ln_baseline": round(mean_b, 3), "swc": round(swc, 3), "z7d": round(z7, 2)})
+        return result
+
+    # Too little history for a baseline: fall back to simple percentage thresholds.
+    trend = "DOWN" if dev_7d < -0.05 else ("UP" if dev_7d > 0.05 else "STABLE")
     if dev_7d < -0.10 or dev_today < -0.25:
         state = "LOW"
     elif dev_7d < -0.05 or dev_today < -0.15:
@@ -175,10 +206,8 @@ def calculate_hrv(wellness):
         state = "HIGH"
     else:
         state = "NORMAL"
-        
-    return {"today": today, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
-            "cv7d": round(cv7,1), "state": state, "trend": trend, "stability": stability,
-            "deviation_pct": round(dev_today*100,1)}
+    result.update({"state": state, "trend": trend, "method": "percent"})
+    return result
 
 def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> dict:
     """Composite readiness score 0-100 based on HRV, sleep, resting HR trend, RPE, and feel."""

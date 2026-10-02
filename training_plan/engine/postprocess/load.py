@@ -1,4 +1,5 @@
 from training_plan.core.common import *
+from training_plan.core.catalogs import ZONE_CANONICAL
 from training_plan.engine.planning import classify_session_category
 from training_plan.engine.postprocess.safety import is_intense
 
@@ -51,6 +52,10 @@ def ftp_for_sport(sport_type: str, athlete: dict) -> float:
     return 200.0
 
 
+def _canonical_zone(zone: str) -> str:
+    return ZONE_CANONICAL.get((zone or "").strip().upper(), zone)
+
+
 def _tss_cache_key(day: PlanDay) -> tuple:
     return (
         day.intervals_type,
@@ -63,23 +68,22 @@ def estimate_tss_coggan(day, athlete: dict) -> float:
         return 0.0
     if day.intervals_type == "WeightTraining":
         return round(day.duration_min * 0.5, 1)  # ~20 TSS för 40min styrka
-    ftp = ftp_for_sport(day.intervals_type, athlete)
-    cache_key = (_tss_cache_key(day), ftp)
+    cache_key = _tss_cache_key(day)
     cached = _TSS_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    dur_sek  = day.duration_min * 60
-    if day.workout_steps:
-        total_min = sum(s.duration_min for s in day.workout_steps) or day.duration_min
-        weighted_ratio = sum(
-            ZONE_NP_RATIO.get(s.zone, 0.70) * s.duration_min
-            for s in day.workout_steps
-        ) / total_min
+    # TSS per step (hours × IF² × 100). Averaging IF over the whole session first
+    # underestimates interval sessions, since TSS grows with the square of intensity.
+    steps = [s for s in day.workout_steps if s.duration_min > 0]
+    if steps:
+        total_min = sum(s.duration_min for s in steps)
+        step_tss = sum(
+            s.duration_min / 60 * ZONE_NP_RATIO.get(_canonical_zone(s.zone), 0.70) ** 2 * 100
+            for s in steps
+        )
+        tss = step_tss * day.duration_min / total_min  # scale if steps and duration disagree
     else:
-        weighted_ratio = 0.70
-    np_est = weighted_ratio * ftp
-    IF     = np_est / ftp
-    tss    = (dur_sek * np_est * IF) / (ftp * 3600) * 100
+        tss = day.duration_min / 60 * 0.70 ** 2 * 100
     result = round(tss, 1)
     _TSS_CACHE[cache_key] = result
     return result

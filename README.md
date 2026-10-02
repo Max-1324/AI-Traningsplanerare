@@ -3,20 +3,27 @@
 En personlig AI-coach för uthållighetsträning (cykel, rullskidor, löpning med mera) som läser din träning från
 [intervals.icu](https://intervals.icu) och lägger in en anpassad plan i samma kalender varje morgon.
 
-Idén är att **träningsvetenskap styr belastningen** (CTL/ATL/TSB, ramp, mesocykler, HRV, hard-easy) och att
-**AI:n står för passen**: val, placering, beskrivningar och coachfeedback.
+Grundprincipen är **deterministisk kärna, AI i kanten**. Koden bestämmer belastningen med träningsvetenskap
+(CTL/ATL/TSB, ramp, mesocykler, HRV, hard-easy) och väljer passen ur ett passbibliotek med progression. AI:n får
+välja mellan godkända alternativ och skriver beskrivningar och coachfeedback. Planen fungerar även utan AI.
 
 ## Så fungerar det
 
-1. **Hämtar** aktiviteter, wellness (HRV, sömn, vilopuls), fitness, kalender, tävlingar och väder.
+1. **Hämtar** aktiviteter, wellness (HRV, sömn, vilopuls, CTL/ATL), kalender, tävlingar och väder.
 2. **Analyserar** nuläget: readiness, belastning och ramp, mesocykelvecka, compliance, tävlingsvecka och taper.
-3. **Avgör läget**: behöver planen göras om (`full`), förlängas (`extend`) eller inte röras (`none`)?
-   Vid `none` görs inga AI-anrop.
-4. **Planerar med AI**: en prompt med all kontext, flera kandidater, granskning och revision.
-5. **Säkrar planen**: ett 20-tal deterministiska regler (hard-easy, HRV-veto, sjukdom/RTP, deload,
-   sportgränser, TSS-tak) plus en slutvalidering. Bryter planen mot en hård regel sparas den inte.
-6. **Sparar** passen i intervals.icu med strukturerade steg (watt för inomhuscykel, pulszoner för övrigt),
+3. **Sätter veckomål**: ett TSS-mål per kalendervecka utifrån CTL, mesocykel (deload på rätt vecka), ramp
+   och nedtrappning inför tävlingar.
+4. **Bygger planen**: ett veckoskelett (nyckelpass, långpass, lätta dagar, vila) blir konkreta pass för
+   10 dagar framåt. Låg HRV, kort sömn, lite tid eller skada påverkar bara idag och imorgon, och nyckelpasset
+   flyttas då senare i veckan.
+5. **Avgör läget**: behöver planen göras om (`full`, alltid på måndagar), förlängas (`extend`) eller inte
+   röras (`none`)? Vid `none` görs inga AI-anrop.
+6. **Berikar med AI** i ett anrop, och bara för de pass som ska sparas. Planen kontrolleras sedan igen mot
+   säkerhetsreglerna och valideringen. Misslyckas AI:n används den deterministiska planen.
+7. **Sparar** passen i intervals.icu med strukturerade steg (watt för inomhuscykel, pulszoner för övrigt),
    samt en daglig coachanteckning och en veckorapport.
+
+Den gamla AI-först-pipelinen (flera kandidater, granskning, revision) finns kvar som `--engine legacy`.
 
 Detaljerna finns i [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -37,9 +44,12 @@ pip install -r requirements.txt
 python main.py --dry-run   # visa planen utan att spara
 python main.py             # interaktiv morgonkoll + spara
 python main.py --auto      # icke-interaktivt (cron/webhook)
+python main.py --no-ai     # helt utan AI: bara den deterministiska planen
 ```
 
-Övriga flaggor: `--horizon 28` (antal dagar framåt), `--days-history 60`, `--provider gemini|openai|anthropic|ollama|groq|mistral`.
+Övriga flaggor: `--engine deterministic|legacy`, `--horizon N` (dagar framåt; standard 9 för deterministic och
+28 för legacy), `--days-history 60`, `--provider gemini|openai|anthropic|ollama|groq|mistral`.
+En komplett mall för `.env` finns i [.env.example](.env.example).
 
 ### Daglig input utan terminal
 I läget `--auto` läses dagens input från wellness-kommentaren i intervals.icu: fri text som "max 1h",
@@ -48,8 +58,9 @@ med `time_available=`, `injury=` och `athlete_note=`.
 
 ### Styra planen från kalendern
 - **Manuella pass** du lägger in själv låses och planeras runt.
-- **Tävlingar**: prioritet sätts med namnprefix, `B: Namn` eller `C: Namn` (annars A-tävling).
-  Sport kan anges som `[Ride]` i namnet.
+- **Tävlingar**: prioritet läses från tävlingens kategori i intervals.icu (A/B/C). Som reserv fungerar
+  namnprefix, `B: Namn` eller `C: Namn`, annars räknas den som A-tävling. Sport kan anges som `[Ride]` i namnet.
+  A-tävlingar får två veckors nedtrappning, B-tävlingar några dagar och C-tävlingar nästan ingen.
 - **Begränsningar**: ett event (t.ex. en NOTE) vars namn börjar med `Bara:` eller `Ej:` (även `Only:`/`Not:`), t.ex.
   `Ej: löpning` eller `Bara: Zwift`, gäller för eventets datumintervall.
 
@@ -77,20 +88,38 @@ med `time_available=`, `injury=` och `athlete_note=`.
 | `OLLAMA_MODEL`, `OLLAMA_NUM_PREDICT`, `OLLAMA_THINK` | –, `16384`, av | Lokal Ollama på `localhost:11434` |
 | `AI_MIN_REQUEST_INTERVAL_SEC` | `6.0` | Minsta tid mellan Gemini-anrop |
 
+**Planeringsmotor**
+
+| Variabel | Standard | Beskrivning |
+|---|---|---|
+| `PLANNER_ENGINE` | `deterministic` | `legacy` ger den gamla AI-först-pipelinen (samma som `--engine`) |
+| `PLANNER_AI` | `on` | `off` hoppar över AI-berikningen (samma som `--no-ai`) |
+| `DETAIL_HORIZON_DAYS` | `9` | Dagar framåt med konkreta pass (utöver idag) |
+| `COACH_LANGUAGE` | `English` | Språk för AI-texterna, t.ex. `Swedish` |
+| `RAMP_CTL_PER_WEEK`, `RAMP_CTL_MAX` | `4.0`, `6.0` | Planerad CTL-ökning per byggvecka, och tak. Mot en A-tävling används rampen som krävs för att nå `TARGET_CTL`, inom taket |
+| `DELOAD_LOAD_FACTOR` | `0.70` | Deloadveckans dagliga belastning som andel av CTL |
+| `KEY_SESSIONS_PER_WEEK` | `2` | Nyckelpass (intervaller/tempo) per byggvecka |
+| `STRENGTH_PER_WEEK` | `1` | Styrkepass per vecka (begränsas också av `MAX_STRENGTH_PER_PLAN`) |
+| `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport (t.ex. rullskidor) per vecka |
+| `LONG_SESSION_SHARE` | `0.35` | Långpassets största andel av veckans TSS |
+| `WEEKDAY_MAX_MIN` | `120` | Längsta uthållighetspass måndag–fredag |
+| `CATCH_UP_CAP` | `1.15` | Resten av en påbörjad vecka får högst så här mycket mer än sin andel (inget ikapptränande) |
+| `PLAN_ENRICH_TEMPERATURE` | `0.3` | Temperatur för AI-berikningen |
+
 **Atlet och planering**
 
 | Variabel | Standard | Beskrivning |
 |---|---|---|
 | `AVAILABLE_SPORTS` | alla i katalogen | T.ex. `Ride,VirtualRide,RollerSki,Run` (styrka och vila ingår alltid) |
 | `DEFAULT_SPORT`, `FALLBACK_SPORT`, `POWER_SPORTS` | –, –, `VirtualRide` | Huvudsport när historik saknas, ersättningssport när ett pass måste bytas, sporter med effektmätare (får watt-mål) |
-| `TARGET_CTL` | `85` | CTL-mål inför A-tävlingen |
+| `TARGET_CTL` | `85` | CTL-mål inför A-tävlingen. Rampen planeras aldrig förbi målet |
 | `RISK_TOLERANCE` | `NORMAL` | `HIGH` höjer ACWR-gränsen |
 | `MIN_BUDGET_RUN_MIN`, `MIN_BUDGET_ROLLERSKI_MIN` | `60`, `90` | Golv för veckobudget i skadebenägna sporter |
 | `MAX_ROLLSKI_PER_WEEK`, `MAX_STRENGTH_PER_PLAN`, `MIN_STRENGTH_GAP_DAYS` | `1`, `2`, `2` | Sportgränser |
 | `ATHLETE_LAT`, `ATHLETE_LON`, `ATHLETE_LOCATION` | Karlstad | Plats för väderprognosen |
 | `CONTACT_EMAIL` | platshållare | Skickas i User-Agent till met.no, som kräver kontaktuppgift |
 
-**Pipeline (finjustering)**: `PLAN_CANDIDATE_COUNT` (3), `PLAN_REVIEW_MAX_ITERATIONS` (5),
+**Legacy-pipeline (finjustering)**: `PLAN_CANDIDATE_COUNT` (3), `PLAN_REVIEW_MAX_ITERATIONS` (5),
 `PLAN_EARLY_STOP_PATIENCE` (2), `PLAN_FIRST_ROUND_TEMPERATURE` (0.35), `PLAN_REVISION_TEMPERATURE` (0.15),
 `PLAN_REVIEW_TEMPERATURE` (0.05), `PLAN_PAIRWISE_TEMPERATURE` (0.05), `PLAN_PAIRWISE_SCORE_MARGIN` (1),
 `PLAN_TSS_GAP_REVISION_MIN_MISSING` (120), `PLAN_TSS_GAP_REVISION_MIN_PCT` (0.90),
@@ -98,7 +127,7 @@ med `time_available=`, `injury=` och `athlete_note=`.
 `PLAN_INVALID_REVIEW_RANK_PENALTY` (4.0), `PLAN_INVALID_REVIEW_COMPETITIVE_MARGIN` (2.0),
 `PLAN_DEBUG_PARSE_FAILURES`, `LOG_LEVEL` (`INFO`/`DEBUG`).
 
-**Webhook-server**: `WEBHOOK_SECRET`, `PORT` (8080).
+**Webhook-server**: `WEBHOOK_SECRET`, `PORT` (8080), `GENERATOR_TIMEOUT_SEC` (900).
 
 ## Drift
 
@@ -116,8 +145,16 @@ Lokalt state: `.coach_state.json` (mesocykel, progressionsnivåer, lärda mönst
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-`tests/test_regressions.py` innehåller regressionstester för buggarna i [docs/ROADMAP.md](docs/ROADMAP.md).
-Riktade körningar fungerar också, t.ex. `python -m unittest tests.test_postprocess_rules -v`.
+Testerna körs också i GitHub Actions vid varje push och pull request ([tests.yml](.github/workflows/tests.yml)).
+
+| Testfil | Vad den täcker |
+|---|---|
+| `tests/test_periodization.py` | Veckomål: mesocykel per vecka, deload, ramp, taper och tävlingsprioritet |
+| `tests/test_deterministic_planner.py` | Planeraren i flera hundra kombinationer av situationer: planen ska alltid klara säkerhetsreglerna och valideringen |
+| `tests/test_enrichment.py` | AI-berikningen: begränsade val, texter och reservkedjan |
+| `tests/test_regressions.py` | Regressionstester för buggarna i [docs/ROADMAP.md](docs/ROADMAP.md) |
+
+Riktade körningar fungerar också, t.ex. `python -m unittest tests.test_deterministic_planner -v`.
 
 ## Riktlinjer för ny kod
 

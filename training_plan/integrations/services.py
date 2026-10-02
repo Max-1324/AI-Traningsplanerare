@@ -17,6 +17,7 @@ from training_plan.integrations.intervals_client import (
     fetch_races,
     fetch_wellness,
     fetch_yesterday_actual,
+    fitness_from_wellness,
     get_taper_config,
     icu_get,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "fetch_weather",
     "fetch_wellness",
     "fetch_yesterday_actual",
+    "fitness_from_wellness",
     "generate_weekly_report",
     "get_taper_config",
     "icu_get",

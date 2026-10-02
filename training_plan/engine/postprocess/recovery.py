@@ -14,9 +14,13 @@ def enforce_illness(days, today_wellness):
         return days, []
     changes = ["Illness reported – all sessions converted to rest."]
     new_days = []
+    seen_dates = set()
     for day in days:
         if day.intervals_type != "Rest":
             changes.append(f"  {day.date}: {day.title} → Rest (Illness)")
+        if day.date in seen_dates:
+            continue  # one rest entry per date, even where a double session was planned
+        seen_dates.add(day.date)
         new_days.append(PlanDay(
             date=day.date,
             title="Rest (Illness)",
@@ -181,15 +185,21 @@ def enforce_hard_easy(days):
 
 
 
-def enforce_hrv(days, hrv):
+def enforce_hrv(days, hrv, today: date | None = None):
     # Veto endast vid tydligt LOW – SLIGHTLY_LOW och UNSTABLE-ensamt informeras bara AI:n
     if hrv["state"] != "LOW":
         return days, []
 
+    # Låg HRV gäller idag och imorgon. Matcha på datum, inte listposition, så att
+    # dubbelpass och låsta dagar inte flyttar vetot till fel dag.
+    if today is not None:
+        veto_dates = {today.isoformat(), (today + timedelta(days=1)).isoformat()}
+    else:
+        veto_dates = set(sorted({day.date for day in days})[:2])
+
     changes = []
     for i, day in enumerate(days):
-        # Applicera HRV-veto ENDAST på de första 2 dagarna (idag och imorgon)
-        if i <= 1 and is_intense(day):
+        if day.date in veto_dates and is_intense(day):
             recovery_step = WorkoutStep(
                 duration_min=day.duration_min,
                 zone="Z1",
@@ -332,10 +342,19 @@ def enforce_strength_limit(days, max_strength=None, min_gap=None):
     fallback     = _pick_fallback_sport(avoid="WeightTraining")
     changes = []
     strength_count = 0
-    last_strength_idx = -99
+    last_strength_date = None
     for i, day in enumerate(days):
         if day.intervals_type != "WeightTraining": continue
-        too_close  = (i - last_strength_idx) < min_gap
+        # Gap in calendar days, not list positions: double sessions and locked dates
+        # change the number of entries per day.
+        try:
+            day_date = datetime.strptime(day.date, "%Y-%m-%d").date()
+        except ValueError:
+            day_date = None
+        too_close  = (
+            last_strength_date is not None and day_date is not None
+            and (day_date - last_strength_date).days < min_gap
+        )
         too_many   = strength_count >= max_strength
         if too_many or too_close:
             reason = f"strength limit (max {max_strength})" if too_many else f"too close (< {min_gap} days since last)"
@@ -351,7 +370,7 @@ def enforce_strength_limit(days, max_strength=None, min_gap=None):
             changes.append(f"STRENGTH_LIMIT: {day.date} -> {fallback} Z1 ({reason})")
         else:
             strength_count  += 1
-            last_strength_idx = i
+            last_strength_date = day_date
     return days, changes
 
 def enforce_rollski_limit(days, max_per_week=None):

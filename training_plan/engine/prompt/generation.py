@@ -4,6 +4,7 @@ from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.engine.analysis import *
 from training_plan.engine.skeleton import format_skeleton_for_prompt
+from training_plan.engine.utils import race_priority
 
 from training_plan.engine.prompt.inputs import fmt
 from training_plan.engine.prompt.sections import (
@@ -125,13 +126,7 @@ def build_prompt(ctx: PromptContext) -> str:
         except ValueError:
             dt = "?"
         name = r.get("name", "?")
-        name_lower = name.lower()
-        if "c:" in name_lower:
-            priority = "C"
-        elif "b:" in name_lower:
-            priority = "B"
-        else:
-            priority = "A"
+        priority = race_priority(r)
         if isinstance(dt, int) and dt <= 21:
             tag = " <- TAPER"
         elif priority == "A" and not _a_race_found:

@@ -8,58 +8,64 @@ och ordningen i [ROADMAP.md](ROADMAP.md).
 
 ## Del 1: Så fungerar det idag
 
-### Flödet i en körning (`python main.py --auto`)
+### Flödet i en körning (`python main.py --auto`, deterministisk motor)
 
 ```text
 main.py
  └─ training_plan/app/main.py: main()
-     1. Hämta      8 dataset parallellt från intervals.icu + met.no      (integrations/)
+     1. Hämta      7 dataset parallellt från intervals.icu + met.no; fitness räknas ur wellness
      2. Städa      datakvalitet: filtrera orimliga aktiviteter, blanka ogiltig HRV/sömn
-     3. Analysera  ~30 funktioner: HRV, readiness, mesocykel, CTL-trajektoria, TSS-budget,
-                   compliance, ACWR, tävlingsvecka, kapacitetskarta, prognos, säsongsplan …
-     4. Läge       resolve_update_mode(): none / extend / full. Vid "none" avslutas körningen här
-     5. Skelett    build_week_skeleton(): FIXED/GUIDED/OPEN per dag
-     6. Prompt     build_prompt(PromptContext): en stor prompt för hela horisonten (29 dagar)
-     7. Pipeline   run_plan_pipeline():
-                     för varje kandidat (standard 3):
-                       generate_plan (AI) → post_process (~20 enforce_*-regler)
-                       → TSS-gap-revision (AI, vid behov) → validate/repair
-                       → review_plan (AI) → poäng → ev. compare_plans (AI)
-                     upp till 5 revisionsrundor, early stop
-     8. Validera   slutlig deterministisk validering + reparation; stoppas vid hårda fel
-     9. Spara      radera gamla AI-event och skapa nya (full) eller lägg till saknade datum (extend),
+     3. Analysera  HRV (ln rMSSD mot egen baslinje), readiness, mesocykel, CTL-trajektoria, compliance,
+                   ACWR, tävlingsvecka, utvecklingsbehov, coachlager …
+     4. Planera    app/deterministic.py: build_planner_inputs()
+                     → engine/periodization.py: build_week_targets()   ett TSS-mål per vecka
+                     → engine/skeleton.py: build_week_skeleton()       dagsroller per vecka
+                     → engine/planner.py: build_deterministic_plan()   konkreta pass + alternativ
+     5. Läge       resolve_update_mode(): none / extend / full (alltid full på måndagar).
+                   Vid "none" avslutas körningen utan AI-anrop
+     6. Berika     engine/pipeline/enrich.py: ett AI-anrop för de pass som ska sparas
+                   (val bland alternativen + texter), sedan apply_safety_rules() och validering.
+                   Reserv: AI-texter utan val → ren deterministisk plan
+     7. Validera   slutlig deterministisk validering; stoppas vid hårda fel
+     8. Spara      radera framtida AI-event och skapa nya (full) eller lägg till saknade datum (extend),
                    daglig coachanteckning, veckorapport (måndagar/full)
-    10. State      .coach_state.json: mesocykel, progressionsnivåer, failure memory, utfall
+     9. State      .coach_state.json: mesocykel, progressionsnivåer, failure memory, utfall
 ```
+
+Med `--engine legacy` ersätts steg 4–6 av den gamla AI-först-pipelinen: en stor prompt för 29 dagar,
+3 kandidater, cirka 20 efterhandsregler, AI-granskning, parvis jämförelse och upp till 5 revisionsrundor.
 
 ### Var koden ligger
 
 | Mapp | Ansvar | Viktigaste filerna |
 |---|---|---|
-| `training_plan/app/` | Orkestrering | `main.py`: hela flödet ovan i en funktion |
+| `training_plan/app/` | Orkestrering | `main.py` (hela flödet), `deterministic.py` (analys → planerarens indata, AI-kontext, berikning + validering) |
 | `training_plan/core/` | Delad grund | `config.py` (env), `catalogs.py` (sporter, zoner), `models.py` (Pydantic: `PlanDay`, `AIPlan`, `PlanReview`, `AppState`), `common.py` (logging + gemensamma imports), `cli.py` |
 | `training_plan/engine/analysis/` | Analys av nuläget | `data.py` (datakvalitet, HRV, readiness, motivation), `load.py` (ACWR, sportbudget, ramp, TSS-budget), `strategy.py` (fas, tävlingsvecka, RTP, taper, utvecklingsbehov), `athlete.py` (zoner, atletprofil) |
 | `training_plan/engine/planning/` | Planeringshjälp | `state.py` (state-fil, mesocykel, failure memory), `metrics.py` (passklassning, polarisering, CTL-trajektoria), `learning.py` (compliance, mönster), `workouts.py` (progression, prehab, FTP-test) |
 | `training_plan/engine/insights/` | "Coachlager" | `profiles.py`, `execution.py`, `forecast.py`: kapacitetskarta, minimum effective dose, friktion, benchmarks, prognos, säsongsplan |
 | `training_plan/engine/prompt/` | Promptbygge | `generation.py` (huvudprompten), `sections.py`, `inputs.py` (morgonfrågor) |
-| `training_plan/engine/pipeline/` | AI-pipeline | `__init__.py` (`run_plan_pipeline`), `core.py`, `prompts.py`, `reviews.py`, `scoring.py`, `candidates.py`, `outcomes.py` |
-| `training_plan/engine/postprocess/` | Regler i efterhand | `recovery.py` (hard-easy, HRV, sjukdom, RTP, deload, styrka …), `load.py` (TSS-skattning, TSS-tak och -reparation), `injury.py`, `nutrition.py` |
+| `training_plan/engine/` (kärnan) | Deterministisk planering | `periodization.py` (`WeekTarget`, veckomål), `planner.py` (`build_deterministic_plan`: pass, alternativ, `horizon_tss_target`, `max_hard_days`), `skeleton.py` (dagsroller per vecka) |
+| `training_plan/engine/pipeline/` | AI | `enrich.py` (berikning: ett anrop, begränsade val, reservkedja). Legacy: `__init__.py` (`run_plan_pipeline`), `core.py`, `prompts.py`, `reviews.py`, `scoring.py`, `candidates.py`, `outcomes.py` |
+| `training_plan/engine/postprocess/` | Säkerhetsregler | `__init__.py` (`apply_safety_rules` för den deterministiska motorn, `post_process` för legacy), `recovery.py` (hard-easy, HRV, sjukdom, RTP, deload, styrka …), `load.py` (TSS per steg, TSS-tak/-reparation för legacy), `injury.py` (`injury_restrictions`, rehab), `nutrition.py` |
 | `training_plan/engine/validation/` | Slutkontroll | `rules.py` (validering), `structure.py` (reparation), `adapters.py` |
 | `training_plan/engine/ai/` | LLM-klient | `client.py` (gemini/openai/anthropic/ollama/groq/mistral), `parsing.py`, `display.py` (utskrift, uppdateringsläge) |
-| `training_plan/engine/` | Övrigt | `skeleton.py` (veckoskelett), `libraries.py` (constraints från kalendern), `context.py` (`PromptContext`), `utils.py` |
+| `training_plan/engine/` | Övrigt | `libraries.py` (styrke-/prehabbibliotek, constraints från kalendern), `context.py` (`PromptContext`, legacy), `utils.py` (bl.a. `race_priority`) |
 | `training_plan/integrations/` | Extern IO | `intervals_client.py` (hämta), `intervals_events.py` (spara/radera event), `notes.py` (coachanteckning, veckorapport), `weather.py` (met.no) |
-| rot | Körning | `main.py` (CLI), `server.py` (webhook för Render), `.github/workflows/morning.yml` (daglig cron) |
+| rot | Körning | `main.py` (CLI), `server.py` (webhook för Render), `.github/workflows/morning.yml` (daglig cron), `.github/workflows/tests.yml` (CI) |
 
 Flera filer är **kompatibilitetsfasader** som bara återexporterar namn: `engine/ai/__init__.py`,
 `engine/prompt_builders.py`, `integrations/services.py`, `engine/analysis/__init__.py` och
 `engine/planning/__init__.py`. Tillsammans med 55 `import *` gör det beroendegrafen svår att följa.
 
-### Svagheter i nuvarande arkitektur
-- **AI:n äger planen och reglerna rättar i efterhand.** Det kräver många LLM-anrop och reparationer.
-- **Allt i en funktion.** `main()` är cirka 820 rader och svår att testa i delar.
-- **Horisonten saknar periodisering.** Mesocykelfaktorn för innevarande vecka gäller alla 29 dagar
-  (se ROADMAP #6).
-- **State på två ställen.** GitHub Actions-cache och Renders flyktiga disk har var sin `.coach_state.json`.
+### Kvarvarande svagheter
+- **Allt i en funktion.** `main()` är fortfarande stor, nu med två motorer, och svår att testa i delar.
+- **Fasader och `import *`** gör beroendena svåra att följa (ROADMAP #16).
+- **State på två ställen.** GitHub Actions-cache och Renders flyktiga disk har var sin `.coach_state.json`
+  (ROADMAP #7).
+
+Löst: AI:n äger inte längre planen (en deterministisk plan finns alltid), och horisonten periodiseras vecka
+för vecka (ROADMAP #6).
 
 ---
 
@@ -161,9 +167,12 @@ app.run()
 Att flytta filerna först ger mest dubbelarbete, eftersom planeringskärnan ändå ska skrivas om. Rekommenderad
 ordning (samma som i ROADMAP):
 
-1. Buggfixar och CI i nuvarande struktur.
-2. Skriv `planning/periodization.py` som en **ny** modul och koppla in den i nuvarande skelett och TSS-tak.
-3. Kortare horisont och färre AI-anrop.
-4. Deterministiskt passval där AI:n berikar, och `engine/pipeline` krymper till `ai/coach.py`.
-5. Flytta det som återstår till målstrukturen och ta bort fasaderna.
-6. Rensa insikter och lägg till backtesting.
+1. ✅ Buggfixar och CI i nuvarande struktur.
+2. ✅ Veckomål per vecka (`engine/periodization.py`), inkopplade i skelettet och planeraren.
+3. ✅ Kortare horisont (10 dagar) och ett AI-anrop i stället för cirka 20.
+4. ✅ Deterministiskt passval där AI:n berikar (`engine/planner.py` + `engine/pipeline/enrich.py`).
+   Legacy-pipelinen finns kvar bakom `--engine legacy`. Den kan tas bort när den nya motorn har fungerat
+   ett tag.
+5. ⬜ Flytta det som återstår till målstrukturen och ta bort fasaderna. `periodization.py` och `planner.py`
+   blir då `planning/periodization.py` och `planning/sessions.py`, och `enrich.py` blir `ai/coach.py`.
+6. ⬜ Rensa insikter och lägg till backtesting.

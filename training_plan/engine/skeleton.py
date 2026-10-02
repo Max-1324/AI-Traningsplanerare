@@ -40,6 +40,11 @@ def build_week_skeleton(
     race_week: dict | None,
     locked_dates: set[str],
     rtp_status: dict | None = None,
+    *,
+    week_targets: list | None = None,
+    restricted_dates: set[str] | None = None,
+    intensity_done_by_week: dict | None = None,
+    yesterday_was_hard: bool = False,
 ) -> list[DaySlot]:
     """Return a DaySlot for every date in the planning horizon.
 
@@ -55,6 +60,12 @@ def build_week_skeleton(
        - OPEN   → AI has full freedom (supporting-volume days).
     4. Hard constraints from postprocess.py (hard-easy rule) become the
        DEFAULT rather than a retroactive correction.
+
+    With ``week_targets`` (deterministic planner) every calendar week uses its
+    own key-session cap and deload/race status, and readiness no longer caps
+    the whole horizon: it only blocks intensity on ``restricted_dates``
+    (today/tomorrow when HRV, sleep or time is poor), so key sessions move
+    later in the week instead of disappearing.
     """
     is_deload = mesocycle.get("is_deload", False)
     readiness_score: float = (readiness or {}).get("score", 50)
@@ -72,9 +83,16 @@ def build_week_skeleton(
     else:
         max_intensity_per_week = 3
 
+    restricted_dates = restricted_dates or set()
     slots: list[DaySlot] = []
-    intensity_by_week: dict[int, int] = {}
-    last_was_intensity = False
+    intensity_by_week: dict[int, int] = dict(intensity_done_by_week or {})
+    last_was_intensity = yesterday_was_hard
+
+    def _target_for(day: _date):
+        for target in week_targets or []:
+            if target.contains(day.isoformat()):
+                return target
+        return None
 
     for date_str in dates:
         try:
@@ -85,8 +103,17 @@ def build_week_skeleton(
         week_num = d.isocalendar()[1]
         dow = d.weekday()  # 0 = Monday, 6 = Sunday
         week_intensity = intensity_by_week.get(week_num, 0)
+        if week_targets is not None:
+            target = _target_for(d)
+            week_max = target.max_key_sessions if target else max_intensity_per_week
+            week_easy_only = bool(target and (target.is_deload or target.kind == "race"))
+        else:
+            week_max = max_intensity_per_week
+            week_easy_only = is_deload or (race_active and days_to_race <= 3)
         can_be_intensity = (
-            week_intensity < max_intensity_per_week and not last_was_intensity
+            week_intensity < week_max
+            and not last_was_intensity
+            and date_str not in restricted_dates
         )
 
         # ── FIXED: locked by a manual workout ─────────────────────────────────
@@ -116,7 +143,7 @@ def build_week_skeleton(
             continue
 
         # ── Deload week or final race-week taper: everything easy/rest ─────────
-        if is_deload or (race_active and days_to_race <= 3):
+        if week_easy_only:
             if dow == 6:  # Sunday: allow a slightly longer easy ride
                 slots.append(
                     DaySlot(
@@ -192,7 +219,7 @@ def build_week_skeleton(
                     tss_range=(65, 115),
                     reason=(
                         f"primary intensity slot "
-                        f"(week budget: {max_intensity_per_week}/week)"
+                        f"(week budget: {week_max}/week)"
                     ),
                 )
             )

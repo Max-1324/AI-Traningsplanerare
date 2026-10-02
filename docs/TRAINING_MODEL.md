@@ -40,6 +40,20 @@ Viktiga principer:
 4. **TSS är ett intervall, inte ett mål att jaga.** Volym kommer från skelettet (långpass och uthållighetsdagar),
    inte från att fylla vilodagar.
 
+### Status: implementerat
+Modellen ovan är nu standardmotorn (`PLANNER_ENGINE=deterministic`):
+
+| Lager | Kod |
+|---|---|
+| Makro | `engine/periodization.py`: `build_week_targets()` |
+| Mikro | `engine/skeleton.py`: `build_week_skeleton(week_targets=…)` |
+| Passval | `engine/planner.py`: `build_deterministic_plan()` |
+| Berikning | `engine/pipeline/enrich.py`: ett AI-anrop med begränsade val och reservkedja |
+| Autoreglering | Restriktion av idag/imorgon i `app/deterministic.py` + `apply_safety_rules()` som skyddsnät |
+
+HRV-analysen använder ln(rMSSD) mot egen baslinje ± SWC (se nedan). ACWR används bara som information:
+planeraren planerar inte in sporter i riskzonen. Den gamla AI-först-pipelinen finns kvar som `--engine legacy`.
+
 ## Vetenskapliga kommentarer
 
 ### CTL/ATL/TSB (Banister / Performance Manager Chart)
@@ -50,8 +64,9 @@ målfunktionen, av flera skäl:
 - Den fångar varken intensitetsfördelning eller durability.
 
 **Rekommendation:** CTL-mål och rampgräns styr veckomålen, och TSB-golv och HRV styr när det ska bromsas.
-Ramp +5–7 CTL/vecka som "normalläge" (`choose_target_ramp`) och `TARGET_CTL=85` är aggressivt för en
-motionär. Gör det konfigurerbart med standard runt **+3–5 CTL/vecka**.
+Legacy-motorns ramp på +5–7 CTL/vecka som "normalläge" (`choose_target_ramp`) är aggressiv för en motionär.
+Den deterministiska motorn använder `RAMP_CTL_PER_WEEK` (standard **+4**, tak `RAMP_CTL_MAX` = 6) och
+planerar aldrig förbi `TARGET_CTL`. Sänk `TARGET_CTL` om 85 är högt för dig.
 
 ### ACWR (acute:chronic workload ratio)
 Den är vetenskapligt ifrågasatt. Kritiken gäller matematisk koppling mellan täljare och nämnare och svag
@@ -67,7 +82,7 @@ Gör det enligt etablerad metodik:
 - definiera "normalt" som baslinje ± **SWC** (smallest worthwhile change, cirka 0,5 × SD);
 - följ även **CV** för ln(rMSSD) över 7 dagar, eftersom ökande variation är en tidig varningssignal.
 
-Dagens implementation (`calculate_hrv`) använder råa %-trösklar mot en baslinje som innehåller de senaste dagarna.
+`calculate_hrv` gör nu så (LOW under −2·SWC för 7-dagarssnittet). Tidigare användes råa %-trösklar mot en baslinje som innehöll de senaste dagarna, och de används fortfarande som reserv när historiken är kortare än 14 dagar.
 
 ### Intensitetsfördelning
 Pyramidal fördelning (mest Z1–Z2, en del Z3, lite Z4+) eller polariserad (cirka 80/20) är väl underbyggd för

@@ -216,7 +216,8 @@ def validate_postprocessed_plan(
             )
 
         # Per-week TSS floor: each calendar week should carry ≥ 80% of its proportional share.
-        if athlete and not med_global and len(plan.days) >= 7:
+        # Skipped when the planner already sized each week from its own target (deload, taper).
+        if athlete and not med_global and len(plan.days) >= 7 and not review_context.get("weekly_targets_applied"):
             weekly_tss: dict[str, float] = defaultdict(float)
             for day in plan.days:
                 try:

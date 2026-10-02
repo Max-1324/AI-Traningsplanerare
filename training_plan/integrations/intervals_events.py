@@ -34,18 +34,20 @@ def plan_day_has_started(day: PlanDay, now: Optional[datetime] = None) -> bool:
     return start_dt <= (now or _stockholm_now_naive())
 
 def delete_ai_workouts(workouts, now: Optional[datetime] = None):
+    """Delete future AI events with the bulk endpoint (50 per request) instead of one call each."""
+    ids = [w["id"] for w in workouts if w.get("id") is not None and is_ai_generated(w) and not event_has_started(w, now)]
     n = 0
-    for w in workouts:
-        if is_ai_generated(w) and not event_has_started(w, now):
-            try:
-                requests.put(
-                    f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
-                    auth=AUTH, timeout=15,
-                    json=[{"id": w["id"]}],
-                ).raise_for_status()
-                n += 1
-            except Exception as e:
-                log.warning(f"Could not delete {w.get('id')}: {e}")
+    for start in range(0, len(ids), 50):
+        chunk = ids[start:start + 50]
+        try:
+            requests.put(
+                f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
+                auth=AUTH, timeout=15,
+                json=[{"id": event_id} for event_id in chunk],
+            ).raise_for_status()
+            n += len(chunk)
+        except Exception as e:
+            log.warning(f"Could not delete {len(chunk)} AI event(s): {e}")
     return n
 
 def update_manual_nutrition(workout, nutrition):

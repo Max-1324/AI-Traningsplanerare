@@ -87,7 +87,43 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
     return plan.model_copy(update={"days": days}), all_c
 
 
+def apply_safety_rules(plan, *, hrv, budgets, locked, athlete, weather=None, today=None,
+                       injury_note="", injury_profile=None, constraints=None, today_wellness=None,
+                       per_sport_acwr_data=None, phase=None, races=None, wellness=None,
+                       time_available_text=""):
+    """Safety net for plans from the deterministic planner.
+
+    The planner already respects these rules, so in practice they should not change
+    anything except adding warm-up and nutrition text. Rules that the planner owns
+    (deload, TSS budget/repair, Return-to-Play, motivation scaling) are not run here.
+    Any veto that still fires is reported, and validation then rejects the plan.
+    """
+    days = list(plan.days)
+    all_c = []
+    if today_wellness:
+        days, c = enforce_illness(days, today_wellness); all_c += c
+        if c:
+            return plan.model_copy(update={"days": days}), all_c
+    days, c = enforce_locked(days, locked);                    all_c += c
+    days, c = enforce_hrv(days, hrv, today=today);             all_c += c
+    days, c = apply_injury_rules(days, injury_note, injury_profile=injury_profile); all_c += c
+    if constraints:
+        days, c = enforce_schedule_constraints(days, constraints); all_c += c
+    if per_sport_acwr_data:
+        days, c = enforce_per_sport_acwr_veto(days, per_sport_acwr_data); all_c += c
+    days, c = enforce_sport_budget(days, budgets);             all_c += c
+    days, c = enforce_hard_easy(days);                         all_c += c
+    days, c = enforce_strength_limit(days);                    all_c += c
+    days, c = enforce_rollski_limit(days);                     all_c += c
+    days     = ensure_warmup(days)
+    days     = add_env_nutrition(days, weather or [], phase=phase, races=races, athlete=athlete, wellness=wellness)
+    days, c  = strip_train_low_contradiction(days);            all_c += c
+    days, c  = enforce_today_time_budget(days, time_available_text); all_c += c
+    return plan.model_copy(update={"days": days}), all_c
+
+
 __all__ = [
+    "apply_safety_rules",
     "HARD_THRESHOLD",
     "INJURY_PROFILES",
     "ZONE_NP_RATIO",

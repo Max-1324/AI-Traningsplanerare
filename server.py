@@ -8,15 +8,19 @@ Krav:
     pip install flask
 
 Miljövariabler:
-    WEBHOOK_SECRET   – Kopieras från intervals.icu webhook-inställningar
-    PORT             – (valfritt, default 8080, sätts automatiskt av Render)
+    WEBHOOK_SECRET         – Kopieras från intervals.icu webhook-inställningar
+    PORT                   – (valfritt, default 8080, sätts automatiskt av Render)
+    GENERATOR_TIMEOUT_SEC  – (valfritt, default 900) max körtid för en planering
 
 Kör lokalt:
-    python webhook_server.py
+    python server.py
 
 På Render:
-    Start command: gunicorn webhook_server:app
+    Start command: gunicorn server:app
     (pip install gunicorn)
+
+Obs: Renders filsystem är flyktigt, så .coach_state.json överlever inte omstarter.
+Kör antingen bara här eller bara via GitHub Actions, inte båda (se docs/ROADMAP.md #7).
 """
 
 import os
@@ -51,6 +55,7 @@ GENERATOR_SCRIPT = os.path.join(os.path.dirname(__file__), "main.py")
 _lock = threading.Lock()
 _last_run: datetime | None = None
 MIN_MINUTES_BETWEEN_RUNS = 5  # Spärr: kör inte oftare än var 5:e minut
+GENERATOR_TIMEOUT_SEC = int(os.environ.get("GENERATOR_TIMEOUT_SEC", "900"))
 
 
 # ── Flask-app ──────────────────────────────────────────────────────────────────
@@ -87,7 +92,7 @@ def run_training_generator(trigger_event: str):
             [sys.executable, GENERATOR_SCRIPT, "--auto"],
             capture_output=True,
             text=True,
-            timeout=300,  # Max 5 minuter – annars timeout
+            timeout=GENERATOR_TIMEOUT_SEC,
         )
 
         if result.returncode == 0:
@@ -102,7 +107,7 @@ def run_training_generator(trigger_event: str):
                     log.error(f"   [ERR] {line}")
 
     except subprocess.TimeoutExpired:
-        log.error("❌  Generatorn tog för lång tid (>5 min) – avbruten")
+        log.error(f"❌  Generatorn tog för lång tid (>{GENERATOR_TIMEOUT_SEC}s) – avbruten")
     except Exception as e:
         log.error(f"❌  Oväntat fel vid start av generator: {e}")
     finally:

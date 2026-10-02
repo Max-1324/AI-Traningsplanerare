@@ -1,0 +1,229 @@
+"""Glue between the analysis in app/main.py and the deterministic planner.
+
+`build_planner_inputs` turns main's analysis results into `PlannerInputs`;
+`build_ai_context` collects the facts the AI enrichment step may use;
+`finalize_deterministic_plan` runs enrichment, safety rules and validation.
+"""
+from __future__ import annotations
+
+from datetime import date, timedelta
+from functools import partial
+
+from training_plan.core.models import AIPlan, PlanDecisionTrace
+from training_plan.engine.periodization import build_week_targets, done_tss_this_week, format_week_targets, monday_of
+from training_plan.engine.pipeline.enrich import COACH_LANGUAGE, enrich_and_validate, request_enrichment
+from training_plan.engine.planner import PlannerInputs, PlannerResult
+from training_plan.engine.planning import classify_session_category
+from training_plan.engine.postprocess import apply_safety_rules
+from training_plan.engine.postprocess.injury import injury_restrictions
+from training_plan.engine.utils import race_priority, time_available_minutes
+from training_plan.engine.validation import validate_postprocessed_plan
+
+_HARD_CATEGORIES = {"threshold", "vo2", "ftp_test"}
+
+
+def _day(item: dict) -> str:
+    return (item.get("start_date_local") or "")[:10]
+
+
+def _latest_sleep_hours(wellness: list, today: date) -> float | None:
+    for w in reversed(wellness or []):
+        if (w.get("id") or "")[:10] in (today.isoformat(), (today - timedelta(days=1)).isoformat()):
+            if w.get("sleepSecs"):
+                return w["sleepSecs"] / 3600
+    return None
+
+
+def build_planner_inputs(
+    *,
+    today: date,
+    horizon: int,
+    ctl: float,
+    tsb: float,
+    mesocycle: dict,
+    phase: dict,
+    trajectory: dict,
+    races: list,
+    race_week: dict,
+    rtp_status: dict,
+    state: dict,
+    dominant_sport: str,
+    weather: list,
+    constraints: list,
+    locked_dates: set,
+    base_tss_by_date: dict,
+    budgets: dict,
+    sport_acwr: dict,
+    hrv: dict,
+    readiness: dict,
+    wellness: list,
+    activities: list,
+    morning: dict,
+    injury_profile: dict | None,
+    development_needs: dict,
+    ftp_check: dict,
+    motivation: dict,
+) -> PlannerInputs:
+    horizon_dates = [(today + timedelta(days=i)).isoformat() for i in range(horizon + 1)]
+    today_s, tomorrow_s = today.isoformat(), (today + timedelta(days=1)).isoformat()
+
+    # Daily readiness only affects today and tomorrow; the week targets stay stable.
+    reasons = []
+    if (hrv or {}).get("state") == "LOW":
+        reasons.append(f"HRV low ({hrv.get('deviation_pct', '?')}% vs baseline)")
+    sleep_h = _latest_sleep_hours(wellness, today)
+    if sleep_h is not None and sleep_h < 5.5:
+        reasons.append(f"short sleep ({sleep_h:.1f} h)")
+    if (readiness or {}).get("score", 100) < 45:
+        reasons.append(f"readiness {readiness['score']}/100")
+    restricted = {today_s, tomorrow_s} if reasons else set()
+    time_today = time_available_minutes(morning.get("time_available", "") or "")
+    if time_today is not None and time_today < 60:
+        restricted.add(today_s)
+    if (rtp_status or {}).get("is_active"):
+        restricted |= set(horizon_dates[:7])
+        reasons.append(f"return to play after {rtp_status.get('days_off')} rest days")
+
+    injury_note = morning.get("injury_today") or ""
+    injury = injury_restrictions(injury_note, injury_profile) if injury_note else None
+    avoid = set(injury["avoid_sports"]) if injury else set()
+    if injury and injury.get("severity") in ("MODERATE", "SEVERE"):
+        restricted |= set(horizon_dates)
+        reasons.append(f"injury ({injury.get('severity', '').lower()})")
+    avoid |= {sport for sport, d in (sport_acwr or {}).items() if d.get("zone") == "DANGER"}
+
+    monday = monday_of(today).isoformat()
+    this_week = [a for a in activities if monday <= _day(a) <= today_s]
+    intensity_done = sum(1 for a in this_week if classify_session_category(a) in _HARD_CATEGORIES)
+    yesterday = (today - timedelta(days=1)).isoformat()
+    yesterday_hard = any(_day(a) == yesterday and classify_session_category(a) in _HARD_CATEGORIES for a in activities)
+
+    targets = build_week_targets(
+        ctl, mesocycle, today,
+        races=races, trajectory=trajectory, tsb=tsb,
+        done_tss=done_tss_this_week(activities, today),
+    )
+    return PlannerInputs(
+        today=today,
+        horizon_dates=horizon_dates,
+        week_targets=targets,
+        phase=(phase or {}).get("phase", "Base"),
+        mesocycle=mesocycle,
+        workout_levels=dict(state.get("workout_levels", {})),
+        primary_sport=dominant_sport,
+        weather=weather,
+        constraints=constraints,
+        locked_dates=set(locked_dates),
+        base_tss_by_date=dict(base_tss_by_date),
+        sport_budgets=budgets,
+        avoid_sports=avoid,
+        restricted_dates=restricted,
+        restriction_reason=", ".join(reasons),
+        time_available_today=time_today,
+        race_week=race_week,
+        rtp_status=rtp_status,
+        focus_areas=[p.get("area") for p in (development_needs or {}).get("priorities", [])],
+        ftp_test_due=bool((ftp_check or {}).get("needs_test")) and (phase or {}).get("phase") not in ("Taper", "Race Week"),
+        burnout=(motivation or {}).get("state") == "BURNOUT_RISK",
+        done_today=any(_day(a) == today_s for a in activities),
+        intensity_done_this_week=intensity_done,
+        yesterday_was_hard=yesterday_hard,
+        injury=injury,
+        injury_note=injury_note,
+    )
+
+
+def build_ai_context(
+    *,
+    inputs: PlannerInputs,
+    result: PlannerResult,
+    ctl: float,
+    atl: float,
+    tsb: float,
+    phase: dict,
+    readiness: dict,
+    hrv: dict,
+    motivation: dict,
+    development_needs: dict,
+    races: list,
+    weather: list,
+    manual_workouts: list,
+    morning: dict,
+    yesterday_analysis: str,
+) -> dict:
+    today = inputs.today
+    next_race = next(
+        (r for r in sorted(races or [], key=_day) if _day(r) >= today.isoformat()), None)
+    facts = [
+        f"Today: {today.isoformat()} ({today.strftime('%A')})",
+        f"Phase: {(phase or {}).get('phase', '?')} – {(phase or {}).get('rule', '')}",
+        f"Fitness: CTL {ctl:.0f} | ATL {atl:.0f} | TSB {tsb:+.0f}",
+        (readiness or {}).get("summary", ""),
+        f"HRV state: {(hrv or {}).get('state', '?')}",
+        (motivation or {}).get("summary", ""),
+        (development_needs or {}).get("summary", ""),
+        f"Time available today: {morning.get('time_available') or 'no limit given'}",
+        f"Pain/injury: {morning.get('injury_today') or 'none'}",
+    ]
+    if inputs.restriction_reason:
+        facts.append(f"Today/tomorrow kept easy because: {inputs.restriction_reason}")
+    if next_race:
+        facts.append(f"Next race: {next_race.get('name', 'Race')} on {_day(next_race)} "
+                     f"(priority {race_priority(next_race)})")
+    horizon = set(inputs.horizon_dates)
+    weather_lines = [
+        f"{w['date']}: AM {w.get('desc_morning', '?')} {w.get('temp_morning', '?')}°C {w.get('rain_morning_mm', 0)}mm | "
+        f"PM {w.get('desc', '?')} {w.get('temp_afternoon', '?')}°C {w.get('rain_afternoon_mm', 0)}mm"
+        for w in weather or [] if w.get("date") in horizon
+    ]
+    manual_lines = [
+        f"{_day(w)}: {w.get('name', '?')} ({w.get('type') or '?'}, {round((w.get('moving_time') or 0) / 60)} min)"
+        for w in manual_workouts if _day(w) in horizon
+    ]
+    weeks = [t for t in result.week_targets if any(t.contains(d) for d in inputs.horizon_dates)]
+    return {
+        "language": COACH_LANGUAGE,
+        "athlete_note": morning.get("athlete_note", ""),
+        "facts": [f for f in facts if f],
+        "week_targets": format_week_targets(weeks),
+        "weather": weather_lines,
+        "manual_sessions": manual_lines,
+        "yesterday_analysis": yesterday_analysis or "",
+        "yesterday_date": (today - timedelta(days=1)).isoformat(),
+        "weekly_feedback_requested": today.weekday() == 0,
+    }
+
+
+def enrich_keys_for(result: PlannerResult, mode: str, ai_workouts: list) -> set[str]:
+    """Sessions that will actually be saved, so the AI only writes for those."""
+    if mode == "full":
+        return set(result.options)
+    existing = {_day(w) for w in ai_workouts}
+    return {key for key in result.options if key.split("|")[0] not in existing}
+
+
+def finalize_deterministic_plan(
+    result: PlannerResult,
+    *,
+    mode: str,
+    ai_workouts: list,
+    provider: str,
+    use_ai: bool,
+    ai_context: dict,
+    safety_kwargs: dict,
+    athlete: dict,
+    base_tss_by_date: dict,
+    validation_context: dict,
+    validation_budget: float,
+) -> tuple[AIPlan, list[str], PlanDecisionTrace]:
+    keys = enrich_keys_for(result, mode, ai_workouts)
+    enrichment = request_enrichment(provider, result, keys, ai_context) if use_ai else None
+    safety = partial(apply_safety_rules, **safety_kwargs)
+
+    def validate(plan, changes):
+        return validate_postprocessed_plan(
+            plan, athlete=athlete, base_tss_by_date=base_tss_by_date, tss_budget=validation_budget,
+            review_context=validation_context, postprocess_changes=changes,
+        )
+
+    return enrich_and_validate(result, enrichment=enrichment, enrich_keys=keys, safety=safety, validate=validate)
