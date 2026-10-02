@@ -32,7 +32,6 @@ from training_plan.engine.analysis.athlete import (
     analyze_yesterday,
     athlete_profile,
     biometric_vetoes,
-    compute_tss_reference,
     env_nutrition,
     format_athlete_profile,
     parse_zones,

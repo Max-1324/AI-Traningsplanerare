@@ -1,5 +1,4 @@
 from training_plan.core.common import *
-from training_plan.core.models import AppState
 from training_plan.engine.libraries import *
 from training_plan.engine.planning.metrics import _KEY_SESSION_CATEGORIES, classify_session_category
 from training_plan.engine.planning.state import is_ai_generated

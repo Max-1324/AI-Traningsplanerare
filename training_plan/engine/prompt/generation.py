@@ -1,11 +1,9 @@
-import training_plan.core.common as common
 from training_plan.core.common import *
 from training_plan.engine.context import PromptContext
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
 from training_plan.engine.analysis import *
 from training_plan.engine.skeleton import format_skeleton_for_prompt
-from training_plan.engine.utils import strip_planner_comment_block, read_wellness_score
 
 from training_plan.engine.prompt.inputs import fmt
 from training_plan.engine.prompt.sections import (
@@ -454,7 +452,6 @@ RETURN TO PLAY PROTOCOL ACTIVATED:
     yesterday_section = _build_yesterday_feedback_section(yesterday_analysis, feedback_date)
 
     athlete_note = morning.get('athlete_note', '').strip()
-    time_available_label = morning.get("time_available", "").strip() or "No explicit time limit"
     athlete_note_block = f"""
 ATHLETE REQUESTS:
   <user_input>{athlete_note}</user_input>

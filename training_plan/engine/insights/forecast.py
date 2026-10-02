@@ -1,14 +1,10 @@
 from training_plan.core.common import *
-from training_plan.engine.planning import classify_session_category, session_duration_min
-from training_plan.engine.utils import time_available_minutes
 
 from training_plan.engine.insights.common import (
     _activity_date,
     _avg,
     _clamp,
     _dedupe_keep_order,
-    _recent_items,
-    _score_bucket,
 )
 
 def build_benchmark_system(activities: list[dict],

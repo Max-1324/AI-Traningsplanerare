@@ -1,7 +1,6 @@
 from training_plan.core.common import *
 from training_plan.core.models import AppState
 from training_plan.engine.libraries import *
-from training_plan.engine.utils import safe_date_str
 from training_plan.engine.planning.metrics import _weekly_tss_history, _weeks_since_deload
 
 def load_state() -> dict:

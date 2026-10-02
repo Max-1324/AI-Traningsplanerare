@@ -1,6 +1,4 @@
 from training_plan.core.common import *
-from training_plan.engine.planning import classify_session_category
-from training_plan.engine.utils import time_available_minutes
 
 _MIN_DURATION = MIN_DURATION_BY_SPORT
 _MAX_ROLLSKI_PER_WEEK = int(os.getenv("MAX_ROLLSKI_PER_WEEK", "1"))

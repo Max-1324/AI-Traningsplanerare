@@ -153,7 +153,6 @@ def main(argv=None):
     global args
 
     # Force Python to use UTF-8 for input/output so that special characters work in Windows terminals
-    import sys
     if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stdin.reconfigure(encoding='utf-8')
@@ -195,7 +194,7 @@ def main(argv=None):
                         if w.get("id","")[:10] not in dq["bad_wellness_dates"]]
 
     lf  = fitness[-1] if fitness else {}
-    atl = lf.get("atl",0.0); ctl = max(lf.get("ctl",1.0),1.0); tsb_val = lf.get("tsb",0.0)
+    ctl = max(lf.get("ctl",1.0),1.0); tsb_val = lf.get("tsb",0.0)
     hrv         = calculate_hrv(wellness_clean)
     phase       = training_phase(races, date.today())
     _budget_sports = [s["intervals_type"] for s in SPORTS if s["injury_risk"] in ("medium", "high")]

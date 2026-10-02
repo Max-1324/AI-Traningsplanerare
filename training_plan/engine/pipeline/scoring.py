@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from training_plan.core.common import *
-from training_plan.core.models import AIPlan, PlanDay, PlanReview, PlanScores
+from training_plan.core.models import AIPlan, PlanReview, PlanScores
 from training_plan.engine.pipeline.core import _KEY_PLAN_CATEGORIES, classify_plan_day
 
 _VETO_TRIGGERS = [

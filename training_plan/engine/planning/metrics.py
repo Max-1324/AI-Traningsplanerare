@@ -1,5 +1,4 @@
 from training_plan.core.common import *
-from training_plan.core.models import AppState
 from training_plan.engine.libraries import *
 from training_plan.engine.utils import safe_date_str
 
@@ -319,7 +318,6 @@ def race_demands_analysis(races: list, activities: list) -> dict:
     longest_ride = max((session_duration_min(a) for a in recent_cycling), default=0)
     rides_3h = sum(1 for a in recent_cycling if session_duration_min(a) >= 180)
     rides_4h = sum(1 for a in recent_cycling if session_duration_min(a) >= 240)
-    rides_5h = sum(1 for a in recent_cycling if session_duration_min(a) >= 300)
     threshold_21d = sum(1 for a in recent_21 if classify_session_category(a) == "threshold")
     vo2_21d = sum(1 for a in recent_21 if classify_session_category(a) == "vo2")
     fueling_sims = sum(1 for a in recent_cycling if session_duration_min(a) >= 180)

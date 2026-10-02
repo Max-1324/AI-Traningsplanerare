@@ -91,38 +91,6 @@ SPORTS = [s for s in ALL_SPORTS_CATALOG if s["intervals_type"] in _available_set
 
 VALID_TYPES = {sport["intervals_type"] for sport in SPORTS} | {"Rest"}
 
-YR_CODES = {
-    "clearsky": "Clear sky",
-    "fair": "Fair",
-    "partlycloudy": "Partly cloudy",
-    "cloudy": "Cloudy",
-    "lightrainshowers": "Light rain showers",
-    "rainshowers": "Rain showers",
-    "heavyrainshowers": "Heavy rain showers",
-    "lightrainshowersandthunder": "Light rain showers and thunder",
-    "rainshowersandthunder": "Rain showers and thunder",
-    "heavyrainshowersandthunder": "Heavy rain showers and thunder",
-    "lightrain": "Light rain",
-    "rain": "Rain",
-    "heavyrain": "Heavy rain",
-    "lightrainandthunder": "Light rain and thunder",
-    "rainandthunder": "Rain and thunder",
-    "heavyrainandthunder": "Heavy rain and thunder",
-    "lightsleetshowers": "Light sleet showers",
-    "sleetshowers": "Sleet showers",
-    "heavysleetshowers": "Heavy sleet showers",
-    "lightsleet": "Light sleet",
-    "sleet": "Sleet",
-    "heavysleet": "Heavy sleet",
-    "lightsnowshowers": "Light snow showers",
-    "snowshowers": "Snow showers",
-    "heavysnowshowers": "Heavy snow showers",
-    "lightsnow": "Light snow",
-    "snow": "Snow",
-    "heavysnow": "Heavy snow",
-    "fog": "Fog",
-}
-
 INTENSE = {"Z4", "Z5", "Zon 4", "Zon 5", "Zone 4", "Zone 5", "Z4+", "Z5+", "Z6", "Z7"}
 
 WARMUP_BY_SPORT = {

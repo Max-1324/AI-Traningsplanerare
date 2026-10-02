@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from training_plan.core.common import *
-from training_plan.core.models import AIPlan, PlanDay, PlanReview, PlanScores
+from training_plan.core.models import AIPlan, PlanDay, PlanReview
 from training_plan.engine.ai import call_ai, parse_plan
 from training_plan.engine.planning import classify_session_category
 from training_plan.engine.postprocess import estimate_tss_coggan
