@@ -89,6 +89,32 @@ Pyramidal fördelning (mest Z1–Z2, en del Z3, lite Z4+) eller polariserad (cir
 uthållighetsidrottare. Den bör vara en **begränsning i veckoskelettet** (antal nyckelpass och tid i zon), inte
 bara prompttext. `polarization_analysis` mäter redan utfallet.
 
+### Hårda pass: hur många och vilka (`engine/intensity.py`)
+**Utgångsläge: två hårda pass i veckan, ett VO2max-pass och ett tröskelpass, resten lugnt.** Ungefär så tränar
+uthållighetseliten året runt (Seiler 2010), och polariserad träning med VO2max-pass har gett större förbättring
+än tröskeltung träning (Stöggl & Sperlich 2014), även för motionärer (Muñoz m.fl. 2014). Regeln skalar av sig
+själv: mer tid ger fler lugna timmar, inte fler hårda pass.
+
+Antalet är ingen fast siffra. Det går inte att räkna fram det optimala antalet för en person i förväg, så
+planeraren utgår från två och justerar efter hur du svarar, ungefär som HRV-styrd träning (Kiviniemi m.fl. 2007,
+Javaloyes m.fl. 2019). Alla gränser är relativa till din egen baslinje och CTL, så de gäller på alla nivåer.
+
+| Läge | Hårda pass |
+|---|---|
+| Återhämtningsvecka | 0 |
+| Tävlingsvecka och nedtrappning | Som tidigare (korta, skarpa pass) |
+| HRV under baslinjen (7-dagarssnitt), form under −30 % av CTL, risk för utbrändhet, RTP, sjuk senaste veckan, mer än 40 % missade nyckelpass senaste 4 veckorna, högst 2 träningsdagar | 1 |
+| Normalfallet | 2 |
+| Du har gjort två hårda pass i veckan i 3 av de senaste 4 veckorna, HRV normal, form över −20 % av CTL, minst 6 träningsdagar och cirka 10 h | 3 (helgblock: lördag hårt, söndag långpass) |
+
+`KEY_SESSIONS_PER_WEEK` är bara ett tak. HRV justerar dessutom idag och imorgon som tidigare.
+
+**Fasen styr formatet, inte vilka passtyper som finns.** Base: tempo/sweet spot och korta VO2max-intervaller
+(1 min hårt / 1 min lätt). Build: tröskelintervaller och klassiska VO2max-intervaller (3–5 min). Fasen tas från
+årsplanen, annars från närmaste tävling. Utan båda byts formatet var sjätte vecka, eftersom förbättringen av
+VO2max planar ut efter 6–8 veckor med samma stimulus. Varje format har egna progressionsnivåer. Med ett pass i
+veckan turas VO2max och tröskel om vecka för vecka. Med tre tillkommer ett tempo- eller tröskelpass.
+
 ### Övrigt
 - **Session-RPE** (RPE × minuter) ger jämförbar belastning för styrka och pass utan effektmätare.
   **Monotoni och strain** (veckomedel / SD respektive veckobelastning × monotoni) är billiga tillägg för att
@@ -117,5 +143,9 @@ bara prompttext. `polarization_analysis` mäter redan utfallet.
 - Javaloyes m.fl. (2019): *Training Prescription Guided by Heart-Rate Variability in Cycling*, IJSPP.
 - Plews m.fl. (2013): *Training adaptation and heart rate variability in elite endurance athletes*, Sports Medicine.
 - Seiler (2010): *What is best practice for training intensity and duration distribution in endurance athletes?*, IJSPP.
+- Stöggl & Sperlich (2014): *Polarized training has greater impact on key endurance variables than threshold, high intensity, or high volume training*, Frontiers in Physiology.
+- Muñoz m.fl. (2014): *Does polarized training improve performance in recreational runners?*, IJSPP.
+- Helgerud m.fl. (2007): *Aerobic high-intensity intervals improve VO2max more than moderate training*, MSSE.
+- Rønnestad m.fl. (2014): *Block periodization of high-intensity aerobic intervals provides superior training effects in trained cyclists*, Scand J Med Sci Sports.
 - Foster (1998): *Monitoring training in athletes with reference to overtraining syndrome*, MSSE.
 - Foster m.fl. (2001): *A new approach to monitoring exercise training*, JSCR (session-RPE).

@@ -168,7 +168,9 @@ def build_week_skeleton(
             continue
 
         # ── Day after intensity: mandatory easy ───────────────────────────────
-        if last_was_intensity:
+        # With week targets (deterministic planner) Sunday keeps its long Z2 session
+        # after a Saturday key session: a weekend block, as in most 3-key-session plans.
+        if last_was_intensity and not (week_targets is not None and dow == 6):
             slots.append(
                 DaySlot(
                     date=date_str,

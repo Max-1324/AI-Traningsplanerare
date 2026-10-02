@@ -111,7 +111,7 @@ def apply_safety_rules(plan, *, hrv, budgets, locked, athlete, weather=None, tod
         days, c = enforce_schedule_constraints(days, constraints); all_c += c
     if per_sport_acwr_data:
         days, c = enforce_per_sport_acwr_veto(days, per_sport_acwr_data); all_c += c
-    days, c = enforce_sport_budget(days, budgets);             all_c += c
+    days, c = enforce_sport_budget(days, budgets, today=today); all_c += c
     days, c = enforce_hard_easy(days);                         all_c += c
     days, c = enforce_strength_limit(days);                    all_c += c
     days, c = enforce_rollski_limit(days);                     all_c += c

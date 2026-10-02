@@ -3,7 +3,7 @@ import unittest
 from datetime import date, timedelta
 from unittest import mock
 
-from training_plan.engine.calendar_context import atp_weeks, availability_by_date, tss_per_hour
+from training_plan.engine.calendar_context import atp_weeks, availability_by_date, injuries_by_date, tss_per_hour
 from training_plan.engine.periodization import apply_calendar_targets, build_week_targets
 from training_plan.engine.planner import PlannerInputs, build_deterministic_plan, tss_of
 from training_plan.engine.postprocess import apply_safety_rules
@@ -98,7 +98,9 @@ class TestAvailability(unittest.TestCase):
         events = [
             {"category": "SICK", "name": "Förkyld", "start_date_local": "2026-10-05T00:00:00",
              "end_date_local": "2026-10-07T00:00:00"},                                  # Mon–Tue
-            {"category": "INJURED", "name": "Vad", "start_date_local": "2026-10-08T00:00:00"},  # Thu only
+            {"category": "INJURED", "name": "Vad", "start_date_local": "2026-10-08T00:00:00"},  # sport-specific
+            {"category": "INJURED", "name": "Rygg", "start_date_local": "2026-10-09T00:00:00",
+             "training_availability": "LIMITED"},                                         # explicitly limited
             {"category": "HOLIDAY", "name": "Resa", "start_date_local": "2026-10-10T00:00:00",
              "end_date_local": "2026-10-12T00:00:00", "training_availability": "LIMITED"},
             {"category": "HOLIDAY", "name": "Helg", "start_date_local": "2026-10-13T00:00:00"},  # NORMAL
@@ -106,8 +108,15 @@ class TestAvailability(unittest.TestCase):
         result = availability_by_date(events, self.DATES)
         self.assertEqual({d: v[0] for d, v in result.items()}, {
             "2026-10-05": "UNAVAILABLE", "2026-10-06": "UNAVAILABLE",
-            "2026-10-08": "LIMITED", "2026-10-10": "LIMITED", "2026-10-11": "LIMITED",
+            "2026-10-09": "LIMITED", "2026-10-10": "LIMITED", "2026-10-11": "LIMITED",
         })
+        self.assertEqual(injuries_by_date(events, self.DATES), {"2026-10-08": "Vad", "2026-10-09": "Rygg"})
+
+    def test_unavailable_injury_is_not_trained_around(self):
+        events = [{"category": "INJURED", "name": "Bruten fot", "start_date_local": "2026-10-05T00:00:00",
+                   "training_availability": "UNAVAILABLE"}]
+        self.assertEqual(injuries_by_date(events, self.DATES), {})
+        self.assertEqual(availability_by_date(events, self.DATES)["2026-10-05"][0], "UNAVAILABLE")
 
     def test_unavailable_wins_over_limited(self):
         events = [
@@ -154,6 +163,42 @@ class TestPlannerInputsFromCalendar(unittest.TestCase):
         self.assertIn("2026-10-07", inputs.unavailable_dates)
         self.assertIn("2026-10-08", inputs.restricted_dates)
         self.assertIn("sick: Feber", inputs.restriction_reason)
+        self.assertEqual(inputs.week_targets[0].emphasis, "build", "the annual plan's Build phase")
+
+    def _inputs(self, events=(), **overrides):
+        from training_plan.app.deterministic import build_planner_inputs
+        params = dict(
+            today=MONDAY, horizon=9, ctl=55, tsb=0, mesocycle={"week_in_block": 2}, phase={"phase": "Base"},
+            trajectory={}, races=[], race_week={}, rtp_status={}, state={}, dominant_sport="Ride", weather=[],
+            constraints=[], locked_dates=set(), base_tss_by_date={}, budgets={}, sport_acwr={},
+            hrv={"state": "NORMAL"}, readiness={"score": 70}, wellness=[], activities=[], morning={},
+            injury_profile=None, development_needs={}, ftp_check={}, motivation={}, calendar_events=list(events),
+        )
+        params.update(overrides)
+        return build_planner_inputs(**params)
+
+    def test_injury_event_blocks_only_the_affected_sport(self):
+        events = [{"category": "INJURED", "name": "Knä", "start_date_local": "2026-10-06T00:00:00",
+                   "end_date_local": "2026-10-09T00:00:00"}]
+        inputs = self._inputs(events)
+        blocked = {c["date"]: c["blocked_types"] for c in inputs.constraints}
+        self.assertEqual(blocked, {"2026-10-06": ["Run"], "2026-10-07": ["Run"], "2026-10-08": ["Run"]})
+        self.assertFalse({"2026-10-06", "2026-10-07", "2026-10-08"} & inputs.restricted_dates,
+                         "the other sports are trained normally")
+        self.assertIn("injured: Knä (no Run)", inputs.restriction_reason)
+        result = build_deterministic_plan(inputs)
+        self.assertFalse([d for d in result.plan.days if d.intervals_type == "Run" and d.date in blocked])
+
+    def test_hard_sessions_follow_recovery_signals(self):
+        self.assertEqual(self._inputs().week_targets[0].max_key_sessions, 2)
+        low = self._inputs(hrv={"state": "LOW", "deviation_pct": -12})
+        self.assertEqual(low.week_targets[0].max_key_sessions, 1)
+        self.assertIn("HRV below your baseline", low.week_targets[0].note)
+        sick = self._inputs([{"category": "SICK", "name": "Feber", "start_date_local": "2026-10-01T00:00:00",
+                              "end_date_local": "2026-10-03T00:00:00"}])
+        self.assertEqual(sick.week_targets[0].max_key_sessions, 1)
+        missed = self._inputs(compliance={"intensity_planned": 6, "intensity_missed": 4})
+        self.assertEqual(missed.week_targets[0].max_key_sessions, 1)
 
 
 class TestWeekTargetSync(unittest.TestCase):

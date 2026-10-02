@@ -214,22 +214,41 @@ def enforce_hrv(days, hrv, today: date | None = None):
             changes.append(f"HRV-VETO: {day.date} - replaced with Z1 recovery (HRV LOW).")
     return days, changes
 
-def enforce_sport_budget(days, budgets):
-    accumulated = {st: 0 for st in budgets}
+def sport_week_cap(budget: dict, current_week: bool) -> float:
+    """Minutes a sport may get in one calendar week of the plan.
+
+    The budget is weekly (recent volume plus a growth margin, e.g. +10% for running).
+    In the current week the minutes already done since Monday count against it.
+    """
+    cap = budget.get("remaining", 0)
+    return cap - budget.get("done_this_week", 0) if current_week else cap
+
+
+def enforce_sport_budget(days, budgets, today=None):
+    """Convert sessions that push a sport past its weekly budget (per calendar week)."""
+    if not days:
+        return days, []
+    first = today or min(date.fromisoformat(d.date) for d in days)
+    current_monday = (first - timedelta(days=first.weekday())).isoformat()
+    accumulated: dict[tuple[str, str], int] = {}
     changes = []
     for i, day in enumerate(days):
         st = day.intervals_type
         if st not in budgets or day.duration_min == 0: continue
         b = budgets[st]
-        if accumulated[st] + day.duration_min > b["remaining"]:
-            changes.append(f"VOLUME CAP ({st}): {day.date} - {day.duration_min}min exceeds budget ({b['remaining']}min remaining). Converting to VirtualRide.")
+        d = date.fromisoformat(day.date)
+        monday = (d - timedelta(days=d.weekday())).isoformat()
+        cap = sport_week_cap(b, monday == current_monday)
+        used = accumulated.get((st, monday), 0)
+        if used + day.duration_min > cap:
+            changes.append(f"VOLUME CAP ({st}): {day.date} - {day.duration_min}min exceeds the week's budget ({max(round(cap - used), 0)}min left). Converting to VirtualRide.")
             days[i] = day.model_copy(update={
                 "intervals_type": "VirtualRide",
                 "title": f"{day.title} -> Zwift (volume cap)",
                 "vetoed": True,
             })
         else:
-            accumulated[st] += day.duration_min
+            accumulated[(st, monday)] = used + day.duration_min
     return days, changes
 
 def enforce_locked(days, locked):

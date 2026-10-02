@@ -6,11 +6,24 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from functools import partial
 
 from training_plan.core.models import AIPlan, PlanDecisionTrace
-from training_plan.engine.calendar_context import atp_weeks, availability_by_date, tss_per_hour
+from training_plan.engine.calendar_context import (
+    atp_weeks,
+    availability_by_date,
+    injuries_by_date,
+    tss_per_hour,
+)
+from training_plan.engine.intensity import (
+    HARD_CATEGORIES,
+    IntensitySignals,
+    assign_emphasis,
+    hard_sessions_by_week,
+    hard_sessions_for_week,
+)
 from training_plan.engine.periodization import (
     apply_calendar_targets,
     build_week_targets,
@@ -26,11 +39,37 @@ from training_plan.engine.postprocess.injury import injury_restrictions
 from training_plan.engine.utils import race_priority, time_available_minutes
 from training_plan.engine.validation import validate_postprocessed_plan
 
-_HARD_CATEGORIES = {"threshold", "vo2", "ftp_test"}
-
-
 def _day(item: dict) -> str:
     return (item.get("start_date_local") or "")[:10]
+
+
+def _recently_sick(events: list, today: date, days: int = 7) -> bool:
+    """A SICK event that ended within the last `days` days (or is still going on)."""
+    cutoff = (today - timedelta(days=days)).isoformat()
+    for e in events:
+        if (e.get("category") or "").upper() != "SICK":
+            continue
+        start = _day(e)
+        end = (e.get("end_date_local") or e.get("start_date_local") or "")[:10]
+        if start and start <= today.isoformat() and end >= cutoff:
+            return True
+    return False
+
+
+def _adapt_week_targets(targets: list, *, today: date, signals: IntensitySignals, unavailable: set,
+                        tph: float, race_phase: str | None, has_race: bool) -> list:
+    """Hard sessions per week from the athlete's response, and the session format per week."""
+    adapted = []
+    for target in targets:
+        week = [(date.fromisoformat(target.week_start) + timedelta(days=i)).isoformat() for i in range(7)]
+        trainable = sum(1 for d in week if d not in unavailable)
+        count, reason = hard_sessions_for_week(target, signals, trainable_days=trainable,
+                                               hours=target.tss_target / tph if tph else None)
+        note = "; ".join(x for x in (target.note, reason) if x)
+        emphasis = assign_emphasis(target.week_start, atp_phase=target.phase or None,
+                                   race_phase=race_phase, has_race=has_race)
+        adapted.append(replace(target, max_key_sessions=count, note=note, emphasis=emphasis))
+    return adapted
 
 
 def _latest_sleep_hours(wellness: list, today: date) -> float | None:
@@ -71,6 +110,7 @@ def build_planner_inputs(
     ftp_check: dict,
     motivation: dict,
     calendar_events: list | None = None,
+    compliance: dict | None = None,
 ) -> PlannerInputs:
     horizon_dates = [(today + timedelta(days=i)).isoformat() for i in range(horizon + 1)]
     calendar_events = calendar_events or []
@@ -103,6 +143,18 @@ def build_planner_inputs(
     for level, reason in dict.fromkeys(v for d, v in sorted(availability.items()) if d in horizon_dates):
         reasons.append(f"{reason} ({'no training' if level == 'UNAVAILABLE' else 'limited'})")
 
+    # INJURED events: block only the sports the injury affects ("knee" → no running), on its dates.
+    constraints = list(constraints or [])
+    for d, text in sorted(injuries_by_date(calendar_events, lookahead).items()):
+        blocked = injury_restrictions(text, None)
+        if blocked and blocked["avoid_sports"]:
+            sports = sorted(blocked["avoid_sports"])
+            constraints.append({"date": d, "blocked_types": sports, "reason": f"injured: {text}"})
+            if d in horizon_dates:
+                reason = f"injured: {text} (no {', '.join(sports)})"
+                if reason not in reasons:
+                    reasons.append(reason)
+
     injury_note = morning.get("injury_today") or ""
     injury = injury_restrictions(injury_note, injury_profile) if injury_note else None
     avoid = set(injury["avoid_sports"]) if injury else set()
@@ -113,9 +165,10 @@ def build_planner_inputs(
 
     monday = monday_of(today).isoformat()
     this_week = [a for a in activities if monday <= _day(a) <= today_s]
-    intensity_done = sum(1 for a in this_week if classify_session_category(a) in _HARD_CATEGORIES)
+    kinds_done = [classify_session_category(a) for a in this_week]
+    intensity_done = sum(1 for k in kinds_done if k in HARD_CATEGORIES)
     yesterday = (today - timedelta(days=1)).isoformat()
-    yesterday_hard = any(_day(a) == yesterday and classify_session_category(a) in _HARD_CATEGORIES for a in activities)
+    yesterday_hard = any(_day(a) == yesterday and classify_session_category(a) in HARD_CATEGORIES for a in activities)
 
     targets = build_week_targets(
         ctl, mesocycle, today,
@@ -123,9 +176,25 @@ def build_planner_inputs(
         done_tss=done_tss_this_week(activities, today),
     )
     # The athlete's annual training plan in intervals.icu, when there is one, sets the weekly load.
+    tph = tss_per_hour(activities)
     atp = atp_weeks(calendar_events)
     if atp:
-        targets = apply_calendar_targets(targets, atp, tss_per_hour(activities))
+        targets = apply_calendar_targets(targets, atp, tph)
+    # How many hard sessions each week gets follows the athlete's own recovery and history.
+    compliance = compliance or {}
+    signals = IntensitySignals(
+        hrv_state=(hrv or {}).get("state"), ctl=ctl, tsb=tsb,
+        burnout=(motivation or {}).get("state") == "BURNOUT_RISK",
+        rtp_active=bool((rtp_status or {}).get("is_active")),
+        recently_sick=_recently_sick(calendar_events, today),
+        key_planned=int(compliance.get("intensity_planned") or 0),
+        key_missed=int(compliance.get("intensity_missed") or 0),
+        hard_by_week=hard_sessions_by_week(activities, today, classify_session_category),
+    )
+    targets = _adapt_week_targets(
+        targets, today=today, signals=signals, unavailable=unavailable, tph=tph,
+        race_phase=(phase or {}).get("phase"), has_race=any(_day(r) >= today_s for r in races or []),
+    )
     return PlannerInputs(
         today=today,
         horizon_dates=horizon_dates,
@@ -151,6 +220,7 @@ def build_planner_inputs(
         burnout=(motivation or {}).get("state") == "BURNOUT_RISK",
         done_today=any(_day(a) == today_s for a in activities),
         intensity_done_this_week=intensity_done,
+        key_kinds_done_this_week=[k for k in kinds_done if k in HARD_CATEGORIES],
         yesterday_was_hard=yesterday_hard,
         injury=injury,
         injury_note=injury_note,

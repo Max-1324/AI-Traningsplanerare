@@ -15,8 +15,10 @@ välja mellan godkända alternativ och skriver beskrivningar och coachfeedback. 
    och återhämtningsveckor. Annars räknas målen ut från CTL, mesocykel (deload på rätt vecka), ramp och
    nedtrappning inför tävlingar. Målen skrivs tillbaka till kalendern, så att fitnessgrafen visar prognosen.
 4. **Bygger planen**: ett veckoskelett (nyckelpass, långpass, lätta dagar, vila) blir konkreta pass för
-   10 dagar framåt. Låg HRV, kort sömn, lite tid eller skada påverkar bara idag och imorgon, och nyckelpasset
-   flyttas då senare i veckan.
+   10 dagar framåt. Varje vecka får normalt två hårda pass, ett VO2max-pass och ett tröskelpass, och resten
+   lugnt. Antalet följer din återhämtning: ett vid låg HRV, djupt negativ form, missade nyckelpass eller
+   nyss sjuk, tre när du har klarat två i veckan en tid, återhämtar dig bra och veckan har tid för det. Låg HRV, kort sömn,
+   lite tid eller skada påverkar dessutom idag och imorgon, och nyckelpasset flyttas då senare i veckan.
 5. **Avgör läget**: behöver planen göras om (`full`, alltid på måndagar), förlängas (`extend`) eller inte
    röras (`none`)? Vid `none` görs inga AI-anrop.
 6. **Berikar med AI** i ett anrop, och bara för de pass som ska sparas. Planen kontrolleras sedan igen mot
@@ -64,13 +66,20 @@ med `time_available=`, `injury=` och `athlete_note=`.
   namnprefix, `B: Namn` eller `C: Namn`, annars räknas den som A-tävling. Sport kan anges som `[Ride]` i namnet.
   A-tävlingar får två veckors nedtrappning, B-tävlingar några dagar och C-tävlingar nästan ingen.
 - **Årsplan**: gör du en säsongsplan med intervals.icu:s *Annual Training Plan Builder* (Supporter-nivån) följer
-  planeraren dess veckomål, faser och återhämtningsveckor. En vecka vars mål ligger minst 20 % under veckan före
+  planeraren dess veckomål, faser, återhämtningsveckor och fördelning mellan sporter (t.ex. 2,5 h löpning och
+  5 h cykel). Löpningen ökar ändå högst 10 % i veckan från vad du faktiskt sprungit, och det som inte får plats,
+  eller som en skada stoppar, flyttas till de andra sporterna i planen. Fasen styr passens format: Base ger
+  tempo och korta VO2max-intervaller, Build tröskelintervaller och längre VO2max-intervaller. Utan årsplan
+  och tävling byts formatet var sjätte vecka. En vecka vars mål ligger minst 20 % under veckan före
   räknas som återhämtningsvecka. Ett veckomål som skulle höja CTL mer än `RAMP_CTL_MAX` per vecka trappas in i
   stället, så en plan med fler timmar än du är van vid blir ingen chockstart. Utan årsplan skriver planeraren sina
   egna veckomål som `TARGET`-event (stäng av med `SYNC_WEEK_TARGETS=off`). Dina egna veckomål skrivs aldrig över.
-- **Sjuk, skadad eller bortrest**: lägg in en `SICK`-, `INJURED`- eller `HOLIDAY`-händelse med tillgänglighet.
+- **Skadad**: en `INJURED`-händelse stoppar bara sporterna skadan påverkar. "Knä" eller "löparskada" stoppar
+  löpningen men inte cykeln, och "axel" stoppar cykeln. Sätt tillgängligheten till *begränsad* om all träning
+  ska vara kort och lätt, eller *inte tillgänglig* för ingen träning alls.
+- **Sjuk eller bortrest**: lägg in en `SICK`- eller `HOLIDAY`-händelse med tillgänglighet.
   *Inte tillgänglig* ger inga pass alls, och *begränsad* ger bara korta, lätta pass. Utan angiven tillgänglighet
-  räknas sjuk som inte tillgänglig, skadad som begränsad och semester som normal.
+  räknas sjuk som inte tillgänglig och semester som normal.
 - **Begränsningar**: ett event (t.ex. en NOTE) vars namn börjar med `Bara:` eller `Ej:` (även `Only:`/`Not:`), t.ex.
   `Ej: löpning` eller `Bara: Zwift`, gäller för eventets datumintervall.
 
@@ -108,9 +117,9 @@ med `time_available=`, `injury=` och `athlete_note=`.
 | `COACH_LANGUAGE` | `English` | Språk för AI-texterna, t.ex. `Swedish` |
 | `RAMP_CTL_PER_WEEK`, `RAMP_CTL_MAX` | `4.0`, `6.0` | Planerad CTL-ökning per byggvecka, och tak. Mot en A-tävling används rampen som krävs för att nå `TARGET_CTL`, inom taket |
 | `DELOAD_LOAD_FACTOR` | `0.70` | Deloadveckans dagliga belastning som andel av CTL |
-| `KEY_SESSIONS_PER_WEEK` | `2` | Nyckelpass (intervaller/tempo) per byggvecka |
+| `KEY_SESSIONS_PER_WEEK` | *(anpassas)* | Tak för antalet hårda pass per vecka (0–3). Utan värde avgör din återhämtning: normalt 2, ibland 1 eller 3 |
 | `STRENGTH_PER_WEEK` | `1` | Styrkepass per vecka (begränsas också av `MAX_STRENGTH_PER_PLAN`) |
-| `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport (t.ex. rullskidor) per vecka |
+| `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport (t.ex. rullskidor) per vecka, när årsplanen inte anger fördelning per sport |
 | `LONG_SESSION_SHARE` | `0.35` | Långpassets största andel av veckans TSS |
 | `WEEKDAY_MAX_MIN` | `120` | Längsta uthållighetspass måndag–fredag |
 | `CATCH_UP_CAP` | `1.15` | Resten av en påbörjad vecka får högst så här mycket mer än sin andel (inget ikapptränande) |

@@ -21,8 +21,9 @@ from training_plan.core.config import AI_TAG
 
 AVAILABILITY_CATEGORIES = {"HOLIDAY", "SICK", "INJURED"}
 CONTEXT_CATEGORIES = {"PLAN", "TARGET", "NOTE"} | AVAILABILITY_CATEGORIES
-# Used when an availability event has no explicit training_availability.
-_DEFAULT_AVAILABILITY = {"SICK": "UNAVAILABLE", "INJURED": "LIMITED", "HOLIDAY": "NORMAL"}
+# Used when an availability event has no explicit training_availability. An injury
+# without one only blocks the sports it affects (see injuries_by_date).
+_DEFAULT_AVAILABILITY = {"SICK": "UNAVAILABLE", "INJURED": "NORMAL", "HOLIDAY": "NORMAL"}
 _RECOVERY_WORDS = ("recovery", "rest week", "deload", "återhämtning", "vila", "erholung", "récupération")
 
 
@@ -120,6 +121,46 @@ def week_tss(week: dict, tss_per_hour: float) -> float | None:
     return sum(parts) if parts else None
 
 
+def sport_group(sport_type: str | None) -> str:
+    """Planner sport group for an intervals.icu activity type: all bike types are 'cycling'."""
+    t = sport_type or ""
+    if "Ride" in t:
+        return "cycling"
+    if "Run" in t:
+        return "Run"
+    return t
+
+
+def sport_split(week: dict, tss_per_hour: float) -> dict[str, float]:
+    """Share of the week's load per sport group from per-sport ATP targets ({} when there are none).
+
+    Strength targets are left out: strength sessions are planned separately.
+    """
+    loads: dict[str, float] = {}
+    for sport, entry in (week.get("sports") or {}).items():
+        tss = _entry_tss(entry, tss_per_hour)
+        group = sport_group(sport)
+        if tss and group and group != "WeightTraining":
+            loads[group] = loads.get(group, 0.0) + tss
+    total = sum(loads.values())
+    return {g: round(v / total, 3) for g, v in loads.items()} if total > 0 else {}
+
+
+def _event_days(event: dict) -> tuple[date, date] | None:
+    start = _day(event.get("start_date_local"))
+    if start is None:
+        return None
+    end = _day(event.get("end_date_local")) or start
+    # Calendar ranges ending at midnight belong to the day before.
+    if (event.get("end_date_local") or "").endswith("T00:00:00") and end > start:
+        end -= timedelta(days=1)
+    return start, end
+
+
+def _availability(event: dict, category: str) -> str:
+    return (event.get("training_availability") or _DEFAULT_AVAILABILITY[category]).upper()
+
+
 def availability_by_date(events: list[dict], dates: list[str]) -> dict[str, tuple[str, str]]:
     """{date: (availability, reason)} for dates covered by HOLIDAY/SICK/INJURED events.
 
@@ -131,24 +172,37 @@ def availability_by_date(events: list[dict], dates: list[str]) -> dict[str, tupl
         category = (e.get("category") or "").upper()
         if category not in AVAILABILITY_CATEGORIES:
             continue
-        availability = (e.get("training_availability") or _DEFAULT_AVAILABILITY[category]).upper()
-        if availability not in ("UNAVAILABLE", "LIMITED"):
+        availability = _availability(e, category)
+        span = _event_days(e)
+        if availability not in ("UNAVAILABLE", "LIMITED") or span is None:
             continue
-        start = _day(e.get("start_date_local"))
-        if start is None:
-            continue
-        end = _day(e.get("end_date_local")) or start
-        # Calendar ranges ending at midnight belong to the day before.
-        if (e.get("end_date_local") or "").endswith("T00:00:00") and end > start:
-            end -= timedelta(days=1)
         reason = f"{category.lower()}: {e.get('name') or category.title()}"
         for d in dates:
-            day = date.fromisoformat(d)
-            if start <= day <= end:
+            if span[0] <= date.fromisoformat(d) <= span[1]:
                 current = wanted[d]
                 if current is None or rank[availability] > rank[current[0]]:
                     wanted[d] = (availability, reason)
     return {d: v for d, v in wanted.items() if v is not None}
+
+
+def injuries_by_date(events: list[dict], dates: list[str]) -> dict[str, str]:
+    """{date: injury text} for INJURED events you can still train around (not UNAVAILABLE).
+
+    The text (name + description, e.g. "Knee" or "Runner's knee, cycling is fine") is
+    classified like the morning injury note, so only the affected sports are blocked.
+    """
+    result: dict[str, str] = {}
+    for e in events:
+        if (e.get("category") or "").upper() != "INJURED" or _availability(e, "INJURED") == "UNAVAILABLE":
+            continue
+        span = _event_days(e)
+        if span is None:
+            continue
+        text = " ".join(x for x in (e.get("name"), e.get("description")) if x) or "injury"
+        for d in dates:
+            if span[0] <= date.fromisoformat(d) <= span[1]:
+                result[d] = f"{result[d]}; {text}" if d in result and text not in result[d] else text
+    return result
 
 
 def tss_per_hour(activities: list[dict], default: float = 55.0) -> float:

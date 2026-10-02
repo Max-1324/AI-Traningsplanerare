@@ -14,17 +14,19 @@ today/tomorrow in the planner. That keeps the week stable and the day flexible.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 from training_plan.core.config import TARGET_CTL
-from training_plan.engine.calendar_context import week_tss
+from training_plan.engine.calendar_context import sport_split, week_tss
+from training_plan.engine.intensity import DEFAULT_HARD_SESSIONS
 from training_plan.engine.utils import race_priority
 
 RAMP_CTL_PER_WEEK = float(os.getenv("RAMP_CTL_PER_WEEK", "4.0"))
 RAMP_CTL_MAX = float(os.getenv("RAMP_CTL_MAX", "6.0"))
 DELOAD_LOAD_FACTOR = float(os.getenv("DELOAD_LOAD_FACTOR", "0.70"))
-KEY_SESSIONS_PER_WEEK = int(os.getenv("KEY_SESSIONS_PER_WEEK", "2"))
+# Baseline hard sessions per build week; engine/intensity.py adapts it per athlete and week.
+KEY_SESSIONS_PER_WEEK = DEFAULT_HARD_SESSIONS
 
 # Ramp multiplier per build week in the block: easier start, harder third week.
 _RAMP_BY_WEEK_IN_BLOCK = {1: 0.85, 2: 1.0, 3: 1.15}
@@ -52,6 +54,10 @@ class WeekTarget:
     max_key_sessions: int = KEY_SESSIONS_PER_WEEK
     note: str = ""
     source: str = "planner"    # "planner" or "intervals.icu" (the athlete's annual training plan)
+    phase: str = ""            # phase name from the annual training plan, if any
+    emphasis: str = ""         # "base" or "build": session formats (engine/intensity.py)
+    # Share of the load per sport group ("cycling", "Run", …) from the annual plan; {} = planner decides.
+    sport_split: dict = field(default_factory=dict)
 
     @property
     def remaining_tss(self) -> int:
@@ -74,6 +80,9 @@ class WeekTarget:
         )
         if self.done_tss:
             text += f" | done {self.done_tss}, remaining {self.remaining_tss}"
+        if self.sport_split:
+            text += " | split " + ", ".join(f"{g} {share:.0%}" for g, share in
+                                             sorted(self.sport_split.items(), key=lambda kv: -kv[1]))
         if self.note:
             text += f" | {self.note}"
         if self.source != "planner":
@@ -256,6 +265,8 @@ def apply_calendar_targets(targets: list[WeekTarget], atp: dict[str, dict], tss_
             max_key_sessions=max_key,
             note="; ".join(n for n in notes if n),
             source="intervals.icu",
+            phase=week.get("phase") or "",
+            sport_split=sport_split(week, tss_per_hour),
         ))
         ctl = _advance_ctl(ctl, tss)
     return result

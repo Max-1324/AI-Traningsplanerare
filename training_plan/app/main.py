@@ -614,7 +614,7 @@ def main(argv=None):
             sport_acwr=sport_acwr, hrv=hrv, readiness=readiness, wellness=wellness_clean,
             activities=activities_clean, morning=morning, injury_profile=injury_profile,
             development_needs=development_needs, ftp_check=ftp_check, motivation=motivation,
-            calendar_events=calendar_events,
+            calendar_events=calendar_events, compliance=compliance,
         )
         det_result = build_deterministic_plan(det_inputs)
         mode_budget = det_result.horizon_tss_target
@@ -670,7 +670,7 @@ def main(argv=None):
             safety_kwargs=dict(
                 hrv=hrv, budgets=budgets, locked=blocked_dates, athlete=athlete, weather=weather,
                 today=date.today(), injury_note=morning.get("injury_today", ""), injury_profile=injury_profile,
-                constraints=constraints, today_wellness=today_wellness, per_sport_acwr_data=sport_acwr,
+                constraints=det_inputs.constraints, today_wellness=today_wellness, per_sport_acwr_data=sport_acwr,
                 phase=phase, races=races, wellness=wellness_clean,
                 time_available_text=morning.get("time_available", ""),
             ),
