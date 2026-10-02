@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import requests
@@ -28,13 +28,9 @@ from training_plan.core.catalogs import (  # noqa: E402
     SPORT_NAME_MAP,
     SPORTS,
     VALID_TYPES,
-    VALID_ZONES,
     WARMUP_BY_SPORT,
     WARMUP_DEFAULT,
-    YR_CODES,
-    ZONE_CANONICAL,
     ZONE_INTENSITY,
-    ZONE_ORDER,
 )
 from training_plan.core.config import (  # noqa: E402
     AI_TAG,

@@ -181,7 +181,6 @@ def plan_update_mode(ai_workouts, yesterday_actuals, yesterday_planned, hrv, wel
             datetime.strptime(w.get("start_date_local","")[:10], "%Y-%m-%d").date()
             for w in ai_workouts if w.get("start_date_local","")[:10]
         }
-        target_end = date.today() + timedelta(days=horizon)
         missing = [
             date.today() + timedelta(days=i)
             for i in range(1, horizon + 1)

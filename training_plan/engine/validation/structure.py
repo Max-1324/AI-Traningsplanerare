@@ -3,10 +3,10 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import date, datetime
 
-from training_plan.core.catalogs import INTENSE, VALID_ZONES, ZONE_CANONICAL, ZONE_INTENSITY, ZONE_ORDER
+from training_plan.core.catalogs import INTENSE, ZONE_CANONICAL, ZONE_INTENSITY, ZONE_ORDER
 from training_plan.core.models import AIPlan, PlanDay, PlanValidationResult, StrengthStep, WorkoutStep
 from training_plan.engine.planning import classify_session_category
-from training_plan.engine.postprocess import HARD_THRESHOLD, estimate_tss_coggan
+from training_plan.engine.postprocess import HARD_THRESHOLD
 
 _SLOT_ORDER = {"AM": 0, "MAIN": 1, "PM": 2}
 _HARD_CATEGORIES = {"threshold", "vo2", "ftp_test"}

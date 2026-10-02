@@ -1,6 +1,4 @@
 from training_plan.core.common import *
-from training_plan.engine.planning import classify_session_category, session_duration_min
-from training_plan.engine.utils import time_available_minutes
 
 def _clamp(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, value))

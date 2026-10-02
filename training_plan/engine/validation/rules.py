@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import date
 
-from training_plan.core.catalogs import VALID_ZONES, ZONE_ORDER
+from training_plan.core.catalogs import VALID_ZONES
 from training_plan.core.models import AIPlan, PlanDay, PlanValidationResult
 from training_plan.engine.postprocess import estimate_tss_coggan
 from training_plan.engine.validation.structure import (

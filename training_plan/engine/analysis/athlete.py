@@ -1,7 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
-from training_plan.engine.utils import safe_date_str, safe_date
 from training_plan.engine.analysis.data import _sorted_wellness
 
 def parse_zones(athlete):
@@ -207,94 +206,3 @@ def format_athlete_profile(athlete: dict | None, wellness: list | None = None) -
     if not parts:
         return "No explicit age/weight/sex profile found; individualization relies on training history, zones, wellness, and compliance."
     return " | ".join(parts)
-
-
-# ── TSS REFERENCE ─────────────────────────────────────────────────────────────
-
-def compute_tss_reference(activities: list) -> str:
-    """Return a calibrated TSS cheat sheet derived from the athlete's own history.
-
-    Groups completed sessions by sport, computes median TSS/hour per sport (and
-    by intensity for VirtualRide where power data is available), then formats a
-    compact reference string to inject into the generation prompt.
-
-    Falls back to theoretical zone-formula values if there is too little data for
-    a given sport type.
-    """
-    _SPORTS = tuple(s["intervals_type"] for s in SPORTS if s["intervals_type"] not in ("WeightTraining", "Rest"))
-    _MIN_DURATION_H = 20 / 60   # exclude sessions < 20 min
-    _MIN_TSS = 10
-    _MAX_TSS_PER_H = 200        # sanity cap
-
-    def _median(vals):
-        if not vals:
-            return None
-        s = sorted(vals)
-        m = len(s) // 2
-        return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
-
-    # Collect (duration_h, tss, if_val_or_None) per sport
-    by_sport: dict[str, list] = {s: [] for s in _SPORTS}
-    for a in activities:
-        sport = a.get("type", "")
-        if sport not in _SPORTS:
-            continue
-        tss = a.get("icu_training_load") or 0
-        dur_h = ((a.get("moving_time") or a.get("elapsed_time") or 0)) / 3600
-        if tss < _MIN_TSS or dur_h < _MIN_DURATION_H:
-            continue
-        rate = tss / dur_h
-        if rate > _MAX_TSS_PER_H:
-            continue
-        if_val = session_intensity(a)   # returns 0.0–2.0 or None
-        by_sport[sport].append((dur_h, tss, rate, if_val))
-
-    lines = ["  TSS CHEAT SHEET (calibrated from your training history):"]
-
-    # ── VirtualRide (power-based → reliable IF split) ─────────────────────────
-    vr = by_sport["VirtualRide"]
-    if vr:
-        easy = [r for _, _, r, ifv in vr if ifv is not None and ifv < 0.80]
-        hard = [r for _, _, r, ifv in vr if ifv is not None and ifv >= 0.80]
-        all_rates = [r for _, _, r, _ in vr]
-        lines.append(f"  VirtualRide/Zwift (power-based, N={len(vr)}):")
-        if len(easy) >= 3:
-            h = round(_median(easy))
-            lines.append(f"    Easy/Z2 (IF<0.80):   1h={h} | 90min={round(h*1.5)} | 2h={h*2} | 3h={h*3} | 4h={h*4} TSS")
-        else:
-            lines.append("    Easy/Z2:   1h≈49 | 90min≈74 | 2h≈98 | 3h≈147 | 4h≈196 TSS (formula, limited data)")
-        if len(hard) >= 3:
-            h = round(_median(hard))
-            lines.append(f"    Hard/Z3-Z5 (IF≥0.80): 1h={h} | 70min={round(h*70/60)} | 90min={round(h*1.5)} TSS")
-        else:
-            lines.append("    Hard/Z3-Z5: 1h≈82 | 70min≈96 | 90min≈123 TSS (formula, limited data)")
-    else:
-        lines.append("  VirtualRide/Zwift: 1h≈49 | 2h≈98 | 3h≈147 | 4h≈196 TSS (formula, no history yet)")
-
-    # ── Ride outdoor (HR-based → no reliable intensity split) ─────────────────
-    rides = by_sport["Ride"]
-    if len(rides) >= 3:
-        h = round(_median([r for _, _, r, _ in rides]))
-        lines.append(f"  Ride outdoor (HR-based, N={len(rides)}): 1h={h} | 2h={h*2} | 3h={h*3} | 4h={h*4} | 5h={h*5} TSS")
-    else:
-        lines.append("  Ride outdoor (HR-based): 1h≈44 | 2h≈88 | 3h≈132 | 4h≈176 | 5h≈220 TSS (limited data)")
-
-    # ── Run ───────────────────────────────────────────────────────────────────
-    runs = by_sport["Run"]
-    if len(runs) >= 3:
-        h = round(_median([r for _, _, r, _ in runs]))
-        lines.append(f"  Run (N={len(runs)}): 1h={h} | 90min={round(h*1.5)} | 2h={h*2} TSS")
-    else:
-        lines.append("  Run: 1h≈55 | 90min≈83 | 2h≈110 TSS (limited data)")
-
-    # ── RollerSki ─────────────────────────────────────────────────────────────
-    rs = by_sport["RollerSki"]
-    if len(rs) >= 3:
-        h = round(_median([r for _, _, r, _ in rs]))
-        lines.append(f"  RollerSki (N={len(rs)}): 1h={h} | 90min={round(h*1.5)} | 2h={h*2} TSS")
-    else:
-        lines.append("  RollerSki: 1h≈50 | 90min≈75 | 2h≈100 TSS (limited data)")
-
-    lines.append("  WeightTraining: ~15-20 TSS/session | Rest: 0 TSS")
-    return "\n".join(lines)
-    return "\n".join(lines)

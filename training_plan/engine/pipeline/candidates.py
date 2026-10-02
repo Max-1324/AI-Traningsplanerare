@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from training_plan.core.common import *
 from training_plan.core.models import AIPlan, PairwiseDecision, PlanDecisionTrace, PlanReview, PlanScores
-from training_plan.engine.pipeline.core import _is_invalid_review_fallback, generate_plan, summarize_plan_candidate
+from training_plan.engine.pipeline.core import _is_invalid_review_fallback, generate_plan
 from training_plan.engine.pipeline.prompts import build_tss_gap_revision_prompt
 from training_plan.engine.postprocess import estimate_tss_coggan
 from training_plan.engine.pipeline.scoring import _VETO_TRIGGERS

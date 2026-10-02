@@ -1,4 +1,3 @@
-from collections import Counter
 
 from training_plan.core.common import *
 from training_plan.engine.utils import read_wellness_score, safe_date_str, strip_planner_comment_block

@@ -8,7 +8,7 @@ import unittest
 
 from training_plan.core.models import AIPlan, PlanDay, StrengthStep, WorkoutStep
 from training_plan.engine.validation import repair_postprocessed_plan, validate_postprocessed_plan
-from tests.fixtures.plans import BASE, easy_day, hard_day, rest_day, strength_day
+from tests.fixtures.plans import BASE, easy_day, rest_day
 
 
 def _make_plan(*days: PlanDay) -> AIPlan:

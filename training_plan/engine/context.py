@@ -14,11 +14,11 @@ independently, with no structural enforcement that both were updated.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from training_plan.engine.skeleton import DaySlot
+    pass
 
 
 @dataclass

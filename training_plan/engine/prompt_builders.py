@@ -1,11 +1,6 @@
 """Compatibility facade for prompt and morning-check builders."""
 
 from training_plan.engine.prompt.inputs import (
-    _extract_time_available_from_comments,
-    _minutes_to_time_text,
-    _normalize_time_available,
-    _parse_planner_comment_block,
-    _read_wellness_injury,
     fmt,
     morning_questions,
     sanitize,

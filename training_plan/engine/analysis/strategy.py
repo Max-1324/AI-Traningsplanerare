@@ -1,7 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
-from training_plan.engine.utils import safe_date_str, safe_date
 
 def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
                                compliance: dict, ftp_check: dict,
@@ -408,8 +407,7 @@ def check_return_to_play(activities: list, today: date) -> dict:
         if total_time >= 900 or total_tss >= 10 or has_rpe or has_strength:
             break  # Training logged and valid -> break rest day chain!
         else:
-            break
-            days_off += 1  # Activity was completely insignificant (e.g. 5 min walk)
+            break  # Activity was completely insignificant (e.g. 5 min walk)
     return {"is_active": days_off >= 5, "days_off": days_off}
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -444,7 +442,6 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
         return {"is_in_taper": False, "score": None, "days_to_race": days_to_race}
 
     taper_day = taper_days - days_to_race  # Day 1, 2, ... of the taper
-    taper_progress = taper_day / taper_days  # 0.0 → 1.0
 
     # CTL at taper start vs now
     taper_start_idx = max(0, len(fitness_history) - taper_day - 1)
@@ -458,11 +455,6 @@ def taper_quality_score(fitness_history: list, race_date: Optional[date],
     ctl_drop_pct = round((ctl_at_start - ctl_now) / max(ctl_at_start, 1) * 100, 1) if ctl_at_start else 0
     atl_drop_pct = round((atl_at_start - atl_now) / max(atl_at_start, 1) * 100, 1) if atl_at_start else 0
     tsb_rise = round(tsb_now - tsb_at_start, 1)
-
-    # Expected values at this point in the taper
-    expected_ctl_drop = taper_progress * 8  # Expected 5-10% CTL drop at the end
-    expected_atl_drop = taper_progress * 40  # ATL should drop 30-50%
-    expected_tsb = taper_progress * 15  # TSB should rise ~15 points
 
     # Scoring (0-100)
     score = 0

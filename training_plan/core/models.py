@@ -251,19 +251,6 @@ class PlanValidationResult(BaseModel):
 
 # ── Persistent state schema ───────────────────────────────────────────────────
 
-class FailureMemoryItem(BaseModel):
-    score: float = 0.0
-    count: int = 0
-    last_seen: str = ""
-    example: str = ""
-    label: str = ""
-
-
-class FailureMemoryBucket(BaseModel):
-    patterns: dict[str, FailureMemoryItem] = Field(default_factory=dict)
-    last_updated: str = ""
-
-
 class AppState(BaseModel):
     """Typed schema for the persistent JSON state file.
 
