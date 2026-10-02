@@ -230,6 +230,7 @@ class PlannerInputs:
     weather: list = field(default_factory=list)
     constraints: list = field(default_factory=list)
     locked_dates: set = field(default_factory=set)
+    unavailable_dates: set = field(default_factory=set)   # calendar SICK/HOLIDAY/INJURED marked UNAVAILABLE
     base_tss_by_date: dict = field(default_factory=dict)
     sport_budgets: dict = field(default_factory=dict)
     avoid_sports: set = field(default_factory=set)
@@ -478,13 +479,16 @@ class _Planner:
         week_dates = [s.date for s in slots]
         planned: dict[str, list[tuple[PlanDay, str]]] = {d: [] for d in week_dates}
         role_of = {s.date: (s.suggested_type or "open") for s in slots}
-        locked = {d for d in week_dates if d in inp.locked_dates}
+        locked = {d for d in week_dates if d in inp.locked_dates or d in inp.unavailable_dates}
         if inp.done_today and inp.today.isoformat() in week_dates:
             locked.add(inp.today.isoformat())
 
         budget = float(target.remaining_tss)
-        if target.week_start == monday_of(inp.today).isoformat():
-            budget = min(budget, target.tss_target * len(week_dates) / 7 * CATCH_UP_CAP)
+        # The days left this week, minus days you cannot train, get at most their share
+        # of the weekly target: missed or blocked days are never "caught up".
+        trainable = len([d for d in week_dates if d not in inp.unavailable_dates])
+        if target.week_start == monday_of(inp.today).isoformat() or trainable < len(week_dates):
+            budget = min(budget, target.tss_target * trainable / 7 * CATCH_UP_CAP)
         budget -= sum(inp.base_tss_by_date.get(d, 0) for d in week_dates)
         if inp.burnout:
             budget *= 0.8
@@ -761,7 +765,7 @@ class _Planner:
             mesocycle=inp.mesocycle,
             readiness={},
             race_week=inp.race_week,
-            locked_dates=set(inp.locked_dates),
+            locked_dates=set(inp.locked_dates) | set(inp.unavailable_dates),
             rtp_status=None,
             week_targets=inp.week_targets,
             restricted_dates=set(inp.restricted_dates),
@@ -795,7 +799,7 @@ class _Planner:
             + f". {hard_days} key session(s)."
         )
         if inp.restricted_dates and inp.restriction_reason:
-            summary += f" Easy today/tomorrow: {inp.restriction_reason}."
+            summary += f" Adjusted for: {inp.restriction_reason}."
         stress_audit = "Weekly targets:\n" + format_week_targets(weeks_in_horizon)
         plan = AIPlan(stress_audit=stress_audit, summary=summary, days=days)
         return PlannerResult(

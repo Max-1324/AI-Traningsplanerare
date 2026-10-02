@@ -1,4 +1,5 @@
 from training_plan.core.common import *
+from training_plan.engine.calendar_context import is_context_event
 from training_plan.engine.utils import is_race_event, race_priority
 
 def icu_get(path, params=None):
@@ -53,6 +54,17 @@ def fetch_all_planned_events(days_back=28, days_forward=0):
         "oldest": (date.today() - timedelta(days=days_back)).isoformat(),
         "newest": (date.today() + timedelta(days=days_forward)).isoformat(),
     })
+
+def fetch_calendar_context(days_back=60, days_ahead=35):
+    """Annual training plan (PLAN/TARGET/ATP notes) and SICK/INJURED/HOLIDAY events around today.
+
+    Looks back as well, so phase blocks and absences that started earlier are included.
+    """
+    evts = icu_get(f"/athlete/{ATHLETE_ID}/events", {
+        "oldest": (date.today() - timedelta(days=days_back)).isoformat(),
+        "newest": (date.today() + timedelta(days=days_ahead)).isoformat(),
+    })
+    return [e for e in evts if is_context_event(e)]
 
 def fetch_races(days_ahead=180):
     try:

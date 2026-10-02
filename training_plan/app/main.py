@@ -105,6 +105,7 @@ from training_plan.integrations.services import (
     fetch_activities,
     fetch_all_planned_events,
     fetch_athlete,
+    fetch_calendar_context,
     fetch_planned_workouts,
     fetch_races,
     fetch_weather,
@@ -119,6 +120,7 @@ from training_plan.integrations.services import (
     save_morning_wellness,
     save_weekly_report_to_icu,
     save_workout,
+    sync_week_targets,
     update_manual_nutrition,
 )
 
@@ -135,9 +137,11 @@ def _fetch_initial_data(days_history: int, horizon: int) -> dict:
         "planned": lambda: fetch_planned_workouts(max(horizon, 28)),
         "all_events": lambda: fetch_all_planned_events(days_back=28),
         "weather": lambda: fetch_weather(horizon),
+        # Annual training plan (PLAN/TARGET/notes) and SICK/INJURED/HOLIDAY events.
+        "calendar": lambda: fetch_calendar_context(),
     }
     results = {}
-    optional_defaults = {"races": [], "weather": []}
+    optional_defaults = {"races": [], "weather": [], "calendar": []}
     with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
         future_map = {name: executor.submit(job) for name, job in jobs.items()}
         for name, future in future_map.items():
@@ -175,6 +179,7 @@ def main(argv=None):
         planned = initial_data["planned"]
         all_events = initial_data["all_events"]
         weather = initial_data["weather"]
+        calendar_events = initial_data.get("calendar", [])
         log.info(f"  {len(activities)} activities | {len(wellness)} wellness | {len(races)} races | {len(planned)} planned")
     except (requests.RequestException, RuntimeError, ValueError) as e:
         log.error(f"API error: {e}"); sys.exit(1)
@@ -184,7 +189,8 @@ def main(argv=None):
     horizon_end     = (date.today() + timedelta(days=args.horizon)).isoformat()
     in_horizon      = lambda w: w.get("start_date_local", "")[:10] <= horizon_end
     manual_workouts = [w for w in planned if not is_ai_generated(w) and w.get("category") == "WORKOUT" and in_horizon(w)]
-    ai_workouts_all = [w for w in planned if is_ai_generated(w)]
+    # Our own weekly TARGET events are synced separately and never count as planned sessions.
+    ai_workouts_all = [w for w in planned if is_ai_generated(w) and w.get("category") != "TARGET"]
     ai_workouts     = [w for w in ai_workouts_all if in_horizon(w)]
     locked_dates    = {w.get("start_date_local","")[:10] for w in manual_workouts}
     if manual_workouts: log.info(f"  {len(manual_workouts)} manual sessions locked: {', '.join(sorted(locked_dates))}")
@@ -608,13 +614,14 @@ def main(argv=None):
             sport_acwr=sport_acwr, hrv=hrv, readiness=readiness, wellness=wellness_clean,
             activities=activities_clean, morning=morning, injury_profile=injury_profile,
             development_needs=development_needs, ftp_check=ftp_check, motivation=motivation,
+            calendar_events=calendar_events,
         )
         det_result = build_deterministic_plan(det_inputs)
         mode_budget = det_result.horizon_tss_target
         for target in det_result.week_targets:
             log.info(f"🗓️ {target.summary()}")
         if det_inputs.restriction_reason:
-            log.info(f"🟡 Easy today/tomorrow: {det_inputs.restriction_reason}")
+            log.info(f"🟡 Adjusted for: {det_inputs.restriction_reason}")
 
     # ── Avgör uppdateringsläge FÖRE AI-anropen ───────────────────────────────
     # Allt som behövs finns redan här, så en komplett plan behöver inte kosta en hel AI-pipeline.
@@ -640,9 +647,10 @@ def main(argv=None):
     if args.engine == "deterministic":
         log.info("🧱 Deterministic planner built the plan%s.",
                  "" if args.no_ai else f"; asking {pipeline_provider} to enrich it")
+        blocked_dates = set(locked_dates) | det_inputs.unavailable_dates
         validation_context = {
             "today": date.today().isoformat(),
-            "locked_dates": locked_dates,
+            "locked_dates": blocked_dates,
             "time_available_min": time_available_minutes(morning.get("time_available", "") or ""),
             "rtp_status": {"is_active": bool(rtp_status.get("is_active")), "days_off": rtp_status.get("days_off", 0)},
             "max_hard_days": det_result.max_hard_days,
@@ -660,7 +668,7 @@ def main(argv=None):
             mode=mode, ai_workouts=ai_workouts, provider=pipeline_provider, use_ai=not args.no_ai,
             ai_context=ai_context,
             safety_kwargs=dict(
-                hrv=hrv, budgets=budgets, locked=locked_dates, athlete=athlete, weather=weather,
+                hrv=hrv, budgets=budgets, locked=blocked_dates, athlete=athlete, weather=weather,
                 today=date.today(), injury_note=morning.get("injury_today", ""), injury_profile=injury_profile,
                 constraints=constraints, today_wellness=today_wellness, per_sport_acwr_data=sport_acwr,
                 phase=phase, races=races, wellness=wellness_clean,
@@ -1024,6 +1032,13 @@ def main(argv=None):
             saved += 1
         except requests.HTTPError as e:
             log.error(f"Failed to save {day.date}: {e}"); errors += 1
+
+    # Weekly load targets → intervals.icu, so the fitness chart projects CTL and the calendar
+    # shows planned vs done. Weeks with the athlete's own (annual plan) targets are left alone.
+    if args.engine == "deterministic" and os.getenv("SYNC_WEEK_TARGETS", "on").lower() not in ("off", "0", "false", "no"):
+        synced = sync_week_targets(det_result.week_targets, calendar_events)
+        if synced:
+            log.info(f"  Weekly targets written to intervals.icu: {synced}")
 
     vetoed_count = sum(1 for d in plan.days if d.vetoed)
     log.info(f"Done! {saved} sessions saved. {vetoed_count} safety adjusted by rules. {errors} errors. {len(changes)} post-processing changes.")

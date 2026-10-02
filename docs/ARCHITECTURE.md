@@ -13,12 +13,15 @@ och ordningen i [ROADMAP.md](ROADMAP.md).
 ```text
 main.py
  └─ training_plan/app/main.py: main()
-     1. Hämta      7 dataset parallellt från intervals.icu + met.no; fitness räknas ur wellness
+     1. Hämta      8 dataset parallellt från intervals.icu + met.no, bl.a. kalenderkontext
+                   (årsplan, SICK/INJURED/HOLIDAY); fitness räknas ur wellness
      2. Städa      datakvalitet: filtrera orimliga aktiviteter, blanka ogiltig HRV/sömn
      3. Analysera  HRV (ln rMSSD mot egen baslinje), readiness, mesocykel, CTL-trajektoria, compliance,
                    ACWR, tävlingsvecka, utvecklingsbehov, coachlager …
      4. Planera    app/deterministic.py: build_planner_inputs()
                      → engine/periodization.py: build_week_targets()   ett TSS-mål per vecka
+                       + apply_calendar_targets(): årsplanens veckomål ersätter våra när de finns
+                     → engine/calendar_context.py: tillgänglighet per datum (inga pass / bara lätta)
                      → engine/skeleton.py: build_week_skeleton()       dagsroller per vecka
                      → engine/planner.py: build_deterministic_plan()   konkreta pass + alternativ
      5. Läge       resolve_update_mode(): none / extend / full (alltid full på måndagar).
@@ -28,7 +31,7 @@ main.py
                    Reserv: AI-texter utan val → ren deterministisk plan
      7. Validera   slutlig deterministisk validering; stoppas vid hårda fel
      8. Spara      radera framtida AI-event och skapa nya (full) eller lägg till saknade datum (extend),
-                   daglig coachanteckning, veckorapport (måndagar/full)
+                   daglig coachanteckning, veckorapport (måndagar/full), veckomål som TARGET-event
      9. State      .coach_state.json: mesocykel, progressionsnivåer, failure memory, utfall
 ```
 
@@ -45,7 +48,7 @@ Med `--engine legacy` ersätts steg 4–6 av den gamla AI-först-pipelinen: en s
 | `training_plan/engine/planning/` | Planeringshjälp | `state.py` (state-fil, mesocykel, failure memory), `metrics.py` (passklassning, polarisering, CTL-trajektoria), `learning.py` (compliance, mönster), `workouts.py` (progression, prehab, FTP-test) |
 | `training_plan/engine/insights/` | "Coachlager" | `profiles.py`, `execution.py`, `forecast.py`: kapacitetskarta, minimum effective dose, friktion, benchmarks, prognos, säsongsplan |
 | `training_plan/engine/prompt/` | Promptbygge | `generation.py` (huvudprompten), `sections.py`, `inputs.py` (morgonfrågor) |
-| `training_plan/engine/` (kärnan) | Deterministisk planering | `periodization.py` (`WeekTarget`, veckomål), `planner.py` (`build_deterministic_plan`: pass, alternativ, `horizon_tss_target`, `max_hard_days`), `skeleton.py` (dagsroller per vecka) |
+| `training_plan/engine/` (kärnan) | Deterministisk planering | `periodization.py` (`WeekTarget`, veckomål), `planner.py` (`build_deterministic_plan`: pass, alternativ, `horizon_tss_target`, `max_hard_days`), `skeleton.py` (dagsroller per vecka), `calendar_context.py` (årsplan och tillgänglighet ur kalendern) |
 | `training_plan/engine/pipeline/` | AI | `enrich.py` (berikning: ett anrop, begränsade val, reservkedja). Legacy: `__init__.py` (`run_plan_pipeline`), `core.py`, `prompts.py`, `reviews.py`, `scoring.py`, `candidates.py`, `outcomes.py` |
 | `training_plan/engine/postprocess/` | Säkerhetsregler | `__init__.py` (`apply_safety_rules` för den deterministiska motorn, `post_process` för legacy), `recovery.py` (hard-easy, HRV, sjukdom, RTP, deload, styrka …), `load.py` (TSS per steg, TSS-tak/-reparation för legacy), `injury.py` (`injury_restrictions`, rehab), `nutrition.py` |
 | `training_plan/engine/validation/` | Slutkontroll | `rules.py` (validering), `structure.py` (reparation), `adapters.py` |

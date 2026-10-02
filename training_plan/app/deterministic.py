@@ -10,7 +10,14 @@ from datetime import date, timedelta
 from functools import partial
 
 from training_plan.core.models import AIPlan, PlanDecisionTrace
-from training_plan.engine.periodization import build_week_targets, done_tss_this_week, format_week_targets, monday_of
+from training_plan.engine.calendar_context import atp_weeks, availability_by_date, tss_per_hour
+from training_plan.engine.periodization import (
+    apply_calendar_targets,
+    build_week_targets,
+    done_tss_this_week,
+    format_week_targets,
+    monday_of,
+)
 from training_plan.engine.pipeline.enrich import COACH_LANGUAGE, enrich_and_validate, request_enrichment
 from training_plan.engine.planner import PlannerInputs, PlannerResult
 from training_plan.engine.planning import classify_session_category
@@ -63,8 +70,10 @@ def build_planner_inputs(
     development_needs: dict,
     ftp_check: dict,
     motivation: dict,
+    calendar_events: list | None = None,
 ) -> PlannerInputs:
     horizon_dates = [(today + timedelta(days=i)).isoformat() for i in range(horizon + 1)]
+    calendar_events = calendar_events or []
     today_s, tomorrow_s = today.isoformat(), (today + timedelta(days=1)).isoformat()
 
     # Daily readiness only affects today and tomorrow; the week targets stay stable.
@@ -83,6 +92,16 @@ def build_planner_inputs(
     if (rtp_status or {}).get("is_active"):
         restricted |= set(horizon_dates[:7])
         reasons.append(f"return to play after {rtp_status.get('days_off')} rest days")
+
+    # SICK / INJURED / HOLIDAY events in the calendar (the planner also plans the rest of
+    # the last week, so look a week past the horizon).
+    lookahead = [(today + timedelta(days=i)).isoformat() for i in range(horizon + 8)]
+    availability = availability_by_date(calendar_events, lookahead)
+    unavailable = {d for d, (level, _) in availability.items() if level == "UNAVAILABLE"}
+    limited = {d for d, (level, _) in availability.items() if level == "LIMITED"}
+    restricted |= limited
+    for level, reason in dict.fromkeys(v for d, v in sorted(availability.items()) if d in horizon_dates):
+        reasons.append(f"{reason} ({'no training' if level == 'UNAVAILABLE' else 'limited'})")
 
     injury_note = morning.get("injury_today") or ""
     injury = injury_restrictions(injury_note, injury_profile) if injury_note else None
@@ -103,6 +122,10 @@ def build_planner_inputs(
         races=races, trajectory=trajectory, tsb=tsb,
         done_tss=done_tss_this_week(activities, today),
     )
+    # The athlete's annual training plan in intervals.icu, when there is one, sets the weekly load.
+    atp = atp_weeks(calendar_events)
+    if atp:
+        targets = apply_calendar_targets(targets, atp, tss_per_hour(activities))
     return PlannerInputs(
         today=today,
         horizon_dates=horizon_dates,
@@ -114,6 +137,7 @@ def build_planner_inputs(
         weather=weather,
         constraints=constraints,
         locked_dates=set(locked_dates),
+        unavailable_dates=unavailable,
         base_tss_by_date=dict(base_tss_by_date),
         sport_budgets=budgets,
         avoid_sports=avoid,
@@ -166,7 +190,7 @@ def build_ai_context(
         f"Pain/injury: {morning.get('injury_today') or 'none'}",
     ]
     if inputs.restriction_reason:
-        facts.append(f"Today/tomorrow kept easy because: {inputs.restriction_reason}")
+        facts.append(f"Sessions adjusted (easier, shorter or none) because of: {inputs.restriction_reason}")
     if next_race:
         facts.append(f"Next race: {next_race.get('name', 'Race')} on {_day(next_race)} "
                      f"(priority {race_priority(next_race)})")

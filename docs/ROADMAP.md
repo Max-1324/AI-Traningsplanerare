@@ -15,7 +15,7 @@ Bakgrunden till metodvalen finns i [TRAINING_MODEL.md](TRAINING_MODEL.md), och s
 | 4 | ✅ | **Saknad HRV raderade hela wellness-raden** | [`engine/analysis/data.py`](../training_plan/engine/analysis/data.py) `validate_data_quality`, `clean_wellness` | Sömn, vilopuls och CTL försvann för alla dagar utan HRV, och gårdagens rad räknades som "idag" i HRV-analysen. Nu nollställs bara det ogiltiga fältet |
 | 5 | 🟡 | **AI-klientens robusthet** | [`engine/ai/client.py`](../training_plan/engine/ai/client.py) | ✅ Ingen krasch längre när `GEMINI_MODELS`/`GROQ_MODELS` saknas. ✅ `max_tokens` för Anthropic (6000) och `num_predict` för Ollama (4096) trunkerade troligen en 29-dagarsplan och styrs nu av env. ✅ Fallback till Mistral tappar inte längre temperaturen. ⬜ Kvar: använd inbyggd *structured output* (Gemini `response_schema`, OpenAI `json_schema`, Anthropic tool use) i stället för fri JSON plus reparation, och lägg till retry för Anthropic/OpenAI |
 | 6 | ✅ | **Periodisering över horisonten** | [`engine/periodization.py`](../training_plan/engine/periodization.py), [`engine/skeleton.py`](../training_plan/engine/skeleton.py), [`engine/planner.py`](../training_plan/engine/planner.py) | Förut gällde aktuell veckas mesocykelfaktor alla 29 dagar: under en deloadvecka blev hela horisonten deload, och annars fanns ingen deload alls. Nu får varje kalendervecka ett eget `WeekTarget` (mesocykelposition, deload, taper, tävling och ramp), och skelettet och planeraren följer det. Legacy-motorn använder fortfarande `tss_budget` |
-| 7 | 🟡 | **Drift och state** | [`server.py`](../server.py), [`.github/workflows/morning.yml`](../.github/workflows/morning.yml) | ✅ Docstringen säger nu `gunicorn server:app`. ✅ Timeouten styrs av `GENERATOR_TIMEOUT_SEC` (standard 900 s, och den nya motorn behöver bara ett AI-anrop). ⬜ Kvar: Render har ett flyktigt filsystem, så `.coach_state.json` försvinner och glider isär från GitHub Actions-cachens kopia. Välj **en** körmiljö och **en** state-lagring (t.ex. en privat gist, en liten bucket eller ett NOTE-event i intervals.icu) |
+| 7 | 🟡 | **Drift och state** | [`server.py`](../server.py), [`.github/workflows/morning.yml`](../.github/workflows/morning.yml) | ✅ Docstringen säger nu `gunicorn server:app`. ✅ Timeouten styrs av `GENERATOR_TIMEOUT_SEC` (standard 900 s). 🟡 Med en årsplan i intervals.icu kommer veckomålen och återhämtningsveckorna från kalendern i stället för `.coach_state.json`. ⬜ Kvar: progressionsnivåerna ligger fortfarande i state-filen, som är flyktig på Render och raderas ur GitHub Actions-cachen efter 7 dagar utan körning. Välj **en** körmiljö och **en** state-lagring (t.ex. ett NOTE-event i intervals.icu) |
 
 ### Se vilket tävlingsformat ditt konto använder (#3)
 ```bash
@@ -46,8 +46,24 @@ Visar utskriften `RACE_A`/`RACE_B`/`RACE_C` hittade den gamla koden inga tävlin
 | 17 | ✅ | **Tester och CI.** [`tests.yml`](../.github/workflows/tests.yml) kör testsviten vid push och pull request. Scenario- och egenskapstester (`tests/test_deterministic_planner.py`) kör planeraren i flera hundra situationer, och planen ska alltid klara reglerna och valideringen. Ruff är inte tillagt |
 | 18 | 🟡 | **Konfiguration.** ✅ [`.env.example`](../.env.example) med alla variabler, grupperade. ⬜ Kvar: en typad `Settings` (pydantic-settings) i stället för cirka 90 `os.getenv` på olika ställen |
 | 19 | ⬜ | **Rensa insiktslagret.** Elva "planner insights" (kapacitetskarta, prognos, friktion, säsongsplan …) med handsatta vikter matar mest prompttext. Mät vilka som faktiskt ändrar beslut och ta bort resten |
-| 20 | ⬜ | **Använd intervals.icu-native data.** eFTP, effektkurva och `SICK`/`INJURED`-event i stället för namnparsning (`b:`, `[Ride]`) och fritext |
+| 20 | 🟡 | **Använd intervals.icu-native data.** ✅ Årsplanen (`TARGET`/`PLAN`/ATP-anteckningar) styr veckomålen. ✅ `SICK`/`INJURED`/`HOLIDAY` med `training_availability` styr vilka dagar som planeras (`engine/calendar_context.py`). ✅ Veckomålen skrivs tillbaka som `TARGET`-event. ⬜ Kvar: eFTP och effektkurva (se #26) |
 | 21 | ⬜ | **Utvärdering och backtesting.** Spela upp historiken: planerat mot genomfört, CTL-kurva och missade nyckelpass. Först då går det att veta om en ändring är en förbättring |
+
+## Från jämförelsen med andra verktyg
+
+Se [LANDSCAPE.md](LANDSCAPE.md) för bakgrund. Sorterat efter ROI:
+
+| # | Status | Vad |
+|---|---|---|
+| 22 | ⬜ | **Tillgänglighet per veckodag** (t.ex. `WEEKLY_AVAILABILITY=mon:0,tue:60,wed:90,…,sat:240`) som tak per dag i planeraren, som i JOIN och Humango |
+| 23 | ⬜ | **Visa alternativen i passbeskrivningen** ("ont om tid: …", "trött: …"). Planeraren har dem redan, motsvarar TrainNow |
+| 24 | ⬜ | **Använd subjektiv data**: RPE och Feel per pass samt wellness-fälten fatigue, soreness, mood och motivation, i readiness och progression |
+| 25 | ⬜ | **Värmejustering**: sänk puls- och effektmål eller korta intervaller vid hög temperatur, välj svalaste tiden på dagen |
+| 26 | ⬜ | **eFTP i stället för täta FTP-tester**: föreslå zonuppdatering när intervals.icu:s eFTP drar ifrån satt FTP |
+| 27 | ⬜ | **Förklaring per ändrat pass** ("flyttat från tisdag: låg HRV") i beskrivningen |
+| 28 | ⬜ | **Progression över alla genomförda pass**, inte bara gårdagens, och som kan gå ned efter misslyckade pass |
+| 29 | ⬜ | **Val av metodik** (polariserat, pyramidalt, tröskelbetonat) som styr nyckelpassen |
+| 30 | ⬜ | **Chatt med coachen** (t.ex. Telegram-bot) för snabba frågor och ändringar |
 
 Två mindre observationer: `injury.py` och `recovery.py` definierar samma tre konstanter var för sig, och
 intervals.icu stöder enligt min kännedom `Nx`-repetitioner i passtext, tvärtemot kommentaren i
@@ -59,7 +75,9 @@ intervals.icu stöder enligt min kännedom `Nx`-repetitioner i passtext, tvärte
 2. ✅ **Veckomål per vecka** (#6, #13).
 3. ✅ **Billigare och lugnare körningar** (#8, #9, #12).
 4. ✅ **Deterministiskt passval** där AI:n bara berikar (se TRAINING_MODEL.md).
-5. ⬜ **En plats för state** (#7) och **structured output** för AI-svaren (#5).
-6. ⬜ **Flytt till ny struktur** (se ARCHITECTURE.md) och borttagning av fasader och legacy-motorn (#16, #18),
+5. ✅ **Kalendern som källa**: årsplan, tillgänglighet och veckomål i intervals.icu (#20).
+6. ⬜ **Snabba vinster från jämförelsen** (#22–#27): små ändringar i planeraren som ger mycket.
+7. ⬜ **En plats för state** (#7) och **structured output** för AI-svaren (#5).
+8. ⬜ **Flytt till ny struktur** (se ARCHITECTURE.md) och borttagning av fasader och legacy-motorn (#16, #18),
    när den nya motorn har fungerat ett tag.
-7. ⬜ **Rensning och mätning** (#19, #21).
+9. ⬜ **Rensning och mätning** (#19, #21).

@@ -50,6 +50,7 @@ class WeekTarget:
     done_tss: int = 0          # already completed this week (current week only)
     max_key_sessions: int = KEY_SESSIONS_PER_WEEK
     note: str = ""
+    source: str = "planner"    # "planner" or "intervals.icu" (the athlete's annual training plan)
 
     @property
     def remaining_tss(self) -> int:
@@ -64,7 +65,8 @@ class WeekTarget:
         return start <= date.fromisoformat(day[:10]) < start + timedelta(days=7)
 
     def summary(self) -> str:
-        label = {"build": f"build {self.week_in_block}/3", "deload": "deload", "taper": "taper", "race": "race week"}
+        build = f"build {self.week_in_block}/3" if self.source == "planner" else "build"
+        label = {"build": build, "deload": "deload", "taper": "taper", "race": "race week"}
         text = (
             f"Week {self.week_start}: {label.get(self.kind, self.kind)} | target {self.tss_target} TSS"
             f" | key sessions max {self.max_key_sessions}"
@@ -73,6 +75,8 @@ class WeekTarget:
             text += f" | done {self.done_tss}, remaining {self.remaining_tss}"
         if self.note:
             text += f" | {self.note}"
+        if self.source != "planner":
+            text += f" | from {self.source}"
         return text
 
 
@@ -198,6 +202,48 @@ def build_week_targets(
         block_number += 1 if week_in_block == 4 else 0
         week_in_block = (week_in_block % 4) + 1
     return targets
+
+
+def apply_calendar_targets(targets: list[WeekTarget], atp: dict[str, dict], tss_per_hour: float) -> list[WeekTarget]:
+    """Let the athlete's annual training plan in intervals.icu set the weekly targets.
+
+    Weeks with an ATP target take its load (or time × typical TSS/hour) and its
+    recovery weeks; our own mesocycle is then ignored for those weeks. Race and taper
+    handling from the calendar's races is kept. Weeks without an ATP target are unchanged.
+    """
+    result = []
+    for target in targets:
+        week = atp.get(target.week_start)
+        if not week:
+            result.append(target)
+            continue
+        if week.get("load_target"):
+            tss = round(float(week["load_target"]))
+        elif week.get("time_target"):
+            tss = round(float(week["time_target"]) / 3600 * tss_per_hour)
+        else:
+            result.append(target)  # distance-only targets: keep our own load target
+            continue
+        kind, max_key = target.kind, target.max_key_sessions
+        if kind not in ("race", "taper"):
+            kind = "deload" if week.get("recovery") else "build"
+            max_key = 0 if kind == "deload" else KEY_SESSIONS_PER_WEEK
+        phase = week.get("phase")
+        note = "; ".join(x for x in (f"ATP phase: {phase}" if phase else "", target.note if kind in ("race", "taper") else "") if x)
+        result.append(WeekTarget(
+            week_start=target.week_start,
+            week_in_block=target.week_in_block,
+            block_number=target.block_number,
+            kind=kind,
+            ctl_start=target.ctl_start,
+            ramp=0.0,
+            tss_target=tss,
+            done_tss=target.done_tss,
+            max_key_sessions=max_key,
+            note=note,
+            source="intervals.icu",
+        ))
+    return result
 
 
 def format_week_targets(targets: list[WeekTarget]) -> str:

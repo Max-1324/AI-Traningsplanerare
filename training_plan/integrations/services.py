@@ -12,6 +12,7 @@ from training_plan.integrations.intervals_client import (
     fetch_activities,
     fetch_all_planned_events,
     fetch_athlete,
+    fetch_calendar_context,
     fetch_fitness,
     fetch_planned_workouts,
     fetch_races,
@@ -32,6 +33,7 @@ from training_plan.integrations.intervals_events import (
     plan_day_has_started,
     save_event,
     save_workout,
+    sync_week_targets,
     update_manual_nutrition,
 )
 from training_plan.integrations.weather import YR_CODES, fetch_weather
@@ -50,6 +52,7 @@ __all__ = [
     "fetch_activities",
     "fetch_all_planned_events",
     "fetch_athlete",
+    "fetch_calendar_context",
     "fetch_fitness",
     "fetch_planned_workouts",
     "fetch_races",
@@ -66,5 +69,6 @@ __all__ = [
     "save_morning_wellness",
     "save_weekly_report_to_icu",
     "save_workout",
+    "sync_week_targets",
     "update_manual_nutrition",
 ]
