@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from training_plan.core.config import TARGET_CTL
+from training_plan.engine.calendar_context import week_tss
 from training_plan.engine.utils import race_priority
 
 RAMP_CTL_PER_WEEK = float(os.getenv("RAMP_CTL_PER_WEEK", "4.0"))
@@ -214,16 +215,11 @@ def apply_calendar_targets(targets: list[WeekTarget], atp: dict[str, dict], tss_
     result = []
     for target in targets:
         week = atp.get(target.week_start)
-        if not week:
-            result.append(target)
+        weekly = week_tss(week, tss_per_hour) if week else None
+        if weekly is None:
+            result.append(target)  # no ATP week, or distance-only targets: keep our own load target
             continue
-        if week.get("load_target"):
-            tss = round(float(week["load_target"]))
-        elif week.get("time_target"):
-            tss = round(float(week["time_target"]) / 3600 * tss_per_hour)
-        else:
-            result.append(target)  # distance-only targets: keep our own load target
-            continue
+        tss = round(weekly)
         kind, max_key = target.kind, target.max_key_sessions
         if kind not in ("race", "taper"):
             kind = "deload" if week.get("recovery") else "build"

@@ -50,7 +50,12 @@ def is_context_event(event: dict) -> bool:
 
 
 def atp_weeks(events: list[dict]) -> dict[str, dict]:
-    """Athlete-set weekly targets keyed by Monday (ISO date), with phase and recovery flag."""
+    """Athlete-set weekly targets keyed by Monday (ISO date), with phase and recovery flag.
+
+    intervals.icu stores weekly targets per sport (one TARGET event per sport and week,
+    ``type`` = Ride/Run/…) and optionally one for all activities (no ``type``). Each week
+    keeps both: ``total`` (the all-activities target, if any) and ``sports``.
+    """
     phases = []
     for e in events:
         if (e.get("category") or "").upper() != "PLAN":
@@ -68,30 +73,51 @@ def atp_weeks(events: list[dict]) -> dict[str, dict]:
         start = _day(e.get("start_date_local"))
         if start is None:
             continue
-        monday = start - timedelta(days=start.weekday())
-        sunday = monday + timedelta(days=6)
-        load, seconds, meters = e.get("load_target"), e.get("time_target"), e.get("distance_target")
-        if not any(v for v in (load, seconds, meters)):
+        entry = {"load": e.get("load_target"), "time": e.get("time_target"), "distance": e.get("distance_target")}
+        if not any(entry.values()):
             continue  # a goal/milestone TARGET (e.g. "FTP 300 W"), not a weekly volume target
-        # When phase blocks share a boundary, the week belongs to the phase starting latest.
-        matching = [p for p in phases if p[0] <= monday <= p[1]]
-        phase = max(matching, key=lambda p: p[0])[2] if matching else None
-        recovery = False
-        for note in notes:
-            n_start = _day(note.get("start_date_local"))
-            n_end = _day(note.get("end_date_local")) or n_start
-            if n_start and n_start <= sunday and n_end >= monday:
-                text = f"{note.get('name') or ''} {note.get('description') or ''}".lower()
-                recovery = recovery or any(word in text for word in _RECOVERY_WORDS)
-        weeks[monday.isoformat()] = {
-            "load_target": load,
-            "time_target": seconds,
-            "distance_target": meters,
-            "phase": phase,
-            "recovery": recovery or "recovery" in (phase or "").lower(),
-            "name": e.get("name") or "",
-        }
+        monday = start - timedelta(days=start.weekday())
+        week = weeks.get(monday.isoformat())
+        if week is None:
+            sunday = monday + timedelta(days=6)
+            # When phase blocks share a boundary, the week belongs to the phase starting latest.
+            matching = [p for p in phases if p[0] <= monday <= p[1]]
+            phase = max(matching, key=lambda p: p[0])[2] if matching else None
+            recovery = "recovery" in (phase or "").lower()
+            for note in notes:
+                n_start = _day(note.get("start_date_local"))
+                n_end = _day(note.get("end_date_local")) or n_start
+                if n_start and n_start <= sunday and n_end >= monday:
+                    text = f"{note.get('name') or ''} {note.get('description') or ''}".lower()
+                    recovery = recovery or any(word in text for word in _RECOVERY_WORDS)
+            week = weeks[monday.isoformat()] = {
+                "total": None, "sports": {}, "phase": phase, "recovery": recovery, "name": e.get("name") or "",
+            }
+        sport = e.get("type")
+        if sport:
+            week["sports"][sport] = entry
+        else:
+            week["total"] = entry
     return weeks
+
+
+def _entry_tss(entry: dict | None, tss_per_hour: float) -> float | None:
+    if not entry:
+        return None
+    if entry.get("load"):
+        return float(entry["load"])
+    if entry.get("time"):
+        return float(entry["time"]) / 3600 * tss_per_hour
+    return None  # distance-only target
+
+
+def week_tss(week: dict, tss_per_hour: float) -> float | None:
+    """The week's load target: the all-activities target if set, otherwise the sum per sport."""
+    total = _entry_tss(week.get("total"), tss_per_hour)
+    if total is not None:
+        return total
+    parts = [t for t in (_entry_tss(e, tss_per_hour) for e in week.get("sports", {}).values()) if t is not None]
+    return sum(parts) if parts else None
 
 
 def availability_by_date(events: list[dict], dates: list[str]) -> dict[str, tuple[str, str]]:

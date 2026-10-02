@@ -36,10 +36,25 @@ class TestAnnualTrainingPlan(unittest.TestCase):
     def test_reads_targets_phase_and_recovery_weeks(self):
         weeks = atp_weeks(ATP_EVENTS)
         self.assertEqual(sorted(weeks), ["2026-10-05", "2026-10-12", "2026-10-19"])
-        self.assertEqual(weeks["2026-10-05"]["load_target"], 520)
+        self.assertEqual(weeks["2026-10-05"]["total"]["load"], 520)
         self.assertEqual(weeks["2026-10-05"]["phase"], "Build")
         self.assertFalse(weeks["2026-10-05"]["recovery"])
         self.assertTrue(weeks["2026-10-19"]["recovery"])
+
+    def test_per_sport_targets_are_summed(self):
+        from training_plan.engine.calendar_context import week_tss
+        events = [dict(_target("2026-10-05", load=300), type="Ride"),
+                  dict(_target("2026-10-05", seconds=3 * 3600), type="Run")]
+        week = atp_weeks(events)["2026-10-05"]
+        self.assertEqual(week_tss(week, tss_per_hour=50), 450)
+        self.assertEqual(sorted(week["sports"]), ["Ride", "Run"])
+
+    def test_all_activities_target_wins_over_the_sum(self):
+        from training_plan.engine.calendar_context import week_tss
+        events = [dict(_target("2026-10-05", load=300), type="Ride"),
+                  dict(_target("2026-10-05", load=150), type="Run"),
+                  _target("2026-10-05", load=500)]
+        self.assertEqual(week_tss(atp_weeks(events)["2026-10-05"], tss_per_hour=50), 500)
 
     def test_atp_targets_replace_our_own_week_targets(self):
         targets = build_week_targets(55, {"week_in_block": 3}, MONDAY, target_ctl=100)
