@@ -7,7 +7,8 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
     """Identifies and filters out data points that are likely measurement errors."""
     warnings: list = []
     filtered_activity_ids: set = set()
-    bad_wellness_dates: set = set()
+    bad_hrv_dates: set = set()
+    bad_sleep_dates: set = set()
 
     for a in activities:
         aid = a.get("id") or a.get("start_date_local", "")
@@ -31,15 +32,15 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
         hrv = w.get("hrv") or 0
         sleep = w.get("sleepSecs") or 0
         if hrv == 0:
-            bad_wellness_dates.add(d)
+            bad_hrv_dates.add(d)
             warnings.append(f"HRV not logged {d} – excluded from HRV analysis")
         elif hrv > 200:
-            bad_wellness_dates.add(d)
+            bad_hrv_dates.add(d)
             warnings.append(f"Unreasonable HRV {hrv}ms {d} – likely measurement error, filtered")
         if 0 < sleep < 7200:
             warnings.append(f"Very short sleep {sleep/3600:.1f}h {d} – check watch settings")
         elif sleep > 57600:
-            bad_wellness_dates.add(d)
+            bad_sleep_dates.add(d)
             warnings.append(f"Unreasonable sleep {sleep/3600:.1f}h {d} – likely watch reset, filtered")
 
     if warnings:
@@ -49,9 +50,32 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
     return {
         "warnings": warnings,
         "filtered_activity_ids": filtered_activity_ids,
-        "bad_wellness_dates": bad_wellness_dates,
+        "bad_hrv_dates": bad_hrv_dates,
+        "bad_sleep_dates": bad_sleep_dates,
+        "bad_wellness_dates": bad_hrv_dates | bad_sleep_dates,
         "has_issues": bool(warnings),
     }
+
+
+def clean_wellness(wellness: list, data_quality: dict) -> list:
+    """Blank out only the invalid fields instead of dropping whole wellness rows.
+
+    A missing or implausible HRV value must not remove sleep, resting HR or
+    CTL/ATL from the same day, and vice versa.
+    """
+    bad_hrv = data_quality.get("bad_hrv_dates", set())
+    bad_sleep = data_quality.get("bad_sleep_dates", set())
+    cleaned = []
+    for w in wellness:
+        d = w.get("id", "")[:10]
+        if d in bad_hrv or d in bad_sleep:
+            w = dict(w)
+            if d in bad_hrv:
+                w["hrv"] = None
+            if d in bad_sleep:
+                w["sleepSecs"] = None
+        cleaned.append(w)
+    return cleaned
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MOTIVATION ANALYSIS & PSYCHOLOGICAL COACHING

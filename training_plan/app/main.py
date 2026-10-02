@@ -53,6 +53,7 @@ from training_plan.engine.analysis import (
     calculate_readiness_score,
     check_return_to_play,
     choose_target_ramp,
+    clean_wellness,
     ctl_ramp_from_daily_tss,
     development_needs_analysis,
     per_sport_acwr,
@@ -83,8 +84,8 @@ from training_plan.engine.ai import (
     build_prompt,
     format_existing_plan,
     morning_questions,
-    plan_update_mode,
     print_plan,
+    resolve_update_mode,
 )
 from training_plan.engine.pipeline import (
     classify_injury,
@@ -190,8 +191,7 @@ def main(argv=None):
         log.warning(f"⚠️  Data quality: {len(dq['warnings'])} warnings")
     activities_clean = [a for a in activities
                         if (a.get("id") or a.get("start_date_local","")) not in dq["filtered_activity_ids"]]
-    wellness_clean   = [w for w in wellness
-                        if w.get("id","")[:10] not in dq["bad_wellness_dates"]]
+    wellness_clean   = clean_wellness(wellness, dq)
 
     lf  = fitness[-1] if fitness else {}
     ctl = max(lf.get("ctl",1.0),1.0); tsb_val = lf.get("tsb",0.0)
@@ -585,6 +585,19 @@ def main(argv=None):
             continue
         base_tss_by_date[d] = base_tss_by_date.get(d, 0) + (w.get("planned_load", 0) or 0)
 
+    # ── Avgör uppdateringsläge FÖRE AI-anropen ───────────────────────────────
+    # Allt som behövs finns redan här, så en komplett plan behöver inte kosta en hel AI-pipeline.
+    # Måndagar körs pipelinen ändå eftersom veckorapporten använder AI:ns veckofeedback.
+    mode, mode_reason = resolve_update_mode(
+        ai_workouts, yesterday_actuals, yesterday_planned, hrv, wellness, activities, args.horizon,
+        base_tss_by_date=base_tss_by_date, tss_budget=tsb_bgt,
+    )
+    log.info(f"📋 Mode: {mode.upper()} – {mode_reason}")
+    if mode == "none" and not args.dry_run and date.today().weekday() != 0:
+        log.info("✅ %s Skipping AI pipeline.", mode_reason)
+        print(f"\n✅ {mode_reason}\n")
+        return
+
     log.info(f"🤖 The coach is reviewing the plan and daily form...")
     prompt_morning = dict(morning)
     if not prompt_morning.get("time_available"):
@@ -814,28 +827,6 @@ def main(argv=None):
         if ans not in ("y","yes"): return
 
     now_local = _stockholm_now_naive()
-
-    # ── Avgör uppdateringsläge ────────────────────────────────────────────────
-    mode, mode_reason = plan_update_mode(
-        ai_workouts, yesterday_actuals, yesterday_planned, hrv, wellness, activities, args.horizon
-    )
-
-    # Kontrollera om befintlig plan uppfyller TSS-kravet – om inte, tvinga omplanering
-    if mode == "none" and ai_workouts:
-        future_ai = [w for w in ai_workouts
-                     if w.get("start_date_local","")[:10] >= date.today().isoformat()]
-        future_ai_tss = sum(w.get("planned_load", 0) or 0 for w in future_ai)
-        future_manual_tss = sum(
-            load for day_str, load in base_tss_by_date.items()
-            if day_str >= date.today().isoformat()
-        )
-        future_tss = future_ai_tss + future_manual_tss
-        if future_tss < tsb_bgt * 0.75:
-            mode = "full"
-            mode_reason = (f"Existing plan ({future_tss} TSS incl. manual sessions) covers less than 75% of budget "
-                           f"({tsb_bgt} TSS) – regenerating.")
-
-    log.info(f"📋 Mode: {mode.upper()} – {mode_reason}")
 
     log.info("Updating intervals.icu...")
 

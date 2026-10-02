@@ -163,23 +163,31 @@ def is_ai_generated(w):
 # 1 & 5. MESOCYCLE PERIODIZATION + AUTO DELOAD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def determine_mesocycle(fitness_history: list, activities: list, state: dict) -> dict:
-    today = date.today()
+def _weeks_elapsed(saved_date: str, today: date) -> int:
+    """Number of ISO week boundaries (Mondays) passed since saved_date."""
+    try:
+        saved = date.fromisoformat(saved_date[:10])
+    except (TypeError, ValueError):
+        return 0
+    saved_monday = saved - timedelta(days=saved.weekday())
+    today_monday = today - timedelta(days=today.weekday())
+    return max((today_monday - saved_monday).days // 7, 0)
+
+
+def determine_mesocycle(fitness_history: list, activities: list, state: dict,
+                        today: Optional[date] = None) -> dict:
+    today = today or date.today()
     weekly_tss = _weekly_tss_history(activities, weeks=6)
     weeks_since_deload = _weeks_since_deload(weekly_tss)
-    saved_block    = state.get("mesocycle_block", 1)
-    saved_week     = state.get("mesocycle_week", 1)
+    week_in_block  = state.get("mesocycle_week", 1)
+    block_number   = state.get("mesocycle_block", 1)
     saved_date     = state.get("mesocycle_last_update", "")
-    if saved_date and saved_date >= (today - timedelta(days=1)).isoformat():
-        week_in_block = saved_week
-        block_number  = saved_block
-    else:
-        if today.weekday() == 0:
-            week_in_block = (saved_week % 4) + 1
-            block_number  = saved_block + (1 if saved_week == 4 else 0)
-        else:
-            week_in_block = saved_week
-            block_number  = saved_block
+    # Advance one week per Monday passed since the last update. Comparing ISO weeks
+    # (instead of "is today Monday and was the last run before yesterday") keeps the
+    # cycle moving when the planner runs every day, and catches up after gaps.
+    for _ in range(min(_weeks_elapsed(saved_date, today), 52)):
+        block_number += 1 if week_in_block == 4 else 0
+        week_in_block = (week_in_block % 4) + 1
     deload_reason = ""
     forced_deload = False
     if weeks_since_deload >= 4 and week_in_block != 4:

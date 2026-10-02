@@ -18,7 +18,12 @@ from training_plan.engine.prompt_builders import (
 )
 from training_plan.engine.ai.client import call_ai
 from training_plan.engine.ai.parsing import parse_plan
-from training_plan.engine.ai.display import format_existing_plan, plan_update_mode, print_plan
+from training_plan.engine.ai.display import (
+    format_existing_plan,
+    plan_update_mode,
+    print_plan,
+    resolve_update_mode,
+)
 
 __all__ = [
     "_build_double_session_rules",
@@ -35,5 +40,6 @@ __all__ = [
     "parse_plan",
     "plan_update_mode",
     "print_plan",
+    "resolve_update_mode",
     "sanitize",
 ]
