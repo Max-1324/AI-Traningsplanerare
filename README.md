@@ -64,8 +64,10 @@ med `time_available=`, `injury=` och `athlete_note=`.
   namnprefix, `B: Namn` eller `C: Namn`, annars räknas den som A-tävling. Sport kan anges som `[Ride]` i namnet.
   A-tävlingar får två veckors nedtrappning, B-tävlingar några dagar och C-tävlingar nästan ingen.
 - **Årsplan**: gör du en säsongsplan med intervals.icu:s *Annual Training Plan Builder* (Supporter-nivån) följer
-  planeraren dess veckomål, faser och återhämtningsveckor. Utan årsplan skriver planeraren sina egna veckomål som
-  `TARGET`-event (stäng av med `SYNC_WEEK_TARGETS=off`). Dina egna veckomål skrivs aldrig över.
+  planeraren dess veckomål, faser och återhämtningsveckor. En vecka vars mål ligger minst 20 % under veckan före
+  räknas som återhämtningsvecka. Ett veckomål som skulle höja CTL mer än `RAMP_CTL_MAX` per vecka trappas in i
+  stället, så en plan med fler timmar än du är van vid blir ingen chockstart. Utan årsplan skriver planeraren sina
+  egna veckomål som `TARGET`-event (stäng av med `SYNC_WEEK_TARGETS=off`). Dina egna veckomål skrivs aldrig över.
 - **Sjuk, skadad eller bortrest**: lägg in en `SICK`-, `INJURED`- eller `HOLIDAY`-händelse med tillgänglighet.
   *Inte tillgänglig* ger inga pass alls, och *begränsad* ger bara korta, lätta pass. Utan angiven tillgänglighet
   räknas sjuk som inte tillgänglig, skadad som begränsad och semester som normal.

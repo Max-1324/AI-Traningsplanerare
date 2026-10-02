@@ -208,38 +208,62 @@ def build_week_targets(
 def apply_calendar_targets(targets: list[WeekTarget], atp: dict[str, dict], tss_per_hour: float) -> list[WeekTarget]:
     """Let the athlete's annual training plan in intervals.icu set the weekly targets.
 
-    Weeks with an ATP target take its load (or time × typical TSS/hour) and its
-    recovery weeks; our own mesocycle is then ignored for those weeks. Race and taper
-    handling from the calendar's races is kept. Weeks without an ATP target are unchanged.
+    Weeks with an ATP target take its load (or time × typical TSS/hour); our own mesocycle is
+    then ignored for those weeks. Two safety rules still apply:
+
+    - a recovery week is recognised from the ATP week note or from the target dropping at least
+      20% below the previous ATP week;
+    - the target never asks for more than ``RAMP_CTL_MAX`` CTL/week of ramp from the current
+      fitness, so a plan built for more hours than the body is used to is phased in instead.
+
+    Race and taper handling from the calendar's races is kept. Weeks without an ATP target are
+    unchanged.
     """
     result = []
+    ctl = targets[0].ctl_start if targets else 0.0
     for target in targets:
         week = atp.get(target.week_start)
         weekly = week_tss(week, tss_per_hour) if week else None
         if weekly is None:
             result.append(target)  # no ATP week, or distance-only targets: keep our own load target
+            ctl = _advance_ctl(ctl, target.tss_target)
             continue
-        tss = round(weekly)
+        previous = atp.get((date.fromisoformat(target.week_start) - timedelta(days=7)).isoformat())
+        previous_tss = week_tss(previous, tss_per_hour) if previous else None
+        recovery = bool(week.get("recovery")) or bool(previous_tss and weekly <= 0.8 * previous_tss)
+
+        notes = [f"ATP phase: {week['phase']}"] if week.get("phase") else []
+        tss = weekly
+        cap = (ctl + RAMP_CTL_MAX * 6.0) * 7
+        if tss > cap:
+            notes.append(f"capped from {round(tss)} TSS (max +{RAMP_CTL_MAX:g} CTL/week)")
+            tss = cap
         kind, max_key = target.kind, target.max_key_sessions
-        if kind not in ("race", "taper"):
-            kind = "deload" if week.get("recovery") else "build"
+        if kind in ("race", "taper"):
+            notes.append(target.note)
+        else:
+            kind = "deload" if recovery else "build"
             max_key = 0 if kind == "deload" else KEY_SESSIONS_PER_WEEK
-        phase = week.get("phase")
-        note = "; ".join(x for x in (f"ATP phase: {phase}" if phase else "", target.note if kind in ("race", "taper") else "") if x)
         result.append(WeekTarget(
             week_start=target.week_start,
             week_in_block=target.week_in_block,
             block_number=target.block_number,
             kind=kind,
-            ctl_start=target.ctl_start,
+            ctl_start=round(ctl, 1),
             ramp=0.0,
-            tss_target=tss,
+            tss_target=round(tss),
             done_tss=target.done_tss,
             max_key_sessions=max_key,
-            note=note,
+            note="; ".join(n for n in notes if n),
             source="intervals.icu",
         ))
+        ctl = _advance_ctl(ctl, tss)
     return result
+
+
+def _advance_ctl(ctl: float, week_tss_value: float) -> float:
+    avg_daily = week_tss_value / 7
+    return avg_daily + (ctl - avg_daily) * _CTL_WEEK_DECAY
 
 
 def format_week_targets(targets: list[WeekTarget]) -> str:

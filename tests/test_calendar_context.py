@@ -23,7 +23,7 @@ ATP_EVENTS = [
     {"category": "PLAN", "name": "Season 2027", "tags": ["Build"],
      "start_date_local": "2026-09-14T00:00:00", "end_date_local": "2026-11-01T00:00:00"},
     _target("2026-10-05", load=520),
-    _target("2026-10-12", seconds=6 * 3600),
+    _target("2026-10-12", seconds=9 * 3600),
     _target("2026-10-19", load=330),
     {"category": "NOTE", "plan_applied": "atp", "name": "Recovery week",
      "start_date_local": "2026-10-19T00:00:00", "end_date_local": "2026-10-26T00:00:00"},
@@ -59,11 +59,24 @@ class TestAnnualTrainingPlan(unittest.TestCase):
     def test_atp_targets_replace_our_own_week_targets(self):
         targets = build_week_targets(55, {"week_in_block": 3}, MONDAY, target_ctl=100)
         applied = apply_calendar_targets(targets, atp_weeks(ATP_EVENTS), tss_per_hour=60)
-        self.assertEqual([t.tss_target for t in applied[:3]], [520, 360, 330])
+        self.assertEqual([t.tss_target for t in applied[:3]], [520, 540, 330])
         self.assertEqual([t.kind for t in applied[:3]], ["build", "build", "deload"])
         self.assertEqual(applied[2].max_key_sessions, 0)
         self.assertEqual(applied[0].source, "intervals.icu")
         self.assertEqual(applied[3].source, "planner", "weeks without an ATP target keep our own target")
+
+    def test_atp_target_is_capped_by_the_ramp_limit(self):
+        # Low fitness (CTL 19) and an ambitious plan: the first week is phased in.
+        targets = build_week_targets(19, {"week_in_block": 1}, MONDAY, target_ctl=100)
+        applied = apply_calendar_targets(targets, atp_weeks([_target("2026-10-05", load=600)]), tss_per_hour=60)
+        self.assertLessEqual(applied[0].tss_target, round((19 + 6 * 6) * 7))
+        self.assertIn("capped from 600", applied[0].note)
+
+    def test_recovery_week_is_recognised_from_the_drop_in_load(self):
+        events = [_target("2026-10-05", load=400), _target("2026-10-12", load=420), _target("2026-10-19", load=300)]
+        targets = build_week_targets(60, {"week_in_block": 1}, MONDAY, target_ctl=100)
+        applied = apply_calendar_targets(targets, atp_weeks(events), tss_per_hour=60)
+        self.assertEqual([t.kind for t in applied[:3]], ["build", "build", "deload"])
 
     def test_race_weeks_keep_their_race_handling(self):
         races = [{"name": "Testloppet", "category": "RACE_A", "start_date_local": "2026-10-10T08:00:00"}]
