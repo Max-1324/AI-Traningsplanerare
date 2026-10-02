@@ -1,6 +1,8 @@
 from training_plan.core.common import *
 from training_plan.core.models import AppState
 from training_plan.engine.libraries import *
+from training_plan.engine.planning.learning import WORKOUT_LIBRARY
+from training_plan.engine.planning.state import is_ai_generated, load_state, save_state
 from training_plan.engine.utils import safe_date_str
 
 def recommend_prehab(injury_note: str, dominant_sport: str) -> dict:

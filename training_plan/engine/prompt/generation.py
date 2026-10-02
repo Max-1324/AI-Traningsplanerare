@@ -403,6 +403,18 @@ OUTCOME TRACKING:
 """
 
     planner_insights_text = _build_planner_insights_section(planner_insights)
+    season_plan = planner_insights.get("season_plan", {})
+    season_plan_text = ""
+    if season_plan:
+        season_plan_text = f"""
+SEASON PLAN:
+  {season_plan.get('summary', '')}
+"""
+        for block in season_plan.get("blocks", [])[:4]:
+            season_plan_text += (
+                f"  - {block.get('label')} ({block.get('start')} -> {block.get('end')} | "
+                f"{block.get('weeks')}w): focus {block.get('focus')}\n"
+            )
 
     polarization_text = ""
     if polarization:
@@ -624,4 +636,3 @@ MIN SESSION DURATIONS:
 
 {json_schema_text}
 """
-

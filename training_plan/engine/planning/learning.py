@@ -1,6 +1,8 @@
 from training_plan.core.common import *
 from training_plan.core.models import AppState
 from training_plan.engine.libraries import *
+from training_plan.engine.planning.metrics import _KEY_SESSION_CATEGORIES, classify_session_category
+from training_plan.engine.planning.state import is_ai_generated
 from training_plan.engine.utils import safe_date_str
 
 def compliance_analysis(planned_events: list, activities: list, days: int = 28) -> dict:
@@ -421,5 +423,4 @@ WORKOUT_LIBRARY = {
         ],
     },
 }
-
 

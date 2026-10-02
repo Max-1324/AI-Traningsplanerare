@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from training_plan.core.common import *
 from training_plan.core.models import AIPlan, PairwiseDecision, PlanDecisionTrace, PlanReview, PlanScores
+from training_plan.engine.ai import call_ai
 from training_plan.engine.pipeline.core import _debug_ai_call, _parse_structured_response
 from training_plan.engine.pipeline.prompts import build_pairwise_prompt, build_review_prompt, filter_review_context
 
@@ -52,7 +53,6 @@ def compare_plans(provider: str, current_plan: AIPlan, current_trace: PlanDecisi
     raw = call_ai(provider, pairwise_prompt, temperature=_PAIRWISE_TEMPERATURE)
     _debug_ai_call("PAIRWISE", pairwise_prompt, raw or "")
     return _parse_structured_response(raw, PairwiseDecision, fallback, "Plan-pairwise")
-
 
 
 

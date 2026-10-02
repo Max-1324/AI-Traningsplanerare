@@ -1,4 +1,5 @@
 from training_plan.core.common import *
+from collections import Counter
 
 # Komplett Yr (Met.no) symbolkodstabell
 YR_CODES = {
