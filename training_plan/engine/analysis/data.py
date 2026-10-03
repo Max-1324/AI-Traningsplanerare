@@ -7,7 +7,8 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
     """Identifies and filters out data points that are likely measurement errors."""
     warnings: list = []
     filtered_activity_ids: set = set()
-    bad_wellness_dates: set = set()
+    bad_hrv_dates: set = set()
+    bad_sleep_dates: set = set()
 
     for a in activities:
         aid = a.get("id") or a.get("start_date_local", "")
@@ -31,15 +32,15 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
         hrv = w.get("hrv") or 0
         sleep = w.get("sleepSecs") or 0
         if hrv == 0:
-            bad_wellness_dates.add(d)
+            bad_hrv_dates.add(d)
             warnings.append(f"HRV not logged {d} – excluded from HRV analysis")
         elif hrv > 200:
-            bad_wellness_dates.add(d)
+            bad_hrv_dates.add(d)
             warnings.append(f"Unreasonable HRV {hrv}ms {d} – likely measurement error, filtered")
         if 0 < sleep < 7200:
             warnings.append(f"Very short sleep {sleep/3600:.1f}h {d} – check watch settings")
         elif sleep > 57600:
-            bad_wellness_dates.add(d)
+            bad_sleep_dates.add(d)
             warnings.append(f"Unreasonable sleep {sleep/3600:.1f}h {d} – likely watch reset, filtered")
 
     if warnings:
@@ -49,9 +50,32 @@ def validate_data_quality(activities: list, wellness: list) -> dict:
     return {
         "warnings": warnings,
         "filtered_activity_ids": filtered_activity_ids,
-        "bad_wellness_dates": bad_wellness_dates,
+        "bad_hrv_dates": bad_hrv_dates,
+        "bad_sleep_dates": bad_sleep_dates,
+        "bad_wellness_dates": bad_hrv_dates | bad_sleep_dates,
         "has_issues": bool(warnings),
     }
+
+
+def clean_wellness(wellness: list, data_quality: dict) -> list:
+    """Blank out only the invalid fields instead of dropping whole wellness rows.
+
+    A missing or implausible HRV value must not remove sleep, resting HR or
+    CTL/ATL from the same day, and vice versa.
+    """
+    bad_hrv = data_quality.get("bad_hrv_dates", set())
+    bad_sleep = data_quality.get("bad_sleep_dates", set())
+    cleaned = []
+    for w in wellness:
+        d = w.get("id", "")[:10]
+        if d in bad_hrv or d in bad_sleep:
+            w = dict(w)
+            if d in bad_hrv:
+                w["hrv"] = None
+            if d in bad_sleep:
+                w["sleepSecs"] = None
+        cleaned.append(w)
+    return cleaned
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MOTIVATION ANALYSIS & PSYCHOLOGICAL COACHING
@@ -125,6 +149,10 @@ def _sorted_activities(activities: list) -> list:
     return sorted(activities or [], key=lambda item: safe_date(item) or datetime.min)
 
 
+_HRV_MIN_BASELINE = 14   # days of HRV before the last week needed for a personal baseline
+_HRV_MIN_SWC = 0.02      # ≈2%: keeps very stable athletes from flagging on noise
+
+
 def calculate_hrv(wellness):
     wellness = _sorted_wellness(wellness)
     vals = [w.get("hrv") for w in wellness if (w.get("hrv") or 0) > 0]
@@ -139,10 +167,37 @@ def calculate_hrv(wellness):
     
     dev_7d = (avg7 - avg60) / avg60 if avg60 else 0
     dev_today = (today - avg60) / avg60 if avg60 else 0
-    
-    trend = "DOWN" if dev_7d < -0.05 else ("UP" if dev_7d > 0.05 else "STABLE")
     stability = "VERY_STABLE" if cv7 < 8 else ("STABLE" if cv7 < 12 else "UNSTABLE")
-    
+
+    result = {"today": today, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
+              "cv7d": round(cv7,1), "stability": stability, "deviation_pct": round(dev_today*100,1)}
+
+    baseline = vals[:-7]
+    if len(baseline) >= _HRV_MIN_BASELINE:
+        # Plews/Altini: compare the 7-day rolling mean of ln(rMSSD) with the athlete's own
+        # baseline (excluding the last 7 days). The "normal" band is ± the smallest
+        # worthwhile change (SWC = 0.5 × SD of the baseline).
+        ln_base = [math.log(v) for v in baseline]
+        mean_b = sum(ln_base) / len(ln_base)
+        sd_b = math.sqrt(sum((x - mean_b) ** 2 for x in ln_base) / len(ln_base))
+        swc = max(0.5 * sd_b, _HRV_MIN_SWC)
+        z7 = (sum(math.log(v) for v in last7) / len(last7) - mean_b) / swc
+        z_today = (math.log(today) - mean_b) / swc
+        if z7 < -2 or z_today < -4:
+            state = "LOW"
+        elif z7 < -1:
+            state = "SLIGHTLY_LOW"
+        elif z7 > 2:
+            state = "HIGH"
+        else:
+            state = "NORMAL"
+        trend = "DOWN" if z7 < -1 else ("UP" if z7 > 1 else "STABLE")
+        result.update({"state": state, "trend": trend, "method": "ln_rmssd_swc",
+                       "ln_baseline": round(mean_b, 3), "swc": round(swc, 3), "z7d": round(z7, 2)})
+        return result
+
+    # Too little history for a baseline: fall back to simple percentage thresholds.
+    trend = "DOWN" if dev_7d < -0.05 else ("UP" if dev_7d > 0.05 else "STABLE")
     if dev_7d < -0.10 or dev_today < -0.25:
         state = "LOW"
     elif dev_7d < -0.05 or dev_today < -0.15:
@@ -151,10 +206,8 @@ def calculate_hrv(wellness):
         state = "HIGH"
     else:
         state = "NORMAL"
-        
-    return {"today": today, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
-            "cv7d": round(cv7,1), "state": state, "trend": trend, "stability": stability,
-            "deviation_pct": round(dev_today*100,1)}
+    result.update({"state": state, "trend": trend, "method": "percent"})
+    return result
 
 def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> dict:
     """Composite readiness score 0-100 based on HRV, sleep, resting HR trend, RPE, and feel."""

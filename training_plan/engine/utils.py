@@ -62,3 +62,28 @@ def read_wellness_score(today_wellness, keys, default=1, minimum=1, maximum=4):
         except (TypeError, ValueError):
             continue
     return default
+
+
+_RACE_CATEGORIES = {"RACE", "RACE_A", "RACE_B", "RACE_C"}
+
+
+def is_race_event(event: dict) -> bool:
+    """True for intervals.icu race events (category RACE or RACE_A/B/C)."""
+    return (event.get("category") or "").upper() in _RACE_CATEGORIES
+
+
+def race_priority(race: dict) -> str:
+    """Race priority A/B/C.
+
+    Prefers the intervals.icu category (RACE_A/RACE_B/RACE_C) and falls back to a
+    name prefix such as "B: Lidingöloppet". Defaults to A.
+    """
+    category = (race.get("category") or "").upper()
+    if category in ("RACE_A", "RACE_B", "RACE_C"):
+        return category[-1]
+    name = (race.get("name") or "").lower()
+    if "c:" in name:
+        return "C"
+    if "b:" in name:
+        return "B"
+    return "A"

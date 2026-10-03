@@ -1,4 +1,5 @@
 from training_plan.core.common import *
+from training_plan.engine.postprocess.recovery import _trim_workout_steps
 
 _MIN_DURATION = MIN_DURATION_BY_SPORT
 _MAX_ROLLSKI_PER_WEEK = int(os.getenv("MAX_ROLLSKI_PER_WEEK", "1"))
@@ -136,11 +137,11 @@ def _parse_rest_sec(raw: str) -> int:
     return int(m.group(1)) if m else 60
 
 
-def _inject_rehab_session(days: list, profile: dict, injury_note: str) -> list:
-    """Insert a rehab WeightTraining session on the first available rest day."""
+def rehab_session(date_str: str, profile: dict, injury_note: str, slot: str = "MAIN") -> PlanDay | None:
+    """A short rehab strength session for the injury profile, or None if it has no exercises."""
     exercises = profile.get("rehab_exercises", [])
     if not exercises:
-        return days
+        return None
     rehab_steps = []
     for ex in exercises:
         sets, reps = _parse_sets_reps(ex.get("sets", "3x10"))
@@ -150,39 +151,48 @@ def _inject_rehab_session(days: list, profile: dict, injury_note: str) -> list:
             reps=reps,
             rest_sec=_parse_rest_sec(ex.get("rest", "30s")),
             notes=ex.get("description", ""),
-        ))
+        ).model_dump())  # PlanDay coerces strength_steps from dicts
+    return PlanDay(
+        date=date_str,
+        title=f"Injury rehab – {profile['label']}",
+        intervals_type="WeightTraining",
+        duration_min=20,
+        description=(
+            f"⚕️ Rehab session for: {injury_note}\n"
+            f"Keep all movements pain-free. Stop any exercise that causes >3/10 pain.\n"
+            f"Consult a physio if symptoms worsen or do not improve within 5–7 days."
+        ),
+        strength_steps=rehab_steps,
+        slot=slot,
+    )
+
+
+def _inject_rehab_session(days: list, profile: dict, injury_note: str) -> list:
+    """Insert a rehab WeightTraining session on the first available rest day."""
     for i, day in enumerate(days):
         if day.intervals_type == "Rest" or day.duration_min == 0:
-            rehab_day = day.model_copy(update={
-                "title": f"Injury rehab – {profile['label']}",
-                "intervals_type": "WeightTraining",
-                "duration_min": 20,
-                "description": (
-                    f"⚕️ Rehab session for: {injury_note}\n"
-                    f"Keep all movements pain-free. Stop any exercise that causes >3/10 pain.\n"
-                    f"Consult a physio if symptoms worsen or do not improve within 5–7 days."
-                ),
-                "workout_steps": [],
-                "strength_steps": rehab_steps,
-                "vetoed": False,
-            })
-            days[i] = rehab_day
+            rehab_day = rehab_session(day.date, profile, injury_note, slot=day.slot)
+            if rehab_day is not None:
+                days[i] = rehab_day
             return days
     return days
 
 
-def apply_injury_rules(days, injury_note: str, injury_profile: dict | None = None):
-    if not injury_note or injury_note.lower() in ("", "nej", "n", "inga"):
-        return days, []
+def injury_restrictions(injury_note: str, injury_profile: dict | None = None) -> dict | None:
+    """Which sports to avoid for an injury note, and how hard to cap duration.
 
-    # Use AI-classified profile if available, otherwise fall back to keyword matching
+    Uses the AI-classified profile when available, otherwise keyword matching.
+    Returns None when there is no injury.
+    """
+    if not injury_note or injury_note.lower() in ("", "nej", "n", "inga"):
+        return None
+
     if injury_profile and injury_profile.get("profile_key") in INJURY_PROFILES:
         profile = INJURY_PROFILES[injury_profile["profile_key"]]
         severity = injury_profile.get("severity", "MILD")
-        avoid_sports = profile["avoid_sports"]
+        avoid_sports = set(profile["avoid_sports"])
         replacement = profile["primary_replacement"]
     else:
-        # Keyword fallback (original logic)
         inj = injury_note.lower()
         avoid_map = [
             (["knä", "höft", "lår", "knee", "hip", "thigh"],     {"Run"},             "VirtualRide"),
@@ -200,8 +210,24 @@ def apply_injury_rules(days, injury_note: str, injury_profile: dict | None = Non
             avoid_sports = {"Run"}
         profile = INJURY_PROFILES.get("generic", {})
 
-    # Cap duration based on severity
-    dur_cap = profile.get("duration_cap_moderate", 60) if severity in ("MODERATE", "SEVERE") else 90
+    return {
+        "avoid_sports": avoid_sports,
+        "replacement": replacement,
+        "severity": severity,
+        "duration_cap": profile.get("duration_cap_moderate", 60) if severity in ("MODERATE", "SEVERE") else 90,
+        "profile": profile,
+    }
+
+
+def apply_injury_rules(days, injury_note: str, injury_profile: dict | None = None):
+    restrictions = injury_restrictions(injury_note, injury_profile)
+    if restrictions is None:
+        return days, []
+    avoid_sports = restrictions["avoid_sports"]
+    replacement = restrictions["replacement"]
+    severity = restrictions["severity"]
+    dur_cap = restrictions["duration_cap"]
+    profile = restrictions["profile"]
 
     changes = []
     for i, day in enumerate(days):
@@ -211,6 +237,8 @@ def apply_injury_rules(days, injury_note: str, injury_profile: dict | None = Non
                 "title":          f"{day.title} [→ {replacement}, injury]",
                 "intervals_type": replacement,
                 "duration_min":   new_dur,
+                # Keep the steps in sync with the capped duration, otherwise validation rejects the day.
+                "workout_steps":  _trim_workout_steps(day, new_dur),
                 "description":    day.description + f"\n\n⚠️ Adapted due to injury: '{injury_note}'",
             })
             changes.append(f"INJURY: {day.date} '{day.intervals_type}' → '{replacement}' ({new_dur}min, {severity})")
@@ -224,4 +252,3 @@ def apply_injury_rules(days, injury_note: str, injury_profile: dict | None = Non
             f"rehab session injected on first rest day"
         )
     return days, changes
-

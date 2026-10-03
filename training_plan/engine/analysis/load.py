@@ -325,6 +325,11 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
     locked  = sum(w.get("moving_time", 0) / 60
                   for w in manual_workouts if w.get("type") == sport_type)
     remaining = max(0, budget - locked)
+    monday = (datetime.now() - timedelta(days=datetime.now().weekday())).date()
+    done_this_week = sum(
+        (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
+        if a.get("type") == sport_type and safe_date(a) and safe_date(a).date() >= monday
+    )
     return {
         "sport":      sport_type,
         "risk":       risk_level,
@@ -334,6 +339,7 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
         "max_budget": round(budget),
         "locked":     round(locked),
         "remaining":  round(remaining),
+        "done_this_week": round(done_this_week),   # counts against the current week's budget
         "growth_pct": round((growth - 1) * 100),
     }
 

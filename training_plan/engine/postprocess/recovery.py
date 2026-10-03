@@ -14,9 +14,13 @@ def enforce_illness(days, today_wellness):
         return days, []
     changes = ["Illness reported – all sessions converted to rest."]
     new_days = []
+    seen_dates = set()
     for day in days:
         if day.intervals_type != "Rest":
             changes.append(f"  {day.date}: {day.title} → Rest (Illness)")
+        if day.date in seen_dates:
+            continue  # one rest entry per date, even where a double session was planned
+        seen_dates.add(day.date)
         new_days.append(PlanDay(
             date=day.date,
             title="Rest (Illness)",
@@ -181,15 +185,21 @@ def enforce_hard_easy(days):
 
 
 
-def enforce_hrv(days, hrv):
+def enforce_hrv(days, hrv, today: date | None = None):
     # Veto endast vid tydligt LOW – SLIGHTLY_LOW och UNSTABLE-ensamt informeras bara AI:n
     if hrv["state"] != "LOW":
         return days, []
 
+    # Låg HRV gäller idag och imorgon. Matcha på datum, inte listposition, så att
+    # dubbelpass och låsta dagar inte flyttar vetot till fel dag.
+    if today is not None:
+        veto_dates = {today.isoformat(), (today + timedelta(days=1)).isoformat()}
+    else:
+        veto_dates = set(sorted({day.date for day in days})[:2])
+
     changes = []
     for i, day in enumerate(days):
-        # Applicera HRV-veto ENDAST på de första 2 dagarna (idag och imorgon)
-        if i <= 1 and is_intense(day):
+        if day.date in veto_dates and is_intense(day):
             recovery_step = WorkoutStep(
                 duration_min=day.duration_min,
                 zone="Z1",
@@ -204,22 +214,41 @@ def enforce_hrv(days, hrv):
             changes.append(f"HRV-VETO: {day.date} - replaced with Z1 recovery (HRV LOW).")
     return days, changes
 
-def enforce_sport_budget(days, budgets):
-    accumulated = {st: 0 for st in budgets}
+def sport_week_cap(budget: dict, current_week: bool) -> float:
+    """Minutes a sport may get in one calendar week of the plan.
+
+    The budget is weekly (recent volume plus a growth margin, e.g. +10% for running).
+    In the current week the minutes already done since Monday count against it.
+    """
+    cap = budget.get("remaining", 0)
+    return cap - budget.get("done_this_week", 0) if current_week else cap
+
+
+def enforce_sport_budget(days, budgets, today=None):
+    """Convert sessions that push a sport past its weekly budget (per calendar week)."""
+    if not days:
+        return days, []
+    first = today or min(date.fromisoformat(d.date) for d in days)
+    current_monday = (first - timedelta(days=first.weekday())).isoformat()
+    accumulated: dict[tuple[str, str], int] = {}
     changes = []
     for i, day in enumerate(days):
         st = day.intervals_type
         if st not in budgets or day.duration_min == 0: continue
         b = budgets[st]
-        if accumulated[st] + day.duration_min > b["remaining"]:
-            changes.append(f"VOLUME CAP ({st}): {day.date} - {day.duration_min}min exceeds budget ({b['remaining']}min remaining). Converting to VirtualRide.")
+        d = date.fromisoformat(day.date)
+        monday = (d - timedelta(days=d.weekday())).isoformat()
+        cap = sport_week_cap(b, monday == current_monday)
+        used = accumulated.get((st, monday), 0)
+        if used + day.duration_min > cap:
+            changes.append(f"VOLUME CAP ({st}): {day.date} - {day.duration_min}min exceeds the week's budget ({max(round(cap - used), 0)}min left). Converting to VirtualRide.")
             days[i] = day.model_copy(update={
                 "intervals_type": "VirtualRide",
                 "title": f"{day.title} -> Zwift (volume cap)",
                 "vetoed": True,
             })
         else:
-            accumulated[st] += day.duration_min
+            accumulated[(st, monday)] = used + day.duration_min
     return days, changes
 
 def enforce_locked(days, locked):
@@ -332,10 +361,19 @@ def enforce_strength_limit(days, max_strength=None, min_gap=None):
     fallback     = _pick_fallback_sport(avoid="WeightTraining")
     changes = []
     strength_count = 0
-    last_strength_idx = -99
+    last_strength_date = None
     for i, day in enumerate(days):
         if day.intervals_type != "WeightTraining": continue
-        too_close  = (i - last_strength_idx) < min_gap
+        # Gap in calendar days, not list positions: double sessions and locked dates
+        # change the number of entries per day.
+        try:
+            day_date = datetime.strptime(day.date, "%Y-%m-%d").date()
+        except ValueError:
+            day_date = None
+        too_close  = (
+            last_strength_date is not None and day_date is not None
+            and (day_date - last_strength_date).days < min_gap
+        )
         too_many   = strength_count >= max_strength
         if too_many or too_close:
             reason = f"strength limit (max {max_strength})" if too_many else f"too close (< {min_gap} days since last)"
@@ -351,7 +389,7 @@ def enforce_strength_limit(days, max_strength=None, min_gap=None):
             changes.append(f"STRENGTH_LIMIT: {day.date} -> {fallback} Z1 ({reason})")
         else:
             strength_count  += 1
-            last_strength_idx = i
+            last_strength_date = day_date
     return days, changes
 
 def enforce_rollski_limit(days, max_per_week=None):

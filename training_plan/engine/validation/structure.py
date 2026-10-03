@@ -389,6 +389,10 @@ def _template_day_for_category(day: PlanDay, category: str, fallback_sport: str)
 
 def _allowed_hard_days(review_context: dict | None, horizon_days: int) -> int:
     review_context = review_context or {}
+    # The deterministic planner caps key sessions per calendar week and passes the
+    # resulting total, so validation and planning use the same limit.
+    if review_context.get("max_hard_days") is not None:
+        return int(review_context["max_hard_days"])
     readiness = (review_context.get("readiness") or {}).get("score", 60)
     med = review_context.get("minimum_effective_dose") or {}
     is_deload = ((review_context.get("mesocycle") or {}).get("is_deload") is True)

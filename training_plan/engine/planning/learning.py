@@ -423,3 +423,29 @@ WORKOUT_LIBRARY = {
     },
 }
 
+
+
+def _short_vo2_level(level: int, sets: int, reps: int) -> dict:
+    """Sets of 1-min hard / 1-min easy reps: lots of time near VO2max at a tolerable cost."""
+    steps = [{"d": 15, "z": "Z2", "desc": "Warm-up incl 2x30s hard"}]
+    for s in range(sets):
+        for r in range(reps):
+            steps.append({"d": 1, "z": "Z5", "desc": f"Set {s + 1} rep {r + 1} – hard"})
+            if r < reps - 1:
+                steps.append({"d": 1, "z": "Z1", "desc": "Easy"})
+        if s < sets - 1:
+            steps.append({"d": 4, "z": "Z1", "desc": "Easy between sets"})
+    steps.append({"d": 10, "z": "Z1", "desc": "Cool-down"})
+    return {"level": level, "label": f"{sets}×{reps}×1min Z5 / 1min easy", "steps": steps,
+            "total_min": sum(step["d"] for step in steps)}
+
+
+# Short-interval VO2max format, used in base weeks and alternated with the classic
+# 3-5 min intervals so the VO2max stimulus changes before it stops working.
+WORKOUT_LIBRARY["vo2max_short"] = {
+    "name":  "Short VO2max intervals (Z5)",
+    "sport": ["VirtualRide"],
+    "phase": ["Base", "Grundtraning"],
+    "levels": [_short_vo2_level(1, 2, 6), _short_vo2_level(2, 3, 5),
+               _short_vo2_level(3, 3, 6), _short_vo2_level(4, 3, 8)],
+}

@@ -8,6 +8,15 @@ _EXHAUSTED_MODELS = set()
 _MODEL_LAST_REQUEST_TS: dict[str, float] = {}
 _DEFAULT_MIN_REQUEST_INTERVAL = float(os.getenv("AI_MIN_REQUEST_INTERVAL_SEC", "6.0"))
 _OLLAMA_THINK_DEFAULT = os.getenv("OLLAMA_THINK", "").strip().lower() in {"1", "true", "yes", "on"}
+# A 29-day plan with workout steps easily exceeds 6k output tokens, so keep these generous.
+_ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "16000"))
+_OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "16384"))
+
+
+def _model_queue(list_env: str, single_env: str, default: str) -> list[str]:
+    """Model priority list from e.g. GEMINI_MODELS, else GEMINI_MODEL, else a default."""
+    raw = os.getenv(list_env) or os.getenv(single_env) or default
+    return [m.strip() for m in raw.split(",") if m.strip()]
 
 
 def _maybe_wait_for_rate_limit(provider: str, model_name: str):
@@ -48,13 +57,12 @@ def call_ai(provider, prompt, temperature: float | None = None):
             sys.exit("Set GEMINI_API_KEY.")
 
         client = genai.Client(api_key=key, http_options={"timeout": 120_000})
-        models_str = os.getenv("GEMINI_MODELS")
-        model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
+        model_queue = _model_queue("GEMINI_MODELS", "GEMINI_MODEL", "gemini-2.5-flash")
         
         active_models = [m for m in model_queue if m not in _EXHAUSTED_MODELS]
         if not active_models:
             log.warning("All Gemini models exhausted. Falling back to Mistral AI.")
-            return call_ai("mistral", prompt)
+            return call_ai("mistral", prompt, temperature=temperature)
 
         log.info(f"Sending to Gemini ({len(active_models)} models in queue)...")
 
@@ -104,7 +112,7 @@ def call_ai(provider, prompt, temperature: float | None = None):
         log.info(f"Sending to Anthropic ({mn})...")
         return anthropic.Anthropic(api_key=key).messages.create(
             model=mn,
-            max_tokens=6000,
+            max_tokens=_ANTHROPIC_MAX_TOKENS,
             temperature=temperature if temperature is not None else 0,
             messages=[{"role":"user","content":prompt}],
         ).content[0].text
@@ -176,7 +184,7 @@ def call_ai(provider, prompt, temperature: float | None = None):
             "stream": False,
             "options": {
                 "temperature": temperature if temperature is not None else 0.1,
-                "num_predict": 4096,
+                "num_predict": _OLLAMA_NUM_PREDICT,
             },
             "think": _OLLAMA_THINK_DEFAULT,
         }
@@ -218,13 +226,12 @@ def call_ai(provider, prompt, temperature: float | None = None):
 
         client = Groq(api_key=key)
 
-        models_str = os.getenv("GROQ_MODELS")
-        model_queue = [m.strip() for m in models_str.split(",") if m.strip()]
+        model_queue = _model_queue("GROQ_MODELS", "GROQ_MODEL", "llama-3.3-70b-versatile")
 
         active_models = [m for m in model_queue if m not in _EXHAUSTED_MODELS]
         if not active_models:
             log.warning("All Groq models exhausted. Falling back to Mistral.")
-            return call_ai("mistral", prompt)
+            return call_ai("mistral", prompt, temperature=temperature)
 
         log.info(f"Sending to Groq ({len(active_models)} models in queue)...")
 

@@ -1,4 +1,6 @@
 from training_plan.core.common import *
+from training_plan.engine.calendar_context import is_context_event
+from training_plan.engine.utils import is_race_event, race_priority
 
 def icu_get(path, params=None):
     r = requests.get(f"{BASE}{path}", auth=AUTH, params=params or {}, timeout=15)
@@ -24,10 +26,10 @@ def fetch_wellness(days):
     })
 
 def fetch_fitness(days):
-    wellness = icu_get(f"/athlete/{ATHLETE_ID}/wellness", {
-        "oldest": (date.today() - timedelta(days=days)).isoformat(),
-        "newest": date.today().isoformat(),
-    })
+    return fitness_from_wellness(fetch_wellness(days))
+
+def fitness_from_wellness(wellness):
+    """CTL/ATL/TSB per day from the wellness response (no extra API call needed)."""
     fitness = []
     for w in wellness:
         atl = w.get("icu_atl") or w.get("atl")
@@ -53,13 +55,24 @@ def fetch_all_planned_events(days_back=28, days_forward=0):
         "newest": (date.today() + timedelta(days=days_forward)).isoformat(),
     })
 
+def fetch_calendar_context(days_back=60, days_ahead=35):
+    """Annual training plan (PLAN/TARGET/ATP notes) and SICK/INJURED/HOLIDAY events around today.
+
+    Looks back as well, so phase blocks and absences that started earlier are included.
+    """
+    evts = icu_get(f"/athlete/{ATHLETE_ID}/events", {
+        "oldest": (date.today() - timedelta(days=days_back)).isoformat(),
+        "newest": (date.today() + timedelta(days=days_ahead)).isoformat(),
+    })
+    return [e for e in evts if is_context_event(e)]
+
 def fetch_races(days_ahead=180):
     try:
         evts = icu_get(f"/athlete/{ATHLETE_ID}/events", {
             "oldest": date.today().isoformat(),
             "newest": (date.today() + timedelta(days=days_ahead)).isoformat(),
         })
-        return [e for e in evts if e.get("category") == "RACE"]
+        return [e for e in evts if is_race_event(e)]
     except Exception:
         return []
 
@@ -79,9 +92,8 @@ def get_taper_config(races: list, today: date) -> dict:
     if not future_races:
         return {"race": None, "taper_days": 14, "race_date": None}
     next_race = future_races[0]
-    name_lower = next_race.get("name", "").lower()
     race_date_obj = datetime.strptime(next_race["start_date_local"][:10], "%Y-%m-%d").date()
-    taper_days = 3 if "c:" in name_lower else (7 if "b:" in name_lower else 14)
+    taper_days = {"A": 14, "B": 7, "C": 3}[race_priority(next_race)]
     return {"race": next_race, "taper_days": taper_days, "race_date": race_date_obj}
 
 def fetch_yesterday_actual(activities):

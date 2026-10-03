@@ -1,5 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.planning import is_ai_generated
+from training_plan.engine.calendar_context import is_own_event
 from training_plan.engine.postprocess import estimate_tss_coggan
 
 def _parse_local_event_datetime(start_date_local: str) -> Optional[datetime]:
@@ -34,19 +35,69 @@ def plan_day_has_started(day: PlanDay, now: Optional[datetime] = None) -> bool:
     return start_dt <= (now or _stockholm_now_naive())
 
 def delete_ai_workouts(workouts, now: Optional[datetime] = None):
+    """Delete future AI events with the bulk endpoint (50 per request) instead of one call each."""
+    ids = [w["id"] for w in workouts if w.get("id") is not None and is_ai_generated(w) and not event_has_started(w, now)]
     n = 0
-    for w in workouts:
-        if is_ai_generated(w) and not event_has_started(w, now):
-            try:
-                requests.put(
-                    f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
-                    auth=AUTH, timeout=15,
-                    json=[{"id": w["id"]}],
-                ).raise_for_status()
-                n += 1
-            except Exception as e:
-                log.warning(f"Could not delete {w.get('id')}: {e}")
+    for start in range(0, len(ids), 50):
+        chunk = ids[start:start + 50]
+        try:
+            requests.put(
+                f"{BASE}/athlete/{ATHLETE_ID}/events/bulk-delete",
+                auth=AUTH, timeout=15,
+                json=[{"id": event_id} for event_id in chunk],
+            ).raise_for_status()
+            n += len(chunk)
+        except Exception as e:
+            log.warning(f"Could not delete {len(chunk)} AI event(s): {e}")
     return n
+
+def sync_week_targets(week_targets, calendar_events) -> int:
+    """Write the planner's weekly load targets as TARGET events in intervals.icu.
+
+    The fitness chart then projects CTL from them, and the calendar shows planned
+    versus done per week. Weeks where the athlete has their own target (e.g. from the
+    annual training plan builder) are never touched; only our own AI-tagged targets
+    are created or updated. Returns the number of events written.
+    """
+    def monday_key(event):
+        start = (event.get("start_date_local") or "")[:10]
+        try:
+            day = datetime.strptime(start, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        return (day - timedelta(days=day.weekday())).isoformat()
+
+    targets = [e for e in calendar_events or [] if (e.get("category") or "").upper() == "TARGET"]
+    athlete_weeks = {monday_key(e) for e in targets if not is_own_event(e)}
+    own_by_week = {monday_key(e): e for e in targets if is_own_event(e)}
+    written = 0
+    for target in week_targets:
+        if target.week_start in athlete_weeks:
+            continue
+        description = (f"Weekly load target from the planner ({target.kind}, {target.tss_target} TSS)."
+                       + (f" {target.note}" if target.note else "") + f"\n\n{AI_TAG}")
+        existing = own_by_week.get(target.week_start)
+        try:
+            if existing:
+                if existing.get("load_target") == target.tss_target:
+                    continue  # unchanged: no write
+                requests.put(f"{BASE}/athlete/{ATHLETE_ID}/events/{existing['id']}", auth=AUTH, timeout=10,
+                             json={"load_target": target.tss_target, "description": description}).raise_for_status()
+            else:
+                monday = datetime.strptime(target.week_start, "%Y-%m-%d")
+                requests.post(f"{BASE}/athlete/{ATHLETE_ID}/events", auth=AUTH, timeout=10, json={
+                    "category": "TARGET",
+                    "start_date_local": monday.strftime("%Y-%m-%dT00:00:00"),
+                    "end_date_local": (monday + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00"),
+                    "name": "Weekly target (planner)",
+                    "description": description,
+                    "load_target": target.tss_target,
+                }).raise_for_status()
+            written += 1
+        except Exception as e:  # never let target sync break the run
+            log.warning(f"Could not write weekly target for {target.week_start}: {e}")
+    return written
+
 
 def update_manual_nutrition(workout, nutrition):
     desc  = workout.get("description") or ""

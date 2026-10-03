@@ -191,3 +191,31 @@ def plan_update_mode(ai_workouts, yesterday_actuals, yesterday_planned, hrv, wel
     except Exception:
         pass
     return "none", "Plan complete and recovery normal – no changes."
+
+
+def resolve_update_mode(ai_workouts, yesterday_actuals, yesterday_planned, hrv, wellness, activities, horizon,
+                        base_tss_by_date: dict, tss_budget: float) -> tuple[str, str]:
+    """Decide the update mode from data alone, before any AI call is made.
+
+    Wraps plan_update_mode() and forces a full replan when an otherwise complete
+    plan (AI + manual sessions) covers less than 75% of the TSS budget.
+    """
+    mode, reason = plan_update_mode(
+        ai_workouts, yesterday_actuals, yesterday_planned, hrv, wellness, activities, horizon
+    )
+    if mode == "none" and ai_workouts:
+        today_str = date.today().isoformat()
+        future_ai_tss = sum(
+            w.get("planned_load", 0) or 0
+            for w in ai_workouts
+            if w.get("start_date_local", "")[:10] >= today_str
+        )
+        future_manual_tss = sum(
+            load for day_str, load in base_tss_by_date.items() if day_str >= today_str
+        )
+        future_tss = future_ai_tss + future_manual_tss
+        if future_tss < tss_budget * 0.75:
+            mode = "full"
+            reason = (f"Existing plan ({future_tss} TSS incl. manual sessions) covers less than 75% of budget "
+                      f"({tss_budget} TSS) – regenerating.")
+    return mode, reason
