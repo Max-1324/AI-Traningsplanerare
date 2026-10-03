@@ -72,7 +72,9 @@ med `time_available=`, `injury=` och `athlete_note=`.
   tempo och korta VO2max-intervaller, Build tröskelintervaller och längre VO2max-intervaller. Utan årsplan
   och tävling byts formatet var sjätte vecka. En vecka vars mål ligger minst 20 % under veckan före
   räknas som återhämtningsvecka. Ett veckomål som skulle höja CTL mer än `RAMP_CTL_MAX` per vecka trappas in i
-  stället, så en plan med fler timmar än du är van vid blir ingen chockstart. Utan årsplan skriver planeraren sina
+  stället, så en plan med fler timmar än du är van vid blir ingen chockstart. Styrketräning lägger du in som
+  *Weight Training* (eller *Other*): timmarna blir styrkepass à 30 min (1 h = 2 pass, högst 3 i veckan) och räknas
+  inte som uthållighetsbelastning. Utan årsplan skriver planeraren sina
   egna veckomål som `TARGET`-event (stäng av med `SYNC_WEEK_TARGETS=off`). Dina egna veckomål skrivs aldrig över.
 - **Skadad**: en `INJURED`-händelse stoppar bara sporterna skadan påverkar. "Knä" eller "löparskada" stoppar
   löpningen men inte cykeln, och "axel" stoppar cykeln. Sätt tillgängligheten till *begränsad* om all träning
@@ -85,6 +87,13 @@ med `time_available=`, `injury=` och `athlete_note=`.
   (upp till ett halvår bakåt). **Vinter:** en anteckning `Ej: utomhuscykel` från november till mars gör all cykling
   till inomhuscykling. Orden `utomhuscykel`, `utecykel`, `inomhuscykel`, `Zwift`, `Wahoo`, `löpning`, `rullskidor`
   och `styrka` känns igen.
+
+### Styrketräning
+Ett styrkepass i veckan, eller så många som årsplanens styrkemål ger. Passen är 30 min med kroppsvikt. Programmet
+följer blocket: bas (vecka 1–2), bygg (vecka 3) och underhåll (återhämtning och nedtrappning). Återhämtningsveckor
+får högst ett pass, tävlingsveckor inget. Passen läggs helst på lätta dagar, men aldrig dagen före ett hårt pass
+eller långpass, och minst två dagar isär. Behövs fler pass läggs de efter intervallpasset samma dag. Styrkepass
+du redan gjort den senaste veckan, eller själv lagt in i kalendern, räknas in, och avståndet gäller även till dem.
 
 ### Väder
 Ett cykelpass läggs utomhus bara när det är minst 5 °C under passet, inte snöar eller faller snöblandat regn och
@@ -132,7 +141,7 @@ annan nivå. Puls under passen (t.ex. från ett pulsband) påverkas inte.
 | `RAMP_CTL_PER_WEEK`, `RAMP_CTL_MAX` | `4.0`, `6.0` | Planerad CTL-ökning per byggvecka, och tak. Mot en A-tävling används rampen som krävs för att nå `TARGET_CTL`, inom taket |
 | `DELOAD_LOAD_FACTOR` | `0.70` | Deloadveckans dagliga belastning som andel av CTL |
 | `KEY_SESSIONS_PER_WEEK` | *(anpassas)* | Tak för antalet hårda pass per vecka (0–3). Utan värde avgör din återhämtning: normalt 2, ibland 1 eller 3 |
-| `STRENGTH_PER_WEEK` | `1` | Styrkepass per vecka (begränsas också av `MAX_STRENGTH_PER_PLAN`) |
+| `STRENGTH_PER_WEEK` | `1` | Styrkepass per vecka när årsplanen saknar styrkemål (begränsas då också av `MAX_STRENGTH_PER_PLAN`) |
 | `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport (t.ex. rullskidor) per vecka, när årsplanen inte anger fördelning per sport |
 | `LONG_SESSION_SHARE` | `0.35` | Långpassets största andel av veckans TSS |
 | `WEEKDAY_MAX_MIN` | `120` | Längsta uthållighetspass måndag–fredag |

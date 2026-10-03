@@ -619,7 +619,7 @@ def main(argv=None):
             sport_acwr=sport_acwr, hrv=hrv, readiness=readiness, wellness=wellness_clean,
             activities=activities_clean, morning=morning, injury_profile=injury_profile,
             development_needs=development_needs, ftp_check=ftp_check, motivation=motivation,
-            calendar_events=calendar_events, compliance=compliance,
+            calendar_events=calendar_events, compliance=compliance, manual_workouts=manual_workouts,
         )
         det_result = build_deterministic_plan(det_inputs)
         mode_budget = det_result.horizon_tss_target
@@ -678,6 +678,7 @@ def main(argv=None):
                 constraints=det_inputs.constraints, today_wellness=today_wellness, per_sport_acwr_data=sport_acwr,
                 phase=phase, races=races, wellness=wellness_clean,
                 time_available_text=morning.get("time_available", ""),
+                max_strength=det_result.max_strength_sessions,
             ),
             athlete=athlete, base_tss_by_date=base_tss_by_date,
             validation_context=validation_context, validation_budget=validation_budget,

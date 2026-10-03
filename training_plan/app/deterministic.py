@@ -43,6 +43,15 @@ def _day(item: dict) -> str:
     return (item.get("start_date_local") or "")[:10]
 
 
+def _strength_dates(activities: list, manual_workouts: list, today: date) -> list[str]:
+    """Strength done in the last 7 days, plus strength sessions you planned yourself."""
+    week_ago = (today - timedelta(days=6)).isoformat()
+    done = {_day(a) for a in activities if week_ago <= _day(a) <= today.isoformat()
+            and (a.get("type") == "WeightTraining" or classify_session_category(a) == "strength")}
+    planned = {_day(w) for w in manual_workouts or [] if w.get("type") == "WeightTraining"}
+    return sorted(d for d in done | planned if d)
+
+
 def _recently_sick(events: list, today: date, days: int = 7) -> bool:
     """A SICK event that ended within the last `days` days (or is still going on)."""
     cutoff = (today - timedelta(days=days)).isoformat()
@@ -111,6 +120,7 @@ def build_planner_inputs(
     motivation: dict,
     calendar_events: list | None = None,
     compliance: dict | None = None,
+    manual_workouts: list | None = None,
 ) -> PlannerInputs:
     horizon_dates = [(today + timedelta(days=i)).isoformat() for i in range(horizon + 1)]
     calendar_events = calendar_events or []
@@ -221,6 +231,7 @@ def build_planner_inputs(
         done_today=any(_day(a) == today_s for a in activities),
         intensity_done_this_week=intensity_done,
         key_kinds_done_this_week=[k for k in kinds_done if k in HARD_CATEGORIES],
+        strength_dates=_strength_dates(activities, manual_workouts, today),
         yesterday_was_hard=yesterday_hard,
         injury=injury,
         injury_note=injury_note,

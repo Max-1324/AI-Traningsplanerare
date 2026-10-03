@@ -90,8 +90,11 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
 def apply_safety_rules(plan, *, hrv, budgets, locked, athlete, weather=None, today=None,
                        injury_note="", injury_profile=None, constraints=None, today_wellness=None,
                        per_sport_acwr_data=None, phase=None, races=None, wellness=None,
-                       time_available_text=""):
+                       time_available_text="", max_strength=None):
     """Safety net for plans from the deterministic planner.
+
+    ``max_strength`` is the planner's strength limit for the plan (higher when the annual
+    plan asks for more strength); without it the default limit applies.
 
     The planner already respects these rules, so in practice they should not change
     anything except adding warm-up and nutrition text. Rules that the planner owns
@@ -113,7 +116,7 @@ def apply_safety_rules(plan, *, hrv, budgets, locked, athlete, weather=None, tod
         days, c = enforce_per_sport_acwr_veto(days, per_sport_acwr_data); all_c += c
     days, c = enforce_sport_budget(days, budgets, today=today); all_c += c
     days, c = enforce_hard_easy(days);                         all_c += c
-    days, c = enforce_strength_limit(days);                    all_c += c
+    days, c = enforce_strength_limit(days, max_strength=max_strength); all_c += c
     days, c = enforce_rollski_limit(days);                     all_c += c
     days     = ensure_warmup(days)
     days     = add_env_nutrition(days, weather or [], phase=phase, races=races, athlete=athlete, wellness=wellness)
