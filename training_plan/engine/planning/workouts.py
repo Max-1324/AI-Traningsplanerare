@@ -44,15 +44,19 @@ def get_strength_workout_for_phase(mesocycle: dict) -> dict:
     Fas 1 (bas): Hög rep kroppsvikt → Fas 2 (bygg): Tyngre kroppsvikt → Fas 3 (underhåll): Stabilitet.
     """
     week = mesocycle.get("week_in_block", 1)
+    block = mesocycle.get("block_number", 1)
     is_deload = mesocycle.get("is_deload", False)
     phase_name = mesocycle.get("phase_name", "Base") if isinstance(mesocycle, dict) else "Base"
 
     if is_deload or phase_name in ("Taper", "Race Week"):
         return STRENGTH_LIBRARY["underhall_styrka"]
-    elif week <= 2:
+    if os.getenv("STRENGTH_STYLE", "bodyweight").lower() == "heavy":
+        return STRENGTH_LIBRARY["tung_styrka"]
+    # Progression: the easier base program only in the first week of the first block; after
+    # that the harder program, so the load keeps rising instead of resetting every month.
+    if block <= 1 and week <= 1:
         return STRENGTH_LIBRARY["bas_styrka"]
-    else:
-        return STRENGTH_LIBRARY["bygg_styrka"]
+    return STRENGTH_LIBRARY["bygg_styrka"]
 
 
 def get_next_workouts(levels: dict, phase: str) -> str:

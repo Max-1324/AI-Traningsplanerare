@@ -86,12 +86,15 @@ class TestStrengthInThePlan(unittest.TestCase):
             review_context={"today": inp.today.isoformat(), "max_hard_days": result.max_hard_days})
         self.assertEqual(validation.hard_failures, [])
 
-    def test_default_is_one_a_week(self):
-        inp = _inputs()
-        result = build_deterministic_plan(inp)
-        first_week = [d for d in _strength_days(result) if d < MONDAY + timedelta(days=7)]
-        self.assertEqual(len(first_week), 1)
-        self.assertEqual(result.plan.days[0].date, MONDAY.isoformat())
+    def test_default_is_two_a_week_in_base_and_one_towards_a_goal(self):
+        # Two sessions build strength; one keeps it while training for a goal (Rønnestad et al.).
+        for phase, expected in (("Base", 2), ("Build", 1)):
+            inp = _inputs()
+            inp.phase = phase
+            result = build_deterministic_plan(inp)
+            first_week = [d for d in _strength_days(result) if d < MONDAY + timedelta(days=7)]
+            self.assertEqual(len(first_week), expected, phase)
+            self.assertEqual(result.plan.days[0].date, MONDAY.isoformat())
 
     def test_annual_plan_count_with_two_days_between(self):
         inp = _inputs(strength=2)
@@ -137,3 +140,28 @@ class TestStrengthInThePlan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStrengthProgram(unittest.TestCase):
+    def test_program_progresses_after_the_first_week_and_never_resets(self):
+        from training_plan.engine.planning.workouts import get_strength_workout_for_phase
+        first = get_strength_workout_for_phase({"week_in_block": 1, "block_number": 1, "phase_name": "Base"})
+        later = [get_strength_workout_for_phase({"week_in_block": w, "block_number": 2, "phase_name": "Base"})
+                 for w in (1, 2, 3)]
+        self.assertIn("Base strength", first["name"])
+        self.assertTrue(all("Build strength" in p["name"] for p in later))
+
+    def test_heavy_option(self):
+        import os
+        from unittest import mock
+        from training_plan.engine.planning.workouts import get_strength_workout_for_phase
+        with mock.patch.dict(os.environ, {"STRENGTH_STYLE": "heavy"}):
+            program = get_strength_workout_for_phase({"week_in_block": 2, "block_number": 1, "phase_name": "Base"})
+        self.assertIn("Heavy", program["name"])
+
+    def test_no_unsupported_injury_claims(self):
+        from training_plan.engine.libraries import PREHAB_LIBRARY, STRENGTH_LIBRARY
+        notes = " ".join(e.get("notes", "") for lib in (STRENGTH_LIBRARY, PREHAB_LIBRARY)
+                         for p in lib.values() for e in p["exercises"]).lower()
+        for claim in ("prevents", "vmo", "mandatory", "strongest prevention"):
+            self.assertNotIn(claim, notes)

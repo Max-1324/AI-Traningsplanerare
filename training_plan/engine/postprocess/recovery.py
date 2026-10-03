@@ -5,7 +5,7 @@ from training_plan.engine.utils import time_available_minutes
 
 _MIN_DURATION = MIN_DURATION_BY_SPORT
 _MAX_ROLLSKI_PER_WEEK = int(os.getenv("MAX_ROLLSKI_PER_WEEK", "1"))
-_MAX_STRENGTH_PER_PLAN = int(os.getenv("MAX_STRENGTH_PER_PLAN", "2"))
+_MAX_STRENGTH_PER_PLAN = int(os.getenv("MAX_STRENGTH_PER_PLAN", "3"))
 _MIN_STRENGTH_GAP_DAYS = int(os.getenv("MIN_STRENGTH_GAP_DAYS", "2"))
 
 HARD_THRESHOLD = 0.20

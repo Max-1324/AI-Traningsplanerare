@@ -38,8 +38,12 @@ from training_plan.engine.postprocess.recovery import sport_week_cap
 from training_plan.engine.skeleton import build_week_skeleton
 from training_plan.engine.validation.structure import _is_hard_day
 
-STRENGTH_PER_WEEK = int(os.getenv("STRENGTH_PER_WEEK", "1"))
-MAX_STRENGTH_PER_PLAN = int(os.getenv("MAX_STRENGTH_PER_PLAN", "2"))
+# Strength sessions a week without an annual-plan strength target: 2 in base periods (building
+# strength), 1 while building towards a goal (keeps it, Rønnestad et al.). STRENGTH_PER_WEEK
+# overrides both.
+STRENGTH_PER_WEEK = int(os.getenv("STRENGTH_PER_WEEK")) if os.getenv("STRENGTH_PER_WEEK") else None
+STRENGTH_BASE_PER_WEEK, STRENGTH_GOAL_PER_WEEK = 2, 1
+MAX_STRENGTH_PER_PLAN = int(os.getenv("MAX_STRENGTH_PER_PLAN", "3"))
 MIN_STRENGTH_GAP_DAYS = int(os.getenv("MIN_STRENGTH_GAP_DAYS", "2"))
 MAX_ROLLSKI_PER_WEEK = int(os.getenv("MAX_ROLLSKI_PER_WEEK", "1"))
 # With skiing in the week's sport mix, roller skiing may carry more of it.
@@ -215,7 +219,9 @@ def strength_session(day_str: str, program: dict, *, slot: str = "AM", minutes: 
     ]
     return PlanDay(date=day_str, title=f"Strength – {program['name']}", intervals_type="WeightTraining",
                    duration_min=minutes, strength_steps=steps, slot=slot,
-                   description="Bodyweight strength for economy and injury resilience. Controlled tempo, no failure.")
+                   description=("Strength for leg power and robustness (heavy strength has the best evidence for "
+                                "endurance performance; set STRENGTH_STYLE=heavy with gym access). "
+                                "Controlled tempo, 1-2 reps in reserve."))
 
 
 def rest_day(day_str: str, title: str = "Rest", description: str = "") -> PlanDay:
@@ -710,8 +716,15 @@ class _Planner:
                 return list(min(fitting, key=lambda combo: (sum(cost[d] for d in combo), combo)))
         return []
 
+    def _strength_default(self, target: WeekTarget) -> int:
+        if STRENGTH_PER_WEEK is not None:
+            return STRENGTH_PER_WEEK
+        building_to_goal = bool(target.focus) or self.inp.phase in ("Build", "Taper", "Race Week")
+        return STRENGTH_GOAL_PER_WEEK if building_to_goal else STRENGTH_BASE_PER_WEEK
+
     def strength_program(self, week_target: WeekTarget) -> dict:
         meso = {"week_in_block": week_target.week_in_block, "is_deload": week_target.is_deload,
+                "block_number": week_target.block_number,
                 "phase_name": "Taper" if week_target.kind in ("taper", "race") else self.inp.phase}
         return get_strength_workout_for_phase(meso)
 
@@ -875,7 +888,7 @@ class _Planner:
         # 4) Strength (AM, on easy days that are not right before a key or long day). The annual
         #    plan's strength target sets the count when there is one; sessions you already did or
         #    planned yourself that week count towards it.
-        wanted = STRENGTH_PER_WEEK if target.strength_sessions is None else target.strength_sessions
+        wanted = target.strength_sessions if target.strength_sessions is not None else self._strength_default(target)
         wanted = 0 if target.kind == "race" else (min(1, wanted) if target.is_deload else wanted)
         monday = date.fromisoformat(target.week_start)
         known = sum(1 for d in self._known_strength if monday <= d < monday + timedelta(days=7))
