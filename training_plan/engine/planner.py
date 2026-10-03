@@ -60,6 +60,9 @@ def _parse_floors(text: str) -> dict[str, int]:
 # Minimum sessions per sport group and week while the sport is in the week's mix: enough to
 # keep it (endurance holds with about two sessions a week, Spiering et al. 2021).
 SPORT_MIN_SESSIONS = _parse_floors(os.getenv("SPORT_MIN_SESSIONS", "Run:2,cycling:2,ski:1"))
+# Sports whose single sessions are capped by the longest one in the last 30 days.
+SESSION_SPIKE_SPORTS = {x.strip() for x in os.getenv("SESSION_SPIKE_SPORTS", "Run").split(",") if x.strip()}
+SESSION_SPIKE_FACTOR = float(os.getenv("SESSION_SPIKE_FACTOR", "1.1"))
 _KEY_KIND = {"vo2max_intervals": "vo2", "vo2max_short": "vo2",
              "threshold_intervals": "threshold", "tempo_sustained": "threshold"}
 SECONDARY_SESSIONS_PER_WEEK = int(os.getenv("SECONDARY_SESSIONS_PER_WEEK", "1"))
@@ -281,6 +284,7 @@ class PlannerInputs:
     key_kinds_done_this_week: list = field(default_factory=list)   # "vo2"/"threshold" done since Monday
     strength_dates: list = field(default_factory=list)   # strength done in the last week or planned by you
     sessions_done_this_week: dict = field(default_factory=dict)   # sport group → sessions since Monday
+    longest_session_30d: dict | None = None   # sport → longest session (min) in 30 days; None = unknown
 
 
 @dataclass
@@ -402,6 +406,22 @@ class _Planner:
             return "AM"
         return None
 
+    def session_cap(self, sport: str) -> int:
+        """Longest single session allowed: at most 1.1 × the longest one in the last 30 days.
+
+        Single sessions much longer than the longest recent one carry the injury risk in
+        running (Frandsen et al. 2025, BJSM); weekly volume changes did not. With no recent
+        session the sport restarts at its minimum length.
+        """
+        if self.inp.longest_session_30d is None or sport not in SESSION_SPIKE_SPORTS:
+            return 10_000
+        longest = self.inp.longest_session_30d.get(sport, 0)
+        return max(self.min_minutes(sport), int(longest * SESSION_SPIKE_FACTOR))
+
+    def size_left(self, sport: str) -> float:
+        """Largest new session in `sport`: weekly budget left and the single-session cap."""
+        return min(self.budget_left(sport), self.session_cap(sport))
+
     def budget_left(self, sport: str) -> float:
         """Minutes left in the sport's weekly budget for the week being planned."""
         b = self.inp.sport_budgets.get(sport)
@@ -463,7 +483,7 @@ class _Planner:
             if sport == "RollerSki" and week_start and self.rollski_by_week.get(week_start, 0) >= self.rollski_cap(week_start):
                 continue
             lo = self.min_minutes(sport)
-            hi = min(max_min, _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
+            hi = min(max_min, _MAX_FILL_MIN.get(sport, 90), self.size_left(sport))
             if hi >= lo:
                 return sport, max(lo, min(minutes, hi)), slot
         return None
@@ -523,7 +543,7 @@ class _Planner:
             if sport == "RollerSki" and self.rollski_by_week.get(target.week_start, 0) >= self.rollski_cap(target.week_start):
                 continue
             lo = self.min_minutes(sport)
-            hi = min(cap, _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
+            hi = min(cap, _MAX_FILL_MIN.get(sport, 90), self.size_left(sport))
             if hi >= lo:
                 return sport, minutes_for_tss(sport, tss, lo, hi), slot
         return None
@@ -591,7 +611,7 @@ class _Planner:
                  cap: int = 10_000) -> PlanDay | None:
         for sport in self.key_sport_options(day, wk_key, target):
             session = self._key_in(day, wk_key, sport, focus)
-            if session.duration_min <= cap and session.duration_min <= self.budget_left(sport):
+            if session.duration_min <= cap and session.duration_min <= self.size_left(sport):
                 return session
         return None
 
@@ -629,7 +649,7 @@ class _Planner:
 
     def make_long(self, day: str, week_target: float, budget: float, cap: int | None = None) -> PlanDay | None:
         for sport, slot in self._long_candidates(day):
-            hi = min(self._long_level_minutes(sport), _MAX_LONG_MIN.get(sport, 150), self.budget_left(sport),
+            hi = min(self._long_level_minutes(sport), _MAX_LONG_MIN.get(sport, 150), self.size_left(sport),
                      cap or 10_000)
             if budget < 0.8 * _endurance_tss(sport, _MIN_LONG_MIN):
                 return None  # the week's load is already covered
@@ -720,7 +740,7 @@ class _Planner:
                     continue
                 lo = self.min_minutes(sport)
                 hi = min(_MAX_LONG_MIN.get(sport, 120) if role == "long" else _MAX_FILL_MIN.get(sport, 90),
-                         self.budget_left(sport), self.injury_cap or 10_000)
+                         self.size_left(sport), self.injury_cap or 10_000)
                 if hi < lo:
                     continue
                 minutes = minutes_for_tss(sport, target_tss, lo, hi)
@@ -823,7 +843,7 @@ class _Planner:
                 focus = next((a for a in inp.focus_areas if wk_key in _FOCUS_TO_KEY.get(a, ())), "")
                 session = self.make_key(d, wk_key, focus=focus, target=target, cap=cap_for(d, 10_000)) if wk_key else None
             if (session is None or tss_of(session) > budget * 1.25 or session.duration_min > cap_for(d, 10_000)
-                    or session.duration_min > self.budget_left(session.intervals_type)):
+                    or session.duration_min > self.size_left(session.intervals_type)):
                 role_of[d] = "easy"   # no suitable key session: treat as an easy day
                 continue
             add(session, "key")
@@ -904,7 +924,8 @@ class _Planner:
             for i, (day, role) in enumerate(items):
                 if role != "long":
                     continue
-                cap = min(self._long_cap.get(d, day.duration_min), day.duration_min + self.budget_left(day.intervals_type))
+                cap = min(self._long_cap.get(d, day.duration_min), day.duration_min + self.budget_left(day.intervals_type),
+                          self.session_cap(day.intervals_type))
                 minutes = day.duration_min
                 while budget > 5 and minutes + 15 <= cap:
                     before = _endurance_tss(day.intervals_type, minutes)
@@ -1012,7 +1033,7 @@ class _Planner:
             if choice:
                 sport, _, slot = choice
                 lo = self.min_minutes(sport)
-                hi = min(caps[d], _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
+                hi = min(caps[d], _MAX_FILL_MIN.get(sport, 90), self.size_left(sport))
                 if hi >= lo:
                     plan[d] = (sport, minutes_for_tss(sport, per_day, lo, hi), slot)
                     reserve(sport, plan[d][1])
@@ -1042,7 +1063,8 @@ class _Planner:
             for d, (sport, minutes, slot) in sorted(plan.items(), key=lambda kv: kv[1][1]):
                 if not may_grow(sport):
                     continue
-                hi = min(caps[d], _MAX_FILL_MIN.get(sport, 90), minutes + self.budget_left(sport))
+                hi = min(caps[d], _MAX_FILL_MIN.get(sport, 90), minutes + self.budget_left(sport),
+                         self.session_cap(sport))
                 if minutes + 15 <= hi:
                     plan[d] = (sport, minutes + 15, slot)
                     reserve(sport, 15, new_session=False)
@@ -1069,7 +1091,7 @@ class _Planner:
             if sport == "RollerSki" and self.rollski_by_week.get(target.week_start, 0) >= self.rollski_cap(target.week_start):
                 continue
             lo = self.min_minutes(sport)
-            hi = min(cap, _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
+            hi = min(cap, _MAX_FILL_MIN.get(sport, 90), self.size_left(sport))
             if hi >= lo:
                 return sport, minutes_for_tss(sport, per_day, lo, hi), "MAIN"
         return None

@@ -670,7 +670,7 @@ def main(argv=None):
             safety_kwargs=dict(
                 hrv=hrv, budgets=budgets, locked=blocked_dates, athlete=athlete, weather=weather,
                 today=date.today(), injury_note=morning.get("injury_today", ""), injury_profile=injury_profile,
-                constraints=det_inputs.constraints, today_wellness=today_wellness, per_sport_acwr_data=sport_acwr,
+                constraints=det_inputs.constraints, today_wellness=today_wellness,
                 phase=phase, races=races, wellness=wellness_clean,
                 time_available_text=morning.get("time_available", ""),
                 max_strength=det_result.max_strength_sessions,
@@ -821,7 +821,7 @@ def main(argv=None):
                 candidate_plan, hrv, budgets, locked_dates, tsb_bgt, activities_clean, weather, athlete,
                 injury_note=morning.get('injury_today', ''), injury_profile=injury_profile, mesocycle=mesocycle,
                 constraints=constraints, today_wellness=today_wellness, rtp_status=rtp_status,
-                per_sport_acwr_data=sport_acwr, motivation=motivation,
+                motivation=motivation,
                 med_active=(
                     minimum_effective_dose.get("mode") == "ACTIVE"
                     and minimum_effective_dose.get("scope") == "GLOBAL"

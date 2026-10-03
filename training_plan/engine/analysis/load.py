@@ -209,6 +209,13 @@ def acwr_trend_analysis(fitness_history: list) -> dict:
 # SPORT-SPECIFIC ACWR (per sport type)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _days_ago(activity: dict, today: date) -> int:
+    try:
+        return (today - datetime.strptime(safe_date_str(activity), "%Y-%m-%d").date()).days
+    except ValueError:
+        return -1
+
+
 def per_sport_acwr(activities: list) -> dict:
     """
     Calculates ATL, CTL and ACWR separately per sport type.
@@ -220,27 +227,14 @@ def per_sport_acwr(activities: list) -> dict:
 
     for sport in sports:
         sport_acts = [a for a in activities if a.get("type") == sport]
-        atl = 0.0
-        ctl = 0.0
-        for a in sport_acts:
-            ds = safe_date_str(a)
-            if not ds:
-                continue
-            try:
-                days_ago = (today - datetime.strptime(ds, "%Y-%m-%d").date()).days
-            except Exception:
-                continue
-            
-            if days_ago < 0:
-                continue
-                
-            tss = a.get("icu_training_load") or 0
-            if days_ago <= 7:
-                atl += tss * (1 - days_ago / 7)
-            if days_ago <= 28:
-                ctl += tss * (1 - days_ago / 28)
-
-        ratio = round(atl / ctl, 2) if ctl > 0 else 0.0
+        # Average daily load over 7 and 28 days. (Earlier unnormalised weighted sums kept the
+        # ratio at or below 1.0.) Information only: the planner does not act on it.
+        acute = sum((a.get("icu_training_load") or 0) for a in sport_acts
+                    if 0 <= _days_ago(a, today) < 7) / 7
+        chronic = sum((a.get("icu_training_load") or 0) for a in sport_acts
+                      if 0 <= _days_ago(a, today) < 28) / 28
+        atl, ctl = acute, chronic
+        ratio = round(acute / chronic, 2) if chronic > 0 else 0.0
         if ratio > 1.5:
             zone = "DANGER"
             warning = f"ACWR {ratio:.2f} > 1.5 for {sport} – high injury risk!"
@@ -316,12 +310,21 @@ def sport_budget(sport_type, activities, manual_workouts) -> dict:
         (a.get("moving_time") or a.get("elapsed_time") or 0) / 60 for a in activities
         if a.get("type") == sport_type and safe_date(a) >= cutoff_7d
     )
-    basis      = (past_7d + past_14d / 2) / 1.5
+    # Weighted weekly average: the last week counts twice, the week before once. (The old
+    # formula, (7d + 14d/2) / 1.5, gave last week + a third of the week before: +47 %
+    # instead of +10 % at a steady volume.)
+    previous_7d = max(past_14d - past_7d, 0.0)
+    basis      = (2 * past_7d + previous_7d) / 3
     min_floor  = _MIN_SPORT_BUDGET.get(
         sport_type,
         _RISK_MIN_FLOOR.get(risk_level, 60),
     )
-    budget     = max(basis * growth, min_floor)
+    if basis > 0:
+        # With recent history the sport grows from it; the floor only restarts a sport that
+        # has not been trained for two weeks. One minimum-length session is always possible.
+        budget = max(basis * growth, MIN_DURATION_BY_SPORT.get(sport_type, 30))
+    else:
+        budget = min_floor
     locked  = sum(w.get("moving_time", 0) / 60
                   for w in manual_workouts if w.get("type") == sport_type)
     remaining = max(0, budget - locked)

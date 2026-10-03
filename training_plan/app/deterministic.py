@@ -55,6 +55,18 @@ def _strength_dates(activities: list, manual_workouts: list, today: date) -> lis
     return sorted(d for d in done | planned if d)
 
 
+def _longest_sessions(activities: list, today: date, days: int = 30) -> dict[str, int]:
+    """Longest single session (minutes) per sport in the last `days` days."""
+    cutoff = (today - timedelta(days=days)).isoformat()
+    longest: dict[str, int] = {}
+    for a in activities:
+        if cutoff <= _day(a) <= today.isoformat():
+            minutes = round((a.get("moving_time") or a.get("elapsed_time") or 0) / 60)
+            sport = a.get("type") or ""
+            longest[sport] = max(longest.get(sport, 0), minutes)
+    return longest
+
+
 def _sessions_by_group(activities: list) -> dict[str, int]:
     """Endurance sessions per sport group (days with a session), e.g. since Monday."""
     days: dict[str, set] = {}
@@ -204,7 +216,8 @@ def build_planner_inputs(
     if injury and injury.get("severity") in ("MODERATE", "SEVERE"):
         restricted |= set(horizon_dates)
         reasons.append(f"injury ({injury.get('severity', '').lower()})")
-    avoid |= {sport for sport, d in (sport_acwr or {}).items() if d.get("zone") == "DANGER"}
+    # Per-sport ACWR is information only (weak evidence as an injury predictor); the session
+    # cap below (longest session in the last 30 days) protects against load spikes instead.
 
     monday = monday_of(today).isoformat()
     this_week = [a for a in activities if monday <= _day(a) <= today_s]
@@ -267,6 +280,7 @@ def build_planner_inputs(
         key_kinds_done_this_week=[k for k in kinds_done if k in HARD_CATEGORIES],
         strength_dates=_strength_dates(activities, manual_workouts, today),
         sessions_done_this_week=_sessions_by_group(this_week),
+        longest_session_30d=_longest_sessions(activities, today),
         yesterday_was_hard=yesterday_hard,
         injury=injury,
         injury_note=injury_note,
