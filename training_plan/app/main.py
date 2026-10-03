@@ -207,7 +207,7 @@ def main(argv=None):
 
     lf  = fitness[-1] if fitness else {}
     ctl = max(lf.get("ctl",1.0),1.0); tsb_val = lf.get("tsb",0.0)
-    hrv         = calculate_hrv(wellness_clean)
+    hrv         = calculate_hrv(wellness_clean, today=date.today())
     phase       = training_phase(races, date.today())
     _budget_sports = [s["intervals_type"] for s in SPORTS if s["injury_risk"] in ("medium", "high")]
     budgets     = {st: sport_budget(st, activities_clean, manual_workouts) for st in _budget_sports}
@@ -394,7 +394,12 @@ def main(argv=None):
     yesterday_analysis = analyze_yesterday(yesterday_planned, yesterday_actuals, activities_clean)
 
     # ── SCHEDULE CONSTRAINTS ─────────────────────────────────────────────────
-    constraints = parse_constraints_from_events(planned)
+    # Limits that started before today (e.g. "Ej: utomhuscykel" for the whole winter) come from
+    # the calendar fetch, which looks back further than the planned events.
+    seen = {e.get("id") or (e.get("name"), e.get("start_date_local")) for e in planned}
+    earlier_limits = [e for e in calendar_events
+                      if (e.get("id") or (e.get("name"), e.get("start_date_local"))) not in seen]
+    constraints = parse_constraints_from_events(list(planned) + earlier_limits)
     horizon_dates = [(date.today() + timedelta(days=i)).isoformat() for i in range(args.horizon + 1)]
     constraints_text = format_constraints_for_prompt(constraints, horizon_dates)
     if constraints:
@@ -404,7 +409,7 @@ def main(argv=None):
     existing_plan_summary = format_existing_plan(ai_workouts)
 
     # ── NYA ANALYSER ─────────────────────────────────────────────────────────
-    readiness      = calculate_readiness_score(hrv, wellness_clean, activities_clean)
+    readiness      = calculate_readiness_score(hrv, wellness_clean, activities_clean, today=date.today())
     np_if_analysis = analyze_np_if(activities_clean)
     polarization   = polarization_analysis(activities_clean, days=21)
     session_quality = session_quality_analysis(activities_clean, days=28)
@@ -556,17 +561,17 @@ def main(argv=None):
     readiness_inputs = readiness.get("raw_inputs", {})
     readiness_limiters = readiness.get("limiters", [])
     log.info(
-        "   Readiness details: HRV=%s (dev %s%%) | Sleep=%s (%.1fh) | RHR=%s (slope %s/d) | RPE=%s (avg %.1f) | Feel=%s (avg %.2f)",
+        "   Readiness details: HRV=%s (dev %s%%) | Sleep=%s (%sh) | RHR=%s (slope %s/d) | RPE=%s (avg %s) | Feel=%s (avg %s)",
         readiness_components.get("hrv", "?"),
         readiness_inputs.get("hrv_deviation_pct", "?"),
         readiness_components.get("sleep", "?"),
-        readiness_inputs.get("sleep_hours", 0.0),
+        readiness_inputs.get("sleep_hours") or "?",
         readiness_components.get("rhr", "?"),
         readiness_inputs.get("rhr_slope_7d", "?"),
         readiness_components.get("rpe", "?"),
-        readiness_inputs.get("avg_rpe_last5", 0.0),
+        readiness_inputs.get("avg_rpe_last5") or "?",
         readiness_components.get("feel", "?"),
-        readiness_inputs.get("avg_feel_last5", 0.0),
+        readiness_inputs.get("avg_feel_last5") or "?",
     )
     if readiness_limiters:
         log.info("   Readiness limiters: %s", " | ".join(readiness_limiters[:3]))

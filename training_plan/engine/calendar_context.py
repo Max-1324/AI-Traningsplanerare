@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from training_plan.core.catalogs import CONSTRAINT_PREFIXES
 from training_plan.core.config import AI_TAG
 
 AVAILABILITY_CATEGORIES = {"HOLIDAY", "SICK", "INJURED"}
@@ -43,7 +44,14 @@ def is_own_event(event: dict) -> bool:
     return AI_TAG in (event.get("description") or "")
 
 
+def is_constraint_event(event: dict) -> bool:
+    """A "Bara: …" / "Ej: …" (Only/Not) event that limits sports over its dates."""
+    return (event.get("name") or "").strip().lower().startswith(CONSTRAINT_PREFIXES)
+
+
 def is_context_event(event: dict) -> bool:
+    if is_constraint_event(event):
+        return True
     category = (event.get("category") or "").upper()
     if category == "NOTE":
         return bool(event.get("plan_applied"))

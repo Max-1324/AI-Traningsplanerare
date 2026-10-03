@@ -574,7 +574,7 @@ WEATHER ({LOCATION}, afternoon data at 13-18):
 Weather rules:
   Choose time ("slot": AM or PM) based on when the weather is best for outdoor sessions!
   Rain: <5mm=OK outdoors. 5-15mm=Run OK, bike->Zwift. >15mm=Indoors only.
-  Temp: Snow requires temp < 1°C. If temp > 3°C it CANNOT snow. Avoid outdoor cycling < 0°C.
+  Temp: Snow requires temp < 1°C. If temp > 3°C it CANNOT snow. Outdoor cycling only from 5°C, never in snow or sleet, and not in the morning after a frosty night (ice).
 {constraints_text}
 {double_text}
 {lib_text}

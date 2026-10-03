@@ -151,28 +151,63 @@ def _sorted_activities(activities: list) -> list:
 
 _HRV_MIN_BASELINE = 14   # days of HRV before the last week needed for a personal baseline
 _HRV_MIN_SWC = 0.02      # ≈2%: keeps very stable athletes from flagging on noise
+_HRV_MIN_RECENT = 3      # measurements in the last 7 days needed to judge the current week
+_HRV_NEW_BASELINE_GAP = 14   # days without HRV (broken or new watch) that start a new baseline
 
 
-def calculate_hrv(wellness):
+def _row_date(row: dict) -> date | None:
+    raw = str(row.get("id") or row.get("date") or row.get("start_date_local") or "")[:10]
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _latest_row_date(wellness: list) -> date:
+    return max((d for d in (_row_date(w) for w in wellness) if d), default=date.today())
+
+
+def calculate_hrv(wellness, today: date | None = None):
+    """HRV state from the last 7 calendar days against the athlete's own baseline.
+
+    Only measurements from the last 7 days describe the current state. Without them
+    (no watch, or it is broken) HRV is assumed normal (``measured: False``) instead of
+    reusing old values. After two weeks without measurements a new baseline is built,
+    since a new watch usually measures on a different level.
+    """
     wellness = _sorted_wellness(wellness)
-    vals = [w.get("hrv") for w in wellness if (w.get("hrv") or 0) > 0]
+    today = today or _latest_row_date(wellness)
+    dated = [(d, w["hrv"]) for w in wellness
+             if (w.get("hrv") or 0) > 0 and (d := _row_date(w)) is not None and d <= today]
+    for i in range(len(dated) - 1, 0, -1):
+        if (dated[i][0] - dated[i - 1][0]).days >= _HRV_NEW_BASELINE_GAP:
+            dated = dated[i:]
+            break
+    window_start = today - timedelta(days=6)
+    last7 = [v for d, v in dated if d >= window_start]
+    if dated and len(last7) < _HRV_MIN_RECENT:
+        return {"today": None, "avg7d": None, "avg60d": None, "cv7d": None, "state": "NORMAL",
+                "trend": "UNKNOWN", "stability": "UNKNOWN", "deviation_pct": 0.0,
+                "measured": False, "method": "no_recent_data"}
+    vals = [v for _, v in dated]
     if len(vals) < 7:
         return {"today": None, "avg7d": None, "avg60d": None, "cv7d": None,
                 "state": "INSUFFICIENT_DATA", "trend": "UNKNOWN", "stability": "UNKNOWN", "deviation_pct": 0.0}
-    last7 = vals[-7:]; avg7 = sum(last7)/len(last7); avg60 = sum(vals)/len(vals)
-    # Om dagens HRV inte är loggad än (saknas eller är 0 i API-svaret), använd 7d-snittet
-    today_raw = (wellness[-1].get("hrv") or 0) if wellness else 0
-    today = today_raw if today_raw > 0 else round(avg7, 1)
+    avg7 = sum(last7)/len(last7); avg60 = sum(vals)/len(vals)
+    # Om dagens HRV inte är loggad än, använd 7d-snittet
+    today_raw = next((v for d, v in dated if d == today), 0)
+    today_val = today_raw if today_raw > 0 else round(avg7, 1)
     cv7 = (math.sqrt(sum((x-avg7)**2 for x in last7)/len(last7)) / avg7 * 100) if avg7 else 0
     
     dev_7d = (avg7 - avg60) / avg60 if avg60 else 0
-    dev_today = (today - avg60) / avg60 if avg60 else 0
+    dev_today = (today_val - avg60) / avg60 if avg60 else 0
     stability = "VERY_STABLE" if cv7 < 8 else ("STABLE" if cv7 < 12 else "UNSTABLE")
 
-    result = {"today": today, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
-              "cv7d": round(cv7,1), "stability": stability, "deviation_pct": round(dev_today*100,1)}
+    result = {"today": today_val, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
+              "cv7d": round(cv7,1), "stability": stability, "deviation_pct": round(dev_today*100,1),
+              "measured": True}
 
-    baseline = vals[:-7]
+    baseline = [v for d, v in dated if d < window_start]
     if len(baseline) >= _HRV_MIN_BASELINE:
         # Plews/Altini: compare the 7-day rolling mean of ln(rMSSD) with the athlete's own
         # baseline (excluding the last 7 days). The "normal" band is ± the smallest
@@ -182,7 +217,7 @@ def calculate_hrv(wellness):
         sd_b = math.sqrt(sum((x - mean_b) ** 2 for x in ln_base) / len(ln_base))
         swc = max(0.5 * sd_b, _HRV_MIN_SWC)
         z7 = (sum(math.log(v) for v in last7) / len(last7) - mean_b) / swc
-        z_today = (math.log(today) - mean_b) / swc
+        z_today = (math.log(today_val) - mean_b) / swc
         if z7 < -2 or z_today < -4:
             state = "LOW"
         elif z7 < -1:
@@ -209,39 +244,67 @@ def calculate_hrv(wellness):
     result.update({"state": state, "trend": trend, "method": "percent"})
     return result
 
-def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> dict:
-    """Composite readiness score 0-100 based on HRV, sleep, resting HR trend, RPE, and feel."""
+_NEUTRAL_SCORE = 70   # a component that is not measured counts as normal
+
+
+def calculate_readiness_score(hrv: dict, wellness: list, activities: list, today: date | None = None) -> dict:
+    """Composite readiness score 0-100 based on HRV, sleep, resting HR trend, RPE, and feel.
+
+    Only recent measurements count (sleep from last night, resting HR from the last
+    7 days). Anything not measured, e.g. without a watch, is treated as normal.
+    """
     def clamp(v, lo=0, hi=100): return max(lo, min(hi, v))
 
     wellness = _sorted_wellness(wellness)
     activities = _sorted_activities(activities)
+    today = today or _latest_row_date(wellness)
+    missing = []
 
     # HRV (35%) – deviation_pct: -30..+15 -> 0..100
     dev = hrv.get("deviation_pct", 0)
-    hrv_sc = clamp(int((dev + 30) / 45 * 100))
+    if hrv.get("measured") is False or hrv.get("state") == "INSUFFICIENT_DATA":
+        hrv_sc = _NEUTRAL_SCORE
+        missing.append("hrv")
+    else:
+        hrv_sc = clamp(int((dev + 30) / 45 * 100))
 
-    # Sleep (25%) – last night, 4..9h -> 0..100
-    recent_sleep = next((w.get("sleepSecs") for w in reversed(wellness) if w.get("sleepSecs")), None)
-    sleep_h = (recent_sleep / 3600) if recent_sleep else 7.0
-    sleep_sc = clamp(int((sleep_h - 4) / 5 * 100))
+    # Sleep (25%) – last night (today's or yesterday's entry), 4..9h -> 0..100
+    recent_sleep = next((w.get("sleepSecs") for w in reversed(wellness)
+                         if w.get("sleepSecs") and (_row_date(w) or date.min) >= today - timedelta(days=1)), None)
+    sleep_h = (recent_sleep / 3600) if recent_sleep else None
+    if sleep_h is None:
+        sleep_sc = _NEUTRAL_SCORE
+        missing.append("sleep")
+    else:
+        sleep_sc = clamp(int((sleep_h - 4) / 5 * 100))
 
-    # Resting HR trend (15%) – slope last 7 days
-    rhr_vals = [w.get("restingHR") for w in wellness[-7:] if w.get("restingHR")]
+    # Resting HR trend (15%) – slope over the last 7 days
+    rhr_vals = [w.get("restingHR") for w in wellness
+                if w.get("restingHR") and (_row_date(w) or date.min) >= today - timedelta(days=6)]
     if len(rhr_vals) >= 3:
         slope = (rhr_vals[-1] - rhr_vals[0]) / (len(rhr_vals) - 1)
         rhr_sc = 90 if slope < -0.3 else (40 if slope > 0.3 else 70)
     else:
-        rhr_sc = 70
+        rhr_sc = _NEUTRAL_SCORE
+        missing.append("rhr")
 
     # RPE (15%) – avg last 5 sessions, 4..9 inverted -> 0..100
     rpes = [a["perceived_exertion"] for a in activities[-5:] if a.get("perceived_exertion")]
-    mean_rpe = sum(rpes) / len(rpes) if rpes else 6.0
-    rpe_sc = clamp(int((9 - mean_rpe) / 5 * 100))
+    mean_rpe = sum(rpes) / len(rpes) if rpes else None
+    if mean_rpe is None:
+        rpe_sc = _NEUTRAL_SCORE
+        missing.append("rpe")
+    else:
+        rpe_sc = clamp(int((9 - mean_rpe) / 5 * 100))
 
     # Feel (10%) – avg last 5 sessions, 1..5 where lower is better -> 0..100
     feels = [a["feel"] for a in activities[-5:] if a.get("feel")]
-    mean_feel = sum(feels) / len(feels) if feels else 3.0
-    feel_sc = clamp(int((5 - mean_feel) / 4 * 100))
+    mean_feel = sum(feels) / len(feels) if feels else None
+    if mean_feel is None:
+        feel_sc = _NEUTRAL_SCORE
+        missing.append("feel")
+    else:
+        feel_sc = clamp(int((5 - mean_feel) / 4 * 100))
 
     score = int(hrv_sc*0.35 + sleep_sc*0.25 + rhr_sc*0.15 + rpe_sc*0.15 + feel_sc*0.10)
     label = "PEAK" if score >= 80 else ("GOOD" if score >= 65 else ("NORMAL" if score >= 50 else ("LOW" if score >= 35 else "CRITICAL")))
@@ -257,21 +320,25 @@ def calculate_readiness_score(hrv: dict, wellness: list, activities: list) -> di
         }.items(),
         key=lambda item: item[1],
     ):
-        if value < 70:
+        if value < 70 and name not in missing:
             limiters.append(f"{name}={value}")
 
+    summary = f"Readiness: {score}/100 ({label}) | HRV:{hrv_sc} Sleep:{sleep_sc} RHR:{rhr_sc} RPE:{rpe_sc} Feel:{feel_sc}"
+    if missing:
+        summary += f" | not measured (assumed normal): {', '.join(missing)}"
     return {
         "score": score, "label": label,
         "components": {"hrv": hrv_sc, "sleep": sleep_sc, "rhr": rhr_sc, "rpe": rpe_sc, "feel": feel_sc},
         "raw_inputs": {
             "hrv_deviation_pct": round(dev, 1),
-            "sleep_hours": round(sleep_h, 1),
+            "sleep_hours": round(sleep_h, 1) if sleep_h is not None else None,
             "rhr_slope_7d": round(slope, 2) if len(rhr_vals) >= 3 else None,
-            "avg_rpe_last5": round(mean_rpe, 1),
-            "avg_feel_last5": round(mean_feel, 2),
+            "avg_rpe_last5": round(mean_rpe, 1) if mean_rpe is not None else None,
+            "avg_feel_last5": round(mean_feel, 2) if mean_feel is not None else None,
         },
+        "missing": missing,
         "limiters": limiters,
-        "summary": f"Readiness: {score}/100 ({label}) | HRV:{hrv_sc} Sleep:{sleep_sc} RHR:{rhr_sc} RPE:{rpe_sc} Feel:{feel_sc}",
+        "summary": summary,
     }
 
 

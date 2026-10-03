@@ -81,7 +81,21 @@ med `time_available=`, `injury=` och `athlete_note=`.
   *Inte tillgänglig* ger inga pass alls, och *begränsad* ger bara korta, lätta pass. Utan angiven tillgänglighet
   räknas sjuk som inte tillgänglig och semester som normal.
 - **Begränsningar**: ett event (t.ex. en NOTE) vars namn börjar med `Bara:` eller `Ej:` (även `Only:`/`Not:`), t.ex.
-  `Ej: löpning` eller `Bara: Zwift`, gäller för eventets datumintervall.
+  `Ej: löpning` eller `Bara: Zwift`, gäller för eventets datumintervall. Det gäller även om det började tidigare
+  (upp till ett halvår bakåt). **Vinter:** en anteckning `Ej: utomhuscykel` från november till mars gör all cykling
+  till inomhuscykling. Orden `utomhuscykel`, `utecykel`, `inomhuscykel`, `Zwift`, `Wahoo`, `löpning`, `rullskidor`
+  och `styrka` känns igen.
+
+### Väder
+Ett cykelpass läggs utomhus bara när det är minst 5 °C under passet, inte snöar eller faller snöblandat regn och
+regnar mindre än 5 mm. Ett morgonpass kräver dessutom att det inte har varit minusgrader under dygnet (halka).
+Annars blir passet inomhus. Dagar efter väderprognosens slut bedöms som prognosens sista dag.
+
+### Utan pulsklocka
+Planeraren räknar bara med HRV från de senaste 7 dagarna, sömn från senaste natten och vilopuls från senaste
+veckan. Saknas värdena, till exempel för att klockan är trasig, räknas de som normala. Planen ändras alltså inte
+av gamla mätningar. Efter minst två veckor utan HRV byggs en ny baslinje, eftersom en ny klocka oftast mäter på en
+annan nivå. Puls under passen (t.ex. från ett pulsband) påverkas inte.
 
 ## Miljövariabler
 
@@ -122,6 +136,7 @@ med `time_available=`, `injury=` och `athlete_note=`.
 | `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport (t.ex. rullskidor) per vecka, när årsplanen inte anger fördelning per sport |
 | `LONG_SESSION_SHARE` | `0.35` | Långpassets största andel av veckans TSS |
 | `WEEKDAY_MAX_MIN` | `120` | Längsta uthållighetspass måndag–fredag |
+| `OUTDOOR_MIN_TEMP_C` | `5` | Lägsta temperatur för cykling utomhus |
 | `CATCH_UP_CAP` | `1.15` | Resten av en påbörjad vecka får högst så här mycket mer än sin andel (inget ikapptränande) |
 | `PLAN_ENRICH_TEMPERATURE` | `0.3` | Temperatur för AI-berikningen |
 | `SYNC_WEEK_TARGETS` | `on` | Skriv veckomålen som `TARGET`-event i intervals.icu (bara veckor utan egna mål) |

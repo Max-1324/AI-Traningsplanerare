@@ -48,6 +48,10 @@ LONG_SESSION_SHARE = float(os.getenv("LONG_SESSION_SHARE", "0.35"))
 CATCH_UP_CAP = float(os.getenv("CATCH_UP_CAP", "1.15"))
 # Longest aerobic session on a weekday (Mon-Fri); weekends allow longer sessions.
 WEEKDAY_MAX_MIN = int(os.getenv("WEEKDAY_MAX_MIN", "120"))
+# Ride outdoors only when it is at least this warm during the session (°C). Morning
+# sessions also need a frost-free day (icy roads), and snow or sleet means indoors.
+OUTDOOR_MIN_TEMP_C = float(os.getenv("OUTDOOR_MIN_TEMP_C", "5"))
+_OUTDOOR_MAX_RAIN_MM = 5
 
 _CYCLING = ("Ride", "VirtualRide")
 _MAX_FILL_MIN = {"Ride": 150, "VirtualRide": 120, "Run": 75, "RollerSki": 90, "NordicSki": 120, "Swim": 60}
@@ -283,6 +287,7 @@ class _Planner:
         self._current_week = True
         self.rollski_by_week: dict[str, int] = {}
         self.strength_in_horizon = 0
+        self._strength_dates: list[date] = []
         self.notes: list[str] = []
         self.roles: dict[str, str] = {}
         self.options: dict[str, list[PlanDay]] = {}
@@ -307,15 +312,31 @@ class _Planner:
                 return False
         return True
 
-    def outdoor_ok(self, day: str, slot: str = "MAIN") -> bool:
+    def _weather_for(self, day: str) -> dict | None:
+        """The day's forecast. Past the end of the forecast, its last day stands in."""
         w = self.weather.get(day)
+        if w is None and self.weather:
+            last = max(self.weather)
+            if day > last:
+                w = self.weather[last]
+        return w
+
+    def outdoor_ok(self, day: str, slot: str = "MAIN") -> bool:
+        w = self._weather_for(day)
         if not w:
             return True
         if slot == "AM":
             rain, temp = w.get("rain_morning_mm", 0), w.get("temp_morning", w.get("temp_min"))
+            sky = w.get("weathercode_morning") or ""
         else:
             rain, temp = w.get("rain_afternoon_mm", w.get("rain_mm", 0)), w.get("temp_afternoon", w.get("temp_max"))
-        return (rain or 0) < 5 and (temp is None or temp >= 2)
+            sky = w.get("weathercode") or ""
+        if (rain or 0) >= _OUTDOOR_MAX_RAIN_MM or "snow" in sky or "sleet" in sky:
+            return False
+        if temp is not None and temp < OUTDOOR_MIN_TEMP_C:
+            return False
+        frost = w.get("temp_min")
+        return not (slot == "AM" and frost is not None and frost <= 0)  # icy roads after a frosty night
 
     def outdoor_slot(self, day: str) -> str | None:
         if self.outdoor_ok(day, "MAIN"):
@@ -659,7 +680,8 @@ class _Planner:
         if "WeightTraining" in self.sports and n_strength > 0:
             program = self.strength_program(target)
             heavy = {day.date for items in planned.values() for day, role in items if role in ("key", "long")}
-            strength_dates: list[date] = []
+            # Across weeks too: a Sunday session and a Monday session are only one day apart.
+            strength_dates = self._strength_dates
             preference = {"easy": 0, "open": 1, "rest_or_easy": 2}
             candidates = sorted(
                 (d for d in free if role_of[d] in preference and d not in inp.restricted_dates

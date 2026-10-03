@@ -55,10 +55,12 @@ def fetch_all_planned_events(days_back=28, days_forward=0):
         "newest": (date.today() + timedelta(days=days_forward)).isoformat(),
     })
 
-def fetch_calendar_context(days_back=60, days_ahead=35):
-    """Annual training plan (PLAN/TARGET/ATP notes) and SICK/INJURED/HOLIDAY events around today.
+def fetch_calendar_context(days_back=180, days_ahead=35):
+    """Annual training plan (PLAN/TARGET/ATP notes), SICK/INJURED/HOLIDAY events and
+    "Bara:"/"Ej:" sport limits around today.
 
-    Looks back as well, so phase blocks and absences that started earlier are included.
+    Looks back as well, so phase blocks, absences and long limits that started earlier
+    (e.g. "Ej: utomhuscykel" for the whole winter) are included.
     """
     evts = icu_get(f"/athlete/{ATHLETE_ID}/events", {
         "oldest": (date.today() - timedelta(days=days_back)).isoformat(),

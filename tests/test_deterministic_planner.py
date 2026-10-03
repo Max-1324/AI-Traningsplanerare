@@ -226,6 +226,20 @@ class TestPlannerScenarios(unittest.TestCase):
                     inp, injury_note=note or "", time_text=f"{minutes}m" if minutes is not None else "")
                 self.assertClean(changes, validation)
 
+    def test_strength_sessions_keep_their_gap_across_the_week_boundary(self):
+        # Found on a Saturday: a weekend strength session in a deload week and a Monday one
+        # (sick Tuesday-Wednesday) were one day apart, and validation blocked the whole plan.
+        sick = {"2026-10-13", "2026-10-14"}
+        for today in (date(2026, 10, 10), date(2026, 10, 11)):
+            for wib in (1, 2, 3, 4):
+                inp = _inputs(today=today, week_in_block=wib, unavailable_dates=sick)
+                with self.subTest(today=today.isoformat(), week_in_block=wib):
+                    result, plan, changes, validation = _run(inp)
+                    self.assertClean(changes, validation)
+                    strength = sorted(date.fromisoformat(d.date) for d in plan.days
+                                      if d.intervals_type == "WeightTraining")
+                    self.assertTrue(all((b - a).days >= 2 for a, b in zip(strength, strength[1:])), strength)
+
 
 if __name__ == "__main__":
     unittest.main()
