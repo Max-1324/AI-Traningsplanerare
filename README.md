@@ -93,7 +93,9 @@ med `time_available=`, `injury=` och `athlete_note=`.
   och `styrka` känns igen.
 
 ### Flera idrotter
-Utan per-sport-mål i årsplanen fördelar planeraren veckan själv (`engine/sport_mix.py`):
+Utan per-sport-mål i årsplanen fördelar planeraren veckan själv (`engine/sport_mix.py`). Plan builder kräver en
+sport per mål: lägg in hela veckans tid på en sport, t.ex. cykel, och sätt `ATP_TOTAL_SPORT=Ride` så räknas den
+som total tid för alla idrotter.
 
 - **Utan mål:** cykel cirka 60 %, löpning 25 % och skidor 15 % (`BASE_MIX`). Cykel bär volymen med lägst skaderisk.
 - **Med mål:** närmaste A-tävling (annars B) med angiven sport tar gradvis över, upp till 65 % (`FOCUS_SHARE`) från
@@ -165,6 +167,7 @@ annan nivå. Puls under passen (t.ex. från ett pulsband) påverkas inte.
 | `KEY_SESSIONS_PER_WEEK` | *(anpassas)* | Tak för antalet hårda pass per vecka (0–3). Utan värde avgör din återhämtning: normalt 2, ibland 1 eller 3 |
 | `STRENGTH_PER_WEEK` | *(2 i bas, 1 mot mål)* | Styrkepass per vecka när årsplanen saknar styrkemål |
 | `STRENGTH_STYLE` | `bodyweight` | `heavy` ger tung styrka på gym |
+| `ATP_TOTAL_SPORT` | – | Plan builder kräver en sport per mål. Mål för den här sporten (t.ex. `Ride`) räknas som total tid för alla idrotter, och planeraren fördelar den |
 | `BASE_MIX` | `cycling:0.6,Run:0.25,ski:0.15` | Sportfördelning utan mål (när årsplanen bara har totaltid) |
 | `FOCUS_SHARE`, `FOCUS_RAMP_START`, `FOCUS_RAMP_END` | `0.65`, `20`, `8` | Målsportens andel och när den ökar (veckor före loppet) |
 | `SPORT_MIN_SESSIONS` | `Run:2,cycling:2,ski:1` | Minsta antal pass per sport och vecka |

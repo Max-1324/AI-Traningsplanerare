@@ -15,6 +15,7 @@ ignored here, so they never feed back as if the athlete had set them.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta
 
 from training_plan.core.catalogs import CONSTRAINT_PREFIXES
@@ -30,6 +31,9 @@ _DEFAULT_AVAILABILITY = {"SICK": "UNAVAILABLE", "INJURED": "NORMAL", "HOLIDAY": 
 STRENGTH_TYPES = {"WeightTraining", "Other"}
 STRENGTH_SESSION_MIN = 30
 MAX_STRENGTH_PER_WEEK = 3
+# The plan builder needs a sport on every target. A target of this type is read as the week's
+# total time for all sports, and the planner splits it (engine/sport_mix.py). Empty = off.
+ATP_TOTAL_SPORT = os.getenv("ATP_TOTAL_SPORT", "").strip()
 _RECOVERY_WORDS = ("recovery", "rest week", "deload", "återhämtning", "vila", "erholung", "récupération")
 
 
@@ -108,7 +112,7 @@ def atp_weeks(events: list[dict]) -> dict[str, dict]:
                 "total": None, "sports": {}, "phase": phase, "recovery": recovery, "name": e.get("name") or "",
             }
         sport = e.get("type")
-        if sport:
+        if sport and sport != ATP_TOTAL_SPORT:
             week["sports"][sport] = entry
         else:
             week["total"] = entry

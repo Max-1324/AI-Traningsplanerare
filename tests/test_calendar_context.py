@@ -245,3 +245,16 @@ class TestWeekTargetSync(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAtpTotalSport(unittest.TestCase):
+    def test_target_of_the_total_sport_counts_as_all_sports(self):
+        from unittest import mock
+        import training_plan.engine.calendar_context as cc
+        events = [{"category": "TARGET", "type": "Ride", "time_target": 8 * 3600,
+                   "start_date_local": "2026-10-05T00:00:00"}]
+        with mock.patch.object(cc, "ATP_TOTAL_SPORT", "Ride"):
+            week = cc.atp_weeks(events)["2026-10-05"]
+        self.assertEqual(week["sports"], {})
+        self.assertEqual(week["total"]["time"], 8 * 3600)
+        self.assertEqual(cc.sport_split(week, 55), {})   # the planner decides the split
