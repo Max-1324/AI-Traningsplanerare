@@ -237,6 +237,12 @@ def main(argv=None):
 
     yesterday_actuals = fetch_yesterday_actual(activities_clean)
 
+    # A planned FTP test that was done yesterday: remember the date (activity names from the
+    # trainer app often do not say "ftp", so the history search alone misses it).
+    if (yesterday_planned and yesterday_actuals and is_ai_generated(yesterday_planned)
+            and "ftp" in (yesterday_planned.get("name") or "").lower()):
+        state["last_ftp_test"] = (date.today() - timedelta(days=1)).isoformat()
+
     # --- PROGRESSION CHECK + AUTOREGULERING ---------------------------------
     check_and_advance_workout_progression(yesterday_planned, yesterday_actuals, state)
     # Bygg rådata för autoregulering (dubbel-avancering om exceptionell prestation)

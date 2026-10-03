@@ -125,6 +125,7 @@ def save_event(day: PlanDay):
 
 # Zon → % av tröskeleffekt (cykling) / % av tröskelpuls (löpning, rullskidor, m.fl.)
 _ZONE_POWER_PCT   = {"Z1": 55, "Z2": 68, "Z3": 83, "Z4": 100, "Z5": 112, "Z6": 130, "Z7": 150}
+RAMP_TEST_START_PCT, RAMP_TEST_END_PCT = 50, 140
 _ZONE_STEP_LABELS = {"Z1": "Recovery", "Z2": "Aerobic", "Z3": "Sweet spot",
                      "Z4": "Threshold", "Z5": "VO2max", "Z6": "Anaerobic", "Z7": "Sprint"}
 
@@ -181,6 +182,10 @@ def build_workout_step_text(steps: list[WorkoutStep], sport: str) -> str:
 
     # Mittensteg – lista varje steg individuellt (Nx-syntax stöds ej av intervals.icu)
     for s in steps[start:end]:
+        if use_power and s.description.lower().startswith("ramp"):
+            # An FTP ramp test: power rises steadily (about +6 % FTP a minute) until you stop.
+            lines.append(f"- {s.duration_min}m ramp {RAMP_TEST_START_PCT}-{RAMP_TEST_END_PCT}% Ramp test")
+            continue
         label = _ZONE_STEP_LABELS.get(s.zone.upper(), "")
         lines.append(f"- {s.duration_min}m {pct(s.zone)} {label}".rstrip())
 

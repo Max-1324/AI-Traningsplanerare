@@ -80,5 +80,14 @@ class TestReadOnlyState(unittest.TestCase):
             state_file.with_suffix.assert_not_called()
 
 
+class TestFtpRampTest(unittest.TestCase):
+    def test_ramp_test_is_exported_as_a_ramp(self):
+        from training_plan.engine.planner import ftp_test_session
+        from training_plan.integrations.intervals_events import build_workout_step_text
+        text = build_workout_step_text(ftp_test_session("2026-10-06", "VirtualRide").workout_steps, "VirtualRide")
+        self.assertIn("ramp 50-140%", text)
+        self.assertNotIn("15m 112%", text)
+
+
 if __name__ == "__main__":
     unittest.main()

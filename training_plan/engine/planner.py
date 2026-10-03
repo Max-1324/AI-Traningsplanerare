@@ -197,7 +197,7 @@ def generic_key_session(day_str: str, wk_key: str, sport: str, *, slot: str = "M
 def ftp_test_session(day_str: str, sport: str, *, slot: str = "MAIN") -> PlanDay:
     steps = _steps([
         (10, "Z1", "Warm-up – easy"), (5, "Z2", "Build gradually"), (2, "Z4", "Opener"),
-        (3, "Z1", "Easy"), (15, "Z5", "Ramp: +20 W/min from ~50% FTP until exhaustion"),
+        (3, "Z1", "Easy"), (15, "Z5", "Ramp: power rises ~6% FTP a minute from 50% – ride until you cannot hold it"),
         (10, "Z1", "Cool-down"),
     ])
     return PlanDay(date=day_str, title="FTP ramp test", intervals_type=sport, duration_min=45,
@@ -839,7 +839,8 @@ class _Planner:
         for d in [d for d in free if role_of[d] == "intensity"]:
             session = None
             if inp.ftp_test_due and not self._ftp_planned and self.cycling_primary():
-                sport = self.key_sport(d, None)
+                # A ramp test needs a power meter: only on the indoor trainer.
+                sport = "VirtualRide" if self.allowed("VirtualRide", d) else None
                 if sport:
                     session = ftp_test_session(d, sport, slot=self.outdoor_slot(d) or "MAIN" if sport == "Ride" else "MAIN")
                     self._ftp_planned = True
