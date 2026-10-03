@@ -22,7 +22,18 @@ def load_state() -> dict:
         log.warning("State file %s did not match schema: %s. Using defaults.", STATE_FILE, exc)
         return AppState().model_dump()
 
+_READ_ONLY = False
+
+
+def set_read_only(read_only: bool) -> None:
+    """In read-only mode (e.g. --dry-run) save_state does nothing."""
+    global _READ_ONLY
+    _READ_ONLY = read_only
+
+
 def save_state(state: dict):
+    if _READ_ONLY:
+        return
     tmp_state = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
     tmp_state.write_text(json.dumps(state, indent=2, ensure_ascii=False))
     tmp_state.replace(STATE_FILE)

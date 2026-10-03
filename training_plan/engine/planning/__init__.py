@@ -6,6 +6,7 @@ from training_plan.engine.planning.state import (
     is_ai_generated,
     load_state,
     save_state,
+    set_read_only,
     update_failure_memory,
 )
 from training_plan.engine.planning.metrics import (
@@ -36,6 +37,8 @@ from training_plan.engine.planning.workouts import (
     get_strength_workout_for_phase,
     pre_race_logistics_advice,
     recommend_prehab,
+    reduce_levels_after_break,
+    workout_key_for,
 )
 
 __all__ = [name for name in globals() if not name.startswith("_")]

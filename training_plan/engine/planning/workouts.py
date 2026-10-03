@@ -1,6 +1,7 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning.learning import WORKOUT_LIBRARY
+from training_plan.engine.calendar_context import sport_group
 from training_plan.engine.planning.state import is_ai_generated, load_state, save_state
 
 def recommend_prehab(injury_note: str, dominant_sport: str) -> dict:
@@ -113,19 +114,16 @@ def build_progression_directive(levels: dict, phase: str) -> str:
     return "\n".join(lines)
 
 
-def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yesterday_actuals: list, state: dict):
-    """
-    Kollar om gårdagens pass var ett lyckat bibliotekspass och avancerar i så fall nivån.
-    Ett pass är "lyckat" om det genomfördes med RPE <= 7 och låg/bra känsla (feel <= 3).
-    """
-    if not yesterday_planned or not yesterday_actuals or not is_ai_generated(yesterday_planned):
-        return
+def workout_key_for(planned_name: str, planned_dur: int = 0) -> Optional[str]:
+    """The library workout a planned session came from.
 
-    actual = yesterday_actuals[0]
-    planned_name = (yesterday_planned.get("name") or "").lower()
-    planned_dur = round((yesterday_planned.get("moving_time", 0) or 0) / 60)
-
-    # Försök hitta vilken pass-nyckel från biblioteket som användes
+    Planner sessions are titled "<library name> – <level>", so the name decides. Older or
+    AI-written titles fall back to an "NxM" interval structure, or the duration of a long ride.
+    """
+    name = (planned_name or "").lower()
+    for key, wk_def in sorted(WORKOUT_LIBRARY.items(), key=lambda kv: -len(kv[1]["name"])):
+        if name.startswith(wk_def["name"].lower()):
+            return key
     wk_key = None
     for key, wk_def in WORKOUT_LIBRARY.items():
         for lvl in wk_def["levels"]:
@@ -144,20 +142,71 @@ def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yes
                     break
         if wk_key:
             break
+    return wk_key
 
+
+def check_and_advance_workout_progression(yesterday_planned: Optional[dict], yesterday_actuals: list, state: dict):
+    """Move yesterday's library session one level up or down, once per session.
+
+    - Up when it was done and felt controlled: RPE <= 7 and/or feel <= 3 (whatever was logged).
+    - Down when it was too hard: RPE >= 9 or feel >= 4.
+    - Unchanged without RPE or feel: no logged response, no change (a completed session
+      alone says nothing about how hard it was).
+    The activity must be in the same sport as the planned session, and a session is judged
+    only once even when the planner runs several times a day.
+    """
+    if not yesterday_planned or not yesterday_actuals or not is_ai_generated(yesterday_planned):
+        return
+    session_id = f"{(yesterday_planned.get('start_date_local') or '')[:10]}|{yesterday_planned.get('name') or ''}"
+    if state.get("progression_checked") == session_id:
+        return
+    planned_type = yesterday_planned.get("type") or ""
+    actual = next((a for a in yesterday_actuals
+                   if sport_group(a.get("type")) == sport_group(planned_type)), None) if planned_type else yesterday_actuals[0]
+    if actual is None:
+        return
+    wk_key = workout_key_for(yesterday_planned.get("name") or "",
+                             round((yesterday_planned.get("moving_time", 0) or 0) / 60))
     if not wk_key:
         return # Inget bibliotekspass hittades
+    state["progression_checked"] = session_id
 
     rpe = actual.get("perceived_exertion")
     feel = actual.get("feel")
-
-    is_mastered = (rpe is None and feel is None) or (rpe is not None and rpe <= 7 and feel is not None and feel <= 3)
-
-    if is_mastered:
+    if rpe is None and feel is None:
+        log.info(f"ℹ️ Session '{wk_key}' done without RPE/feel – level unchanged.")
+        return
+    too_hard = (rpe is not None and rpe >= 9) or (feel is not None and feel >= 4)
+    controlled = (rpe is None or rpe <= 7) and (feel is None or feel <= 3)
+    if too_hard:
+        log.info(f"🔻 Session '{wk_key}' was too hard (RPE: {rpe}, Feel: {feel}). One level down.")
+        change_workout_level(wk_key, state, -1)
+    elif controlled:
         log.info(f"✅ Session '{wk_key}' mastered (RPE: {rpe or 'N/A'}, Feel: {feel or 'N/A'}).")
         advance_workout_level(wk_key, state) # Denna funktion sparar state
-    elif rpe is not None or feel is not None:
+    else:
         log.info(f"🟡 Session '{wk_key}' completed but not mastered (RPE: {rpe}, Feel: {feel}). Not advancing.")
+
+
+def change_workout_level(wk_key: str, state: dict, step: int):
+    levels = state.get("workout_levels", {})
+    max_level = len(WORKOUT_LIBRARY.get(wk_key, {}).get("levels", []))
+    new = max(1, min(levels.get(wk_key, 1) + step, max_level))
+    if new != levels.get(wk_key, 1):
+        levels[wk_key] = new
+        state["workout_levels"] = levels
+        save_state(state)
+        log.info(f"Workout library: {wk_key} → level {new}")
+
+
+def reduce_levels_after_break(state: dict, break_id: str):
+    """One level down for every workout after a break (illness, travel): once per break."""
+    if not state.get("workout_levels") or state.get("levels_reduced_for") == break_id:
+        return
+    state["workout_levels"] = {k: max(1, v - 1) for k, v in state["workout_levels"].items()}
+    state["levels_reduced_for"] = break_id
+    save_state(state)
+    log.info("📉 Workout levels lowered one step after the break.")
 
 
 def advance_workout_level(wk_key: str, state: dict):
@@ -188,11 +237,15 @@ def autoregulate_from_yesterday(yesterday_raw: dict, state: dict) -> list:
     wk_key = yesterday_raw.get("workout_key")
     missed = yesterday_raw.get("missed", False)
 
-    if rpe is not None and feel is not None and rpe <= 5 and feel <= 2 and wk_key:
+    session_id = yesterday_raw.get("session_id")
+    if (rpe is not None and feel is not None and rpe <= 5 and feel <= 2 and wk_key
+            and state.get("autoregulated") != session_id):
+        state["autoregulated"] = session_id
         levels = state.get("workout_levels", {})
         current = levels.get(wk_key, 1)
         max_level = len(WORKOUT_LIBRARY.get(wk_key, {}).get("levels", []))
-        steps = min(2, max_level - current)  # avancera max 2 steg, max till sista nivå
+        # One extra level on top of the normal one: +2 in total for an exceptionally easy session.
+        steps = min(1, max_level - current)
         if steps > 0:
             levels[wk_key] = current + steps
             state["workout_levels"] = levels

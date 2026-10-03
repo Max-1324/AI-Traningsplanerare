@@ -39,10 +39,13 @@ from training_plan.engine.planning import (
     pre_race_logistics_advice,
     race_demands_analysis,
     recommend_prehab,
+    reduce_levels_after_break,
     save_state,
+    set_read_only,
     session_quality_analysis,
     update_failure_memory,
     update_learned_patterns,
+    workout_key_for,
 )
 from training_plan.engine.analysis import (
     acwr_trend_analysis,
@@ -167,6 +170,8 @@ def main(argv=None):
 
     args = parse_args(argv)
     common.args = args
+    # --dry-run shows the plan without saving anything, the coach state included.
+    set_read_only(bool(args.dry_run))
     ensure_required_config()
     log.info("Fetching data from intervals.icu...")
     try:
@@ -244,18 +249,11 @@ def main(argv=None):
             "sport":  a0.get("type", ""),
             "missed": False,
         }
-        # Försök matcha mot ett pass i biblioteket
-        planned_name = (yesterday_planned.get("name","") if yesterday_planned else "").lower()
-        for wk_key_c, wk_def_c in WORKOUT_LIBRARY.items():
-            for lvl_c in wk_def_c["levels"]:
-                kp = re.findall(r"(\d+)\s*[x×]\s*(\d+)", lvl_c["label"].lower())
-                if kp:
-                    r_, m_ = kp[0]
-                    if re.search(rf"{r_}\s*[x×]\s*{m_}", planned_name):
-                        yesterday_raw["workout_key"] = wk_key_c
-                        break
-            if "workout_key" in yesterday_raw:
-                break
+        # Matcha mot ett pass i biblioteket
+        if yesterday_planned:
+            yesterday_raw["workout_key"] = workout_key_for(yesterday_planned.get("name", ""))
+            yesterday_raw["session_id"] = (f"{(yesterday_planned.get('start_date_local') or '')[:10]}|"
+                                           f"{yesterday_planned.get('name') or ''}")
     elif yesterday_planned and is_ai_generated(yesterday_planned):
         yesterday_raw = {"missed": True}
     auto_signals = autoregulate_from_yesterday(yesterday_raw, state)
@@ -283,6 +281,8 @@ def main(argv=None):
     rtp_status = check_return_to_play(activities, date.today())
     if rtp_status.get("is_active"):
         log.info(f"🚑 Return to Play protocol active ({rtp_status['days_off']} rest days in a row)")
+        break_start = (date.today() - timedelta(days=rtp_status.get("days_off", 0))).isoformat()
+        reduce_levels_after_break(state, break_start)
 
     mesocycle = determine_mesocycle(fitness, activities_clean, state)
     save_state(state)
@@ -904,6 +904,7 @@ def main(argv=None):
         print(f"Validation: {len(changes)} changes made by post-processing.")
         ans = input("Do you want to save anyway? (y/n) [n]: ").strip().lower()
         if ans not in ("y","yes"): return
+        set_read_only(False)
 
     now_local = _stockholm_now_naive()
 
