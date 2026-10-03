@@ -181,7 +181,8 @@ def build_week_targets(
             note = mesocycle.get("deload_reason", "") if index == 0 else "planned deload"
         else:
             kind = "build"
-            ramp = base_ramp * _RAMP_BY_WEEK_IN_BLOCK.get(week_in_block, 1.0)
+            # The cap applies after the block's week factor, so week 3 never exceeds RAMP_CTL_MAX.
+            ramp = min(base_ramp * _RAMP_BY_WEEK_IN_BLOCK.get(week_in_block, 1.0), RAMP_CTL_MAX)
             ramp = min(ramp, max(target_ctl - ctl, 0.0))  # never plan past TARGET_CTL
             if index == 0 and fatigued:
                 ramp = 0.0
@@ -192,10 +193,11 @@ def build_week_targets(
         factors = [_day_factor(week_start + timedelta(days=d), race_days) for d in range(7)]
         reasons = [reason for _, reason in factors if reason]
         if reasons:
-            race_in_week = any(r.startswith("race") for r in reasons)
+            # Only A and B races make the whole week a race week; a C race is trained through.
+            race_in_week = any(r.startswith("race") and not r.endswith("(C)") for r in reasons)
             if race_in_week:
                 kind, max_key = "race", 0
-            elif len(reasons) >= 3 and kind != "deload":
+            elif len([r for r in reasons if not r.endswith("(C)")]) >= 3 and kind != "deload":
                 kind, max_key = "taper", min(max_key, 1)
             note = "; ".join(dict.fromkeys(reasons))
         tss = round(daily * sum(f for f, _ in factors))

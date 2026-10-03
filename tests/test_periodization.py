@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 from training_plan.engine.periodization import build_week_targets, done_tss_this_week
 from training_plan.engine.utils import is_race_event, race_priority
@@ -70,3 +70,49 @@ class TestRacePriority(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRacePriority(unittest.TestCase):
+    """C races are trained through; only A races steer phase, taper and the CTL trajectory."""
+    TODAY = date(2026, 10, 5)
+
+    def _race(self, days, priority, sport="Run", name="Lopp"):
+        return {"name": name, "category": f"RACE_{priority}", "type": sport,
+                "start_date_local": (self.TODAY + timedelta(days=days)).isoformat() + "T09:00:00"}
+
+    def test_c_race_gets_no_race_week_protocol(self):
+        from training_plan.engine.analysis.strategy import race_week_protocol
+        protocol = race_week_protocol([self._race(5, "C")], self.TODAY)["protocol"]
+        self.assertEqual([p["days_before"] for p in protocol], [0])
+
+    def test_b_race_gets_the_last_two_days_and_a_race_the_full_week(self):
+        from training_plan.engine.analysis.strategy import race_week_protocol
+        b = race_week_protocol([self._race(5, "B")], self.TODAY)["protocol"]
+        a = race_week_protocol([self._race(6, "A")], self.TODAY)["protocol"]
+        self.assertEqual(sorted(p["days_before"] for p in b), [0, 1, 2])
+        self.assertEqual(len(a), 7)
+
+    def test_taper_session_uses_the_race_sport(self):
+        from training_plan.engine.analysis.strategy import race_week_protocol
+        protocol = race_week_protocol([self._race(3, "A", sport="Run")], self.TODAY, dominant_sport="Ride")
+        self.assertTrue(all(p["type"] in ("Run", "Rest") for p in protocol["protocol"] if p["days_before"]))
+
+    def test_c_race_sets_no_phase_and_no_trajectory(self):
+        from training_plan.engine.analysis.strategy import training_phase
+        from training_plan.integrations.intervals_client import get_taper_config
+        races = [self._race(20, "C")]
+        self.assertEqual(training_phase(races, self.TODAY)["phase"], "Base")
+        self.assertIsNone(get_taper_config(races, self.TODAY)["race_date"])
+
+    def test_c_race_week_stays_a_build_week(self):
+        targets = build_week_targets(50, {"week_in_block": 1}, self.TODAY, races=[self._race(5, "C")])
+        self.assertEqual(targets[0].kind, "build")
+        self.assertGreater(targets[0].max_key_sessions, 0)
+
+    def test_ramp_never_exceeds_the_cap(self):
+        trajectory = {"has_target": True, "ramp_per_week": 9.0}
+        targets = build_week_targets(30, {"week_in_block": 1}, self.TODAY, trajectory=trajectory)
+        self.assertLessEqual(max(t.ramp for t in targets), 6.0)
+
+    def test_prefix_decides_priority_only_at_the_start_of_the_name(self):
+        self.assertEqual(race_priority({"category": "RACE", "name": "Klubb: tempo"}), "A")

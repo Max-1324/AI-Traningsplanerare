@@ -79,7 +79,7 @@ def fetch_races(days_ahead=180):
         return []
 
 def get_taper_config(races: list, today: date) -> dict:
-    """Hittar nästa tävling och bestämmer taper-längd baserat på prioritet i namnet (A/B/C)."""
+    """Nästa A-tävling och dess taper-längd. B/C-lopp styr inte CTL-trajektorian (de tränas igenom)."""
     future_races = []
     for race in races:
         start_date = (race.get("start_date_local") or "")[:10]
@@ -88,7 +88,7 @@ def get_taper_config(races: list, today: date) -> dict:
         except ValueError:
             log.warning("Skipping race with invalid start_date_local: %s", race.get("start_date_local"))
             continue
-        if race_date >= today:
+        if race_date >= today and race_priority(race) == "A":
             future_races.append(race)
     future_races.sort(key=lambda r: r.get("start_date_local", ""))
     if not future_races:

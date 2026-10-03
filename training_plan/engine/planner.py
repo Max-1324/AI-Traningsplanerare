@@ -814,7 +814,12 @@ class _Planner:
         protocol = {p["date"]: p for p in (inp.race_week or {}).get("protocol", [])} if (inp.race_week or {}).get("is_active") else {}
         for d in list(free):
             if d in protocol:
-                day = protocol_day(protocol[d], lambda s, _d=d: self.allowed(s, _d))
+                entry = dict(protocol[d])
+                sport = entry.get("type") or "Rest"
+                if sport != "Rest" and not self.allowed(sport, d):
+                    # e.g. skis without snow: the same taper session in the closest available sport
+                    entry["type"] = next((s for s in SUBSTITUTES.get(sport, []) if self.allowed(s, d)), sport)
+                day = protocol_day(entry, lambda s, _d=d: self.allowed(s, _d))
                 if day.duration_min > cap_for(d, 10_000):
                     cap = cap_for(d, 10_000)
                     day = (endurance_session(d, day.intervals_type, cap, slot=day.slot)

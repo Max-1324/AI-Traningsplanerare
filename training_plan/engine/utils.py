@@ -81,10 +81,10 @@ def race_priority(race: dict) -> str:
     category = (race.get("category") or "").upper()
     if category in ("RACE_A", "RACE_B", "RACE_C"):
         return category[-1]
-    name = (race.get("name") or "").lower()
-    if "c:" in name:
+    name = (race.get("name") or "").strip().lower()
+    if name.startswith("c:"):
         return "C"
-    if "b:" in name:
+    if name.startswith("b:"):
         return "B"
     return "A"
 

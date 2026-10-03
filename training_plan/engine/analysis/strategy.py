@@ -1,6 +1,7 @@
 from training_plan.core.common import *
 from training_plan.engine.libraries import *
 from training_plan.engine.planning import *
+from training_plan.engine.utils import race_priority, race_sport
 
 def development_needs_analysis(phase: dict, readiness: dict, motivation: dict,
                                compliance: dict, ftp_check: dict,
@@ -190,16 +191,18 @@ def update_block_objective(state: dict, mesocycle: dict, phase: dict,
     return objective
 
 def training_phase(races, today):
+    """Training phase from the next A race (B and C races do not change the phase)."""
     future = sorted([r for r in races if datetime.strptime(
-        r.get("start_date_local", r.get("date","2099-01-01"))[:10], "%Y-%m-%d").date() >= today],
+        r.get("start_date_local", r.get("date","2099-01-01"))[:10], "%Y-%m-%d").date() >= today
+        and race_priority(r) == "A"],
         key=lambda r: r.get("start_date_local",""))
     if not future: return {"phase": "Base", "rule": "Base training: 1-2 interval sessions/week (Z4-Z5), 1 tempo session (Z3), rest Z2. Avoid intervals ONLY if HRV=LOW or TSB < -20."}
     nr = future[0]
     dt = (datetime.strptime(nr["start_date_local"][:10], "%Y-%m-%d").date() - today).days
     nm = nr.get("name","Race")
     if dt < 7:  return {"phase": "Race Week", "rule": f"{nm} in {dt}d. Activation."}
-    if dt < 28: return {"phase": "Taper",     "rule": f"{nm} in {dt}d. -30% volume, maintain intensity."}
-    if dt < 84: return {"phase": "Build",     "rule": f"{nm} in {dt}d. Build intensity."}
+    if dt < 14: return {"phase": "Taper",     "rule": f"{nm} in {dt}d. Volume down ~40-60%, keep intensity."}
+    if dt < 84: return {"phase": "Build",     "rule": f"{nm} in {dt}d. Build race-specific intensity."}
     return {"phase": "Base", "rule": f"{nm} in {dt}d. Base training: 1-2 interval sessions/week (Z4-Z5), 1 tempo session (Z3), rest Z2."}
 
 
@@ -230,7 +233,14 @@ def race_week_protocol(races: list, today: date, dominant_sport: str = "") -> di
     if not future:
         return {"is_active": False, "protocol": [], "race_name": None}
 
-    race = future[0]
+    # A races get the full week, B races the last two days, C races only the race day itself
+    # (trained through, Friel's A/B/C system). An A race later in the week wins over a C race.
+    def _days_kept(r):
+        return {"A": 7, "B": 2}.get(race_priority(r), 0)
+    race = next((r for r in future
+                 if (datetime.strptime(r["start_date_local"][:10], "%Y-%m-%d").date() - today).days
+                 <= max(_days_kept(r), 1)), future[0])
+    kept_days = _days_kept(race)
     race_date = datetime.strptime(race["start_date_local"][:10], "%Y-%m-%d").date()
     days_to_race = (race_date - today).days
     race_name = race.get("name", "Race")
@@ -248,8 +258,10 @@ def race_week_protocol(races: list, today: date, dominant_sport: str = "") -> di
         "Swim":      "Swim",
     }
     _sport_types = {s["intervals_type"] for s in SPORTS}
-    _ds = dominant_sport or (SPORTS[0]["intervals_type"] if SPORTS else "VirtualRide")
-    _prerace_sport = _indoor_map.get(_ds, _ds)
+    # The race's own sport first: the taper applies to the race sport (a Klassiker athlete
+    # keeps the other sports going).
+    _ds = race_sport(race, _sport_types) or dominant_sport or (SPORTS[0]["intervals_type"] if SPORTS else "VirtualRide")
+    _prerace_sport = _ds if _ds in ("NordicSki", "RollerSki", "Run", "Swim") else _indoor_map.get(_ds, _ds)
     # Fall back to VirtualRide if chosen sport isn't available
     if _prerace_sport not in _sport_types:
         _prerace_sport = next(
@@ -336,7 +348,7 @@ def race_week_protocol(races: list, today: date, dominant_sport: str = "") -> di
 
     for d_before, template in day_templates.items():
         target_date = race_date - timedelta(days=d_before)
-        if target_date >= today:
+        if target_date >= today and d_before <= kept_days:
             protocol.append({
                 "date":       target_date.isoformat(),
                 "days_before": d_before,
