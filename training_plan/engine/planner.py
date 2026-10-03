@@ -1085,11 +1085,12 @@ class _Planner:
                     continue
                 hi = min(caps[d], _MAX_FILL_MIN.get(sport, 90), minutes + self.budget_left(sport),
                          self.session_cap(sport))
-                if minutes + 15 <= hi:
-                    plan[d] = (sport, minutes + 15, slot)
-                    reserve(sport, 15, new_session=False)
+                step = min(15, int(hi - minutes) // 5 * 5)   # up to the day's cap, in 5-min steps
+                if step >= 5:
+                    plan[d] = (sport, minutes + step, slot)
+                    reserve(sport, step, new_session=False)
                     if sport_group(sport) in need:
-                        need[sport_group(sport)] -= _endurance_tss(sport, minutes + 15) - _endurance_tss(sport, minutes)
+                        need[sport_group(sport)] -= _endurance_tss(sport, minutes + step) - _endurance_tss(sport, minutes)
                     grown = True
                     break
             if not grown:
