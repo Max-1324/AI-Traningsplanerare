@@ -274,6 +274,7 @@ class PlannerInputs:
     sport_budgets: dict = field(default_factory=dict)
     avoid_sports: set = field(default_factory=set)
     restricted_dates: set = field(default_factory=set)
+    no_intensity_dates: set = field(default_factory=set)   # easy only, normal duration (HRV slightly low)
     restriction_reason: str = ""
     time_available_today: int | None = None
     race_week: dict | None = None
@@ -1153,7 +1154,7 @@ class _Planner:
             locked_dates=set(inp.locked_dates) | set(inp.unavailable_dates),
             rtp_status=None,
             week_targets=inp.week_targets,
-            restricted_dates=set(inp.restricted_dates),
+            restricted_dates=set(inp.restricted_dates) | set(inp.no_intensity_dates),
             intensity_done_by_week=intensity_done,
             yesterday_was_hard=inp.yesterday_was_hard,
         )

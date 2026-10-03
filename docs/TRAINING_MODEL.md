@@ -70,19 +70,23 @@ planerar aldrig förbi `TARGET_CTL`. Sänk `TARGET_CTL` om 85 är högt för dig
 
 ### ACWR (acute:chronic workload ratio)
 Den är vetenskapligt ifrågasatt. Kritiken gäller matematisk koppling mellan täljare och nämnare och svag
-prediktiv förmåga för skador. Behåll den som *information* men inte som hårt veto. För skadebenägna sporter
-(löpning) är en enkel **veckoprogression per sport** (till exempel max +10 % tid per vecka) både enklare och
-bättre förankrad.
+prediktiv förmåga för skador (Impellizzeri m.fl. 2020). Den visas bara som *information*. För löpning används
+i stället två enkla regler: en **veckobudget** som växer cirka 10 % från faktisk volym (stödet för just 10 % är
+svagt, Buist m.fl. 2008) och ett **passtak** på 1,1 × längsta löppasset de senaste 30 dagarna. Det senare har
+bäst stöd: enskilda pass som var mycket längre än det längsta senaste månaden ökade skaderisken, medan
+förändring vecka för vecka inte gjorde det (Frandsen m.fl. 2025, BJSM).
 
 ### HRV-styrd träning
-Den har bra stöd: HRV-styrd planering ger minst lika bra, ofta bättre, anpassning än en förutbestämd plan.
+Den har måttligt stöd: HRV-styrd planering ger minst lika bra anpassning som en förutbestämd plan, med små
+fördelar och färre som inte svarar på träningen (Granero-Gallegos m.fl. 2020, Düking m.fl. 2021).
 Gör det enligt etablerad metodik:
 - använd **ln(rMSSD)**, inte råa millisekunder;
 - jämför ett **7-dagars rullande snitt** med en **60-dagars baslinje** (utan de senaste 7 dagarna);
 - definiera "normalt" som baslinje ± **SWC** (smallest worthwhile change, cirka 0,5 × SD);
 - följ även **CV** för ln(rMSSD) över 7 dagar, eftersom ökande variation är en tidig varningssignal.
 
-`calculate_hrv` gör nu så (LOW under −2·SWC för 7-dagarssnittet). Tidigare användes råa %-trösklar mot en baslinje som innehöll de senaste dagarna, och de används fortfarande som reserv när historiken är kortare än 14 dagar.
+`calculate_hrv` gör så. Under −1·SWC (SLIGHTLY_LOW, som i studiernas protokoll) blir idag och imorgon lugna utan
+att passen kortas; under −2·SWC (LOW) blir de också kortare och veckan får bara ett hårt pass. CV räknas på ln. Tidigare användes råa %-trösklar mot en baslinje som innehöll de senaste dagarna, och de används fortfarande som reserv när historiken är kortare än 14 dagar.
 
 **Saknade mätningar.** 7-dagarssnittet räknas på kalenderdagar och kräver minst 3 mätningar den senaste veckan.
 Saknas de (ingen eller trasig klocka) antas HRV vara normal (`measured: False`) i stället för att gamla värden
@@ -91,19 +95,21 @@ nivå. Readiness gör likadant: sömn räknas bara från senaste natten, vilopul
 mäts räknas som normalt (70/100) och listas inte som begränsning.
 
 ### Intensitetsfördelning
-Pyramidal fördelning (mest Z1–Z2, en del Z3, lite Z4+) eller polariserad (cirka 80/20) är väl underbyggd för
-uthållighetsidrottare. Den bör vara en **begränsning i veckoskelettet** (antal nyckelpass och tid i zon), inte
+Pyramidal fördelning (mest Z1–Z2, en del Z3, lite Z4+) och polariserad (cirka 80/20) har båda stöd. Polariserad
+slår tröskeltung träning (Rosenblat m.fl. 2019), men har ingen säker fördel mot pyramidal (Oliveira m.fl. 2024).
+Basfasens tempopass gör planen pyramidal, vilket är i linje med det. Den bör vara en **begränsning i veckoskelettet** (antal nyckelpass och tid i zon), inte
 bara prompttext. `polarization_analysis` mäter redan utfallet.
 
 ### Hårda pass: hur många och vilka (`engine/intensity.py`)
 **Utgångsläge: två hårda pass i veckan, ett VO2max-pass och ett tröskelpass, resten lugnt.** Ungefär så tränar
 uthållighetseliten året runt (Seiler 2010), och polariserad träning med VO2max-pass har gett större förbättring
-än tröskeltung träning (Stöggl & Sperlich 2014), även för motionärer (Muñoz m.fl. 2014). Regeln skalar av sig
+än tröskeltung träning (Stöggl & Sperlich 2014). Regeln skalar av sig
 själv: mer tid ger fler lugna timmar, inte fler hårda pass.
 
 Antalet är ingen fast siffra. Det går inte att räkna fram det optimala antalet för en person i förväg, så
 planeraren utgår från två och justerar efter hur du svarar, ungefär som HRV-styrd träning (Kiviniemi m.fl. 2007,
-Javaloyes m.fl. 2019). Alla gränser är relativa till din egen baslinje och CTL, så de gäller på alla nivåer.
+Javaloyes m.fl. 2019). Gränserna är relativa till din egen baslinje och CTL. Trösklarna för tre pass (6 dagar,
+cirka 10 h) och för ett pass (form under −30 %, mer än 40 % missade) är tumregler, inte forskningsresultat.
 
 | Läge | Hårda pass |
 |---|---|
@@ -117,9 +123,19 @@ Javaloyes m.fl. 2019). Alla gränser är relativa till din egen baslinje och CTL
 
 **Fasen styr formatet, inte vilka passtyper som finns.** Base: tempo/sweet spot och korta VO2max-intervaller
 (1 min hårt / 1 min lätt). Build: tröskelintervaller och klassiska VO2max-intervaller (3–5 min). Fasen tas från
-årsplanen, annars från närmaste tävling. Utan båda byts formatet var sjätte vecka, eftersom förbättringen av
-VO2max planar ut efter 6–8 veckor med samma stimulus. Varje format har egna progressionsnivåer. Med ett pass i
+årsplanen, annars från närmaste A-tävling. Utan båda byts formatet var sjätte vecka för variationens skull
+(en tumregel; vi har inte hittat stöd för att VO2max-effekten planar ut efter just 6–8 veckor). Varje format har egna progressionsnivåer. Med ett pass i
 veckan turas VO2max och tröskel om vecka för vecka. Med tre tillkommer ett tempo- eller tröskelpass.
+
+### Flera idrotter (`engine/sport_mix.py`)
+Du anger total tid per vecka och dina tävlingar; planeraren fördelar tiden mellan sporterna. Utan mål bär cykel
+volymen (lägst skaderisk) medan löpning och skidor ligger kvar med minst ett par pass i veckan. Uthållighet kan
+behållas länge med cirka två pass i veckan om intensiteten finns kvar (Spiering m.fl. 2021), och träningseffekt är
+delvis sportspecifik (Millet m.fl. 2002). Därför tar målsporten gradvis över inför en A-tävling (upp till 65 %),
+nyckelpassen flyttar dit och de andra sporterna behåller sina underhållspass. Löpning hålls igång året runt
+eftersom den belastar skelettet (cyklister har lägre bentäthet än löpare) och för att undvika att börja om från noll.
+Last som en sport inte kan ta (åtkomst, väder, budget) flyttas till nästa sport och till sist till cykel. Talen
+är tumregler.
 
 ### Övrigt
 - **Session-RPE** (RPE × minuter) ger jämförbar belastning för styrka och pass utan effektmätare.

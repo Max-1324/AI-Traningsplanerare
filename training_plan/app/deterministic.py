@@ -180,7 +180,14 @@ def build_planner_inputs(
         reasons.append(f"short sleep ({sleep_h:.1f} h)")
     if (readiness or {}).get("score", 100) < 45:
         reasons.append(f"readiness {readiness['score']}/100")
+    if int(morning.get("life_stress") or 1) >= 4:
+        reasons.append(f"high life stress ({morning.get('life_stress')}/4)")
     restricted = {today_s, tomorrow_s} if reasons else set()
+    # HRV a little below normal (7-day mean below the smallest worthwhile change, as in the
+    # HRV-guided studies): no hard session today or tomorrow, but normal duration.
+    no_intensity = set()
+    if (hrv or {}).get("state") == "SLIGHTLY_LOW" and not restricted:
+        no_intensity = {today_s, tomorrow_s}
     time_today = time_available_minutes(morning.get("time_available", "") or "")
     if time_today is not None and time_today < 60:
         restricted.add(today_s)
@@ -268,6 +275,7 @@ def build_planner_inputs(
         sport_budgets=budgets,
         avoid_sports=avoid,
         restricted_dates=restricted,
+        no_intensity_dates=no_intensity,
         restriction_reason=", ".join(reasons),
         time_available_today=time_today,
         race_week=race_week,

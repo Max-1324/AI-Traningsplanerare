@@ -64,11 +64,15 @@ med `time_available=`, `injury=` och `athlete_note=`.
 - **Manuella pass** du lägger in själv låses och planeras runt.
 - **Tävlingar**: prioritet läses från tävlingens kategori i intervals.icu (A/B/C). Som reserv fungerar
   namnprefix, `B: Namn` eller `C: Namn`, annars räknas den som A-tävling. Sport kan anges som `[Ride]` i namnet.
-  A-tävlingar får två veckors nedtrappning, B-tävlingar några dagar och C-tävlingar nästan ingen.
+  A-tävlingar får två veckors nedtrappning och en tävlingsvecka, B-tävlingar de två sista dagarna och C-tävlingar
+  bara själva tävlingsdagen: de tränas igenom. Bara A-tävlingar styr fasen (Build/Taper) och CTL-målet.
+  Nedtrappningspassen läggs i tävlingens sport.
 - **Årsplan**: gör du en säsongsplan med intervals.icu:s *Annual Training Plan Builder* (Supporter-nivån) följer
-  planeraren dess veckomål, faser, återhämtningsveckor och fördelning mellan sporter (t.ex. 2,5 h löpning och
-  5 h cykel). Löpningen ökar ändå högst 10 % i veckan från vad du faktiskt sprungit, och det som inte får plats,
-  eller som en skada stoppar, flyttas till de andra sporterna i planen. Fasen styr passens format: Base ger
+  planeraren dess veckomål, faser och återhämtningsveckor. Det räcker att ange **total tid per vecka**: planeraren
+  fördelar själv tiden mellan sporterna (se *Flera idrotter* nedan). Anger du timmar per sport (t.ex. 2,5 h
+  löpning och 5 h cykel) gäller de i stället. Löpningen växer ändå högst cirka 10 % i veckan från vad du faktiskt
+  sprungit, inget löppass blir längre än 1,1 × ditt längsta de senaste 30 dagarna, och det som inte får plats,
+  eller som en skada, väder eller ett `Ej:` stoppar, flyttas till andra sporter (till sist cykel). Fasen styr passens format: Base ger
   tempo och korta VO2max-intervaller, Build tröskelintervaller och längre VO2max-intervaller. Utan årsplan
   och tävling byts formatet var sjätte vecka. En vecka vars mål ligger minst 20 % under veckan före
   räknas som återhämtningsvecka. Ett veckomål som skulle höja CTL mer än `RAMP_CTL_MAX` per vecka trappas in i
@@ -88,10 +92,28 @@ med `time_available=`, `injury=` och `athlete_note=`.
   till inomhuscykling. Orden `utomhuscykel`, `utecykel`, `inomhuscykel`, `Zwift`, `Wahoo`, `löpning`, `rullskidor`
   och `styrka` känns igen.
 
+### Flera idrotter
+Utan per-sport-mål i årsplanen fördelar planeraren veckan själv (`engine/sport_mix.py`):
+
+- **Utan mål:** cykel cirka 60 %, löpning 25 % och skidor 15 % (`BASE_MIX`). Cykel bär volymen med lägst skaderisk.
+- **Med mål:** närmaste A-tävling (annars B) med angiven sport tar gradvis över, upp till 65 % (`FOCUS_SHARE`) från
+  8 veckor före loppet, med början 20 veckor före. Nyckelpassen läggs då i målsporten.
+- Varje sport i mixen behåller minst sina underhållspass (`SPORT_MIN_SESSIONS`, standard löpning 2, cykel 2,
+  skidor 1 i veckan). Uthållighet kan behållas med cirka två pass i veckan (Spiering m.fl. 2021).
+- Utan mål går VO2max-passet på cykel och tröskelpasset roterar mellan sporterna vecka för vecka.
+- Skidor betyder längdskidor under snömånaderna (`SNOW_MONTHS`, december–mars) och annars rullskidor. Rullskidor
+  planeras inte vid snö, frost eller regn. `Ej: rullskidor` eller `Ej: skidor` en period flyttar skidlasten.
+- Simning planeras bara när du har ett simlopp som mål eller simtid i årsplanen (`ON_DEMAND_SPORTS`).
+
+Procentsatserna är tumregler. Forskningen stöder principen (specificitet mot målet, underhåll med få pass),
+inte de exakta talen.
+
 ### Styrketräning
-Ett styrkepass i veckan, eller så många som årsplanens styrkemål ger. Passen är 30 min med kroppsvikt. Programmet
-följer blocket: bas (vecka 1–2), bygg (vecka 3) och underhåll (återhämtning och nedtrappning). Återhämtningsveckor
-får högst ett pass, tävlingsveckor inget. Passen läggs helst på lätta dagar, men aldrig dagen före ett hårt pass
+Två styrkepass i veckan i basperioder och ett när du bygger mot ett mål, eller så många som årsplanens styrkemål
+ger. Passen är 30 min med kroppsvikt; det lättare basprogrammet används bara första veckan, sedan det tyngre.
+Med `STRENGTH_STYLE=heavy` och tillgång till gym blir passen tung styrka (4–6 repetitioner), den form som har
+stöd för bättre ekonomi och sluteffekt hos uthållighetsidrottare. Återhämtningsveckor får högst ett pass,
+tävlingsveckor inget. Passen läggs helst på lätta dagar, men aldrig dagen före ett hårt pass
 eller långpass, och minst två dagar isär. Behövs fler pass läggs de efter intervallpasset samma dag. Styrkepass
 du redan gjort den senaste veckan, eller själv lagt in i kalendern, räknas in, och avståndet gäller även till dem.
 
@@ -141,8 +163,15 @@ annan nivå. Puls under passen (t.ex. från ett pulsband) påverkas inte.
 | `RAMP_CTL_PER_WEEK`, `RAMP_CTL_MAX` | `4.0`, `6.0` | Planerad CTL-ökning per byggvecka, och tak. Mot en A-tävling används rampen som krävs för att nå `TARGET_CTL`, inom taket |
 | `DELOAD_LOAD_FACTOR` | `0.70` | Deloadveckans dagliga belastning som andel av CTL |
 | `KEY_SESSIONS_PER_WEEK` | *(anpassas)* | Tak för antalet hårda pass per vecka (0–3). Utan värde avgör din återhämtning: normalt 2, ibland 1 eller 3 |
-| `STRENGTH_PER_WEEK` | `1` | Styrkepass per vecka när årsplanen saknar styrkemål (begränsas då också av `MAX_STRENGTH_PER_PLAN`) |
-| `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport (t.ex. rullskidor) per vecka, när årsplanen inte anger fördelning per sport |
+| `STRENGTH_PER_WEEK` | *(2 i bas, 1 mot mål)* | Styrkepass per vecka när årsplanen saknar styrkemål |
+| `STRENGTH_STYLE` | `bodyweight` | `heavy` ger tung styrka på gym |
+| `BASE_MIX` | `cycling:0.6,Run:0.25,ski:0.15` | Sportfördelning utan mål (när årsplanen bara har totaltid) |
+| `FOCUS_SHARE`, `FOCUS_RAMP_START`, `FOCUS_RAMP_END` | `0.65`, `20`, `8` | Målsportens andel och när den ökar (veckor före loppet) |
+| `SPORT_MIN_SESSIONS` | `Run:2,cycling:2,ski:1` | Minsta antal pass per sport och vecka |
+| `ON_DEMAND_SPORTS` | `Swim` | Sporter som bara planeras vid mål eller årsplanstid |
+| `SNOW_MONTHS` | `12,1,2,3` | Månader då skidor betyder längdskidor |
+| `SESSION_SPIKE_SPORTS`, `SESSION_SPIKE_FACTOR` | `Run`, `1.1` | Passtak: högst faktor × längsta pass senaste 30 dagarna |
+| `SECONDARY_SESSIONS_PER_WEEK` | `1` | Pass i en kompletterande sport per vecka (bara utan sportfördelning) |
 | `LONG_SESSION_SHARE` | `0.35` | Långpassets största andel av veckans TSS |
 | `WEEKDAY_MAX_MIN` | `120` | Längsta uthållighetspass måndag–fredag |
 | `OUTDOOR_MIN_TEMP_C` | `5` | Lägsta temperatur för cykling utomhus |
@@ -157,9 +186,10 @@ annan nivå. Puls under passen (t.ex. från ett pulsband) påverkas inte.
 | `AVAILABLE_SPORTS` | alla i katalogen | T.ex. `Ride,VirtualRide,RollerSki,Run` (styrka och vila ingår alltid) |
 | `DEFAULT_SPORT`, `FALLBACK_SPORT`, `POWER_SPORTS` | –, –, `VirtualRide` | Huvudsport när historik saknas, ersättningssport när ett pass måste bytas, sporter med effektmätare (får watt-mål) |
 | `TARGET_CTL` | `85` | CTL-mål inför A-tävlingen. Rampen planeras aldrig förbi målet |
-| `RISK_TOLERANCE` | `NORMAL` | `HIGH` höjer ACWR-gränsen |
-| `MIN_BUDGET_RUN_MIN`, `MIN_BUDGET_ROLLERSKI_MIN` | `60`, `90` | Golv för veckobudget i skadebenägna sporter |
-| `MAX_ROLLSKI_PER_WEEK`, `MAX_STRENGTH_PER_PLAN`, `MIN_STRENGTH_GAP_DAYS` | `1`, `2`, `2` | Sportgränser |
+| `RISK_TOLERANCE` | `NORMAL` | `HIGH` höjer ACWR-gränsen (ACWR är bara information) |
+| `MIN_BUDGET_RUN_MIN`, `MIN_BUDGET_ROLLERSKI_MIN` | `60`, `90` | Startbudget när sporten inte tränats de senaste två veckorna |
+| `MAX_ROLLSKI_PER_WEEK`, `MAX_SKI_SESSIONS_WITH_PLAN` | `1`, `4` | Rullskidpass per vecka utan respektive med skidor i sportmixen |
+| `MAX_STRENGTH_PER_PLAN`, `MIN_STRENGTH_GAP_DAYS` | `3`, `2` | Styrkegränser |
 | `ATHLETE_LAT`, `ATHLETE_LON`, `ATHLETE_LOCATION` | Karlstad | Plats för väderprognosen |
 | `CONTACT_EMAIL` | platshållare | Skickas i User-Agent till met.no, som kräver kontaktuppgift |
 

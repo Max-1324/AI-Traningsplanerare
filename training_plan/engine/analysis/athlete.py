@@ -111,6 +111,7 @@ def analyze_yesterday(yesterday_planned, yesterday_actuals, activities) -> str:
         "\n  -> Give feedback: Was the plan followed? Right intensity? What can be improved? "
         "Was nutrition sufficient? Concrete tips."
     )
+    return "\n".join(lines)
 
 
 # ── ATHLETE PROFILE ───────────────────────────────────────────────────────────

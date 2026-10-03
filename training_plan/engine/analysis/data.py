@@ -197,11 +197,15 @@ def calculate_hrv(wellness, today: date | None = None):
     # Om dagens HRV inte är loggad än, använd 7d-snittet
     today_raw = next((v for d, v in dated if d == today), 0)
     today_val = today_raw if today_raw > 0 else round(avg7, 1)
-    cv7 = (math.sqrt(sum((x-avg7)**2 for x in last7)/len(last7)) / avg7 * 100) if avg7 else 0
+    # Coefficient of variation of ln(rMSSD) over the last 7 days (Plews et al.).
+    ln7 = [math.log(v) for v in last7]
+    ln_mean = sum(ln7) / len(ln7)
+    cv7 = (math.sqrt(sum((x - ln_mean) ** 2 for x in ln7) / len(ln7)) / ln_mean * 100) if ln_mean > 0 else 0
     
     dev_7d = (avg7 - avg60) / avg60 if avg60 else 0
     dev_today = (today_val - avg60) / avg60 if avg60 else 0
-    stability = "VERY_STABLE" if cv7 < 8 else ("STABLE" if cv7 < 12 else "UNSTABLE")
+    # Heuristic bands for the CV of ln(rMSSD), which is a few percent in most athletes.
+    stability = "VERY_STABLE" if cv7 < 4 else ("STABLE" if cv7 < 8 else "UNSTABLE")
 
     result = {"today": today_val, "avg7d": round(avg7,1), "avg60d": round(avg60,1),
               "cv7d": round(cv7,1), "stability": stability, "deviation_pct": round(dev_today*100,1),

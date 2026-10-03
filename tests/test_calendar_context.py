@@ -177,6 +177,21 @@ class TestPlannerInputsFromCalendar(unittest.TestCase):
         params.update(overrides)
         return build_planner_inputs(**params)
 
+    def test_high_life_stress_restricts_today_and_tomorrow(self):
+        inputs = self._inputs(morning={"life_stress": 4})
+        self.assertEqual(inputs.restricted_dates, {MONDAY.isoformat(), (MONDAY + timedelta(days=1)).isoformat()})
+        self.assertIn("life stress", inputs.restriction_reason)
+
+    def test_slightly_low_hrv_removes_intensity_but_keeps_duration(self):
+        inputs = self._inputs(hrv={"state": "SLIGHTLY_LOW"})
+        self.assertEqual(inputs.restricted_dates, set())
+        self.assertEqual(inputs.no_intensity_dates, {MONDAY.isoformat(), (MONDAY + timedelta(days=1)).isoformat()})
+        from training_plan.core.catalogs import INTENSE
+        from training_plan.engine.planner import build_deterministic_plan
+        plan = build_deterministic_plan(inputs).plan
+        early = [d for d in plan.days if d.date in inputs.no_intensity_dates]
+        self.assertFalse(any(s.zone in INTENSE for d in early for s in d.workout_steps))
+
     def test_injury_event_blocks_only_the_affected_sport(self):
         events = [{"category": "INJURED", "name": "Knä", "start_date_local": "2026-10-06T00:00:00",
                    "end_date_local": "2026-10-09T00:00:00"}]
