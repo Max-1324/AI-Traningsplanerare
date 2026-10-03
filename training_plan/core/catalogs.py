@@ -32,6 +32,10 @@ SPORT_NAME_MAP = {
     "rullskidor": ["RollerSki"],
     "rullskid": ["RollerSki"],
     "rollerski": ["RollerSki"],
+    "skidor": ["NordicSki"],
+    "längdskidor": ["NordicSki"],
+    "längdåkning": ["NordicSki"],
+    "nordicski": ["NordicSki"],
     "styrka": ["WeightTraining"],
     "styrketräning": ["WeightTraining"],
     "weighttraining": ["WeightTraining"],
@@ -86,6 +90,23 @@ ALL_SPORTS_CATALOG = [
         "comment": "PRIO 3. Bodyweight ONLY. Max 2 sessions/10 days. Never two days in a row.",
     },
 ]
+
+# Sports planned only when the annual plan or a goal race asks for them (never as filler,
+# substitute or alternative). Swimming by default.
+ON_DEMAND_SPORTS = {
+    s.strip() for s in os.getenv("ON_DEMAND_SPORTS", "Swim").split(",") if s.strip()
+}
+
+# Where load goes when a sport cannot take it (no access, weather, budget). Cycling last:
+# lowest injury risk, so it is the safe place for whatever is left.
+SUBSTITUTES = {
+    "NordicSki": ["RollerSki", "Run", "Ride", "VirtualRide"],
+    "RollerSki": ["NordicSki", "Run", "Ride", "VirtualRide"],
+    "Run": ["Ride", "VirtualRide"],
+    "Ride": ["VirtualRide"],
+    "VirtualRide": ["Ride"],
+    "Swim": ["Ride", "VirtualRide"],
+}
 
 # ── Active sports (filtered by AVAILABLE_SPORTS env var) ─────────────────────
 # Example .env: AVAILABLE_SPORTS=Run,RollerSki,Ride,VirtualRide

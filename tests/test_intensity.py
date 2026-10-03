@@ -1,6 +1,7 @@
 """Hard sessions per week, session kinds, and following the annual plan's sport split."""
 import sys
 import unittest
+from dataclasses import replace
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
@@ -9,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from test_deterministic_planner import BUDGETS, _inputs, _run  # noqa: E402
 
-from training_plan.engine.calendar_context import atp_weeks, sport_split  # noqa: E402
+from training_plan.engine.calendar_context import atp_weeks, sport_group, sport_split  # noqa: E402
 from training_plan.engine.intensity import (  # noqa: E402
     IntensitySignals,
     assign_emphasis,
@@ -158,9 +159,9 @@ def _split_events(run_h=2.5, ride_h=5.0, weeks=2):
 
 
 class TestSportSplit(unittest.TestCase):
-    def _plan(self, run_budget=150, primary="Ride", **overrides):
-        targets = build_week_targets(45, {"week_in_block": 1}, MONDAY, target_ctl=85)
-        targets = apply_calendar_targets(targets, atp_weeks(_split_events()), 55)
+    def _plan(self, run_budget=150, primary="Ride", week_targets=None, **overrides):
+        targets = week_targets or apply_calendar_targets(
+            build_week_targets(45, {"week_in_block": 1}, MONDAY, target_ctl=85), atp_weeks(_split_events()), 55)
         budgets = {"Run": {"remaining": run_budget}}
         dates = [(MONDAY + timedelta(days=i)).isoformat() for i in range(14)]
         result = build_deterministic_plan(PlannerInputs(
@@ -213,10 +214,20 @@ class TestSportSplit(unittest.TestCase):
         self.assertLessEqual(sports, {"Run", "Ride", "VirtualRide"})
 
     def test_largest_share_decides_the_main_sport(self):
-        targets, result = self._plan(primary="Run")
+        # app/deterministic.py marks a week whose largest share is at least half as focused on it.
+        targets = [replace(t, focus="cycling") for t in
+                   apply_calendar_targets(build_week_targets(45, {"week_in_block": 1}, MONDAY, target_ctl=85),
+                                          atp_weeks(_split_events()), 55)]
+        _, result = self._plan(primary="Run", week_targets=targets)
         keys = [d for d in result.plan.days if result.roles.get(f"{d.date}|{d.slot}") == "key"]
         self.assertTrue(keys)
         self.assertTrue(all("Ride" in d.intervals_type for d in keys))
+
+    def test_without_focus_the_threshold_session_rotates_between_sports(self):
+        _, result = self._plan()
+        keys = [d for d in result.plan.days if result.roles.get(f"{d.date}|{d.slot}") == "key"]
+        self.assertEqual({sport_group(d.intervals_type) for d in keys}, {"cycling", "Run"})
+        self.assertTrue(all(sport_group(d.intervals_type) == "cycling" for d in keys if "VO2" in d.title))
 
     def test_planner_output_passes_the_safety_rules(self):
         inp_targets, result = self._plan()

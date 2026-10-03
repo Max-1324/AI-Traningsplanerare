@@ -90,7 +90,7 @@ def post_process(plan, hrv, budgets, locked, budget, activities, weather, athlet
 def apply_safety_rules(plan, *, hrv, budgets, locked, athlete, weather=None, today=None,
                        injury_note="", injury_profile=None, constraints=None, today_wellness=None,
                        per_sport_acwr_data=None, phase=None, races=None, wellness=None,
-                       time_available_text="", max_strength=None):
+                       time_available_text="", max_strength=None, max_rollski=None):
     """Safety net for plans from the deterministic planner.
 
     ``max_strength`` is the planner's strength limit for the plan (higher when the annual
@@ -117,7 +117,7 @@ def apply_safety_rules(plan, *, hrv, budgets, locked, athlete, weather=None, tod
     days, c = enforce_sport_budget(days, budgets, today=today); all_c += c
     days, c = enforce_hard_easy(days);                         all_c += c
     days, c = enforce_strength_limit(days, max_strength=max_strength); all_c += c
-    days, c = enforce_rollski_limit(days);                     all_c += c
+    days, c = enforce_rollski_limit(days, max_per_week=max_rollski); all_c += c
     days     = ensure_warmup(days)
     days     = add_env_nutrition(days, weather or [], phase=phase, races=races, athlete=athlete, wellness=wellness)
     days, c  = strip_train_low_contradiction(days);            all_c += c

@@ -1,5 +1,6 @@
 from training_plan.core.common import *
 from training_plan.engine.planning import classify_session_category
+from training_plan.core.catalogs import ON_DEMAND_SPORTS
 from training_plan.engine.utils import time_available_minutes
 
 _MIN_DURATION = MIN_DURATION_BY_SPORT
@@ -428,6 +429,7 @@ def _pick_fallback_sport(avoid: str | None = None) -> str:
     candidates = [
         s for s in SPORTS
         if s["intervals_type"] not in ("WeightTraining", "Rest", avoid)
+        and s["intervals_type"] not in ON_DEMAND_SPORTS
     ]
     if not candidates:
         return "VirtualRide"

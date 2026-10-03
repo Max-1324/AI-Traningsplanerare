@@ -87,3 +87,14 @@ def race_priority(race: dict) -> str:
     if "b:" in name:
         return "B"
     return "A"
+
+
+def race_sport(race: dict, valid_types: set[str] | None = None) -> str | None:
+    """The sport of a race: the event's type in intervals.icu, else a "[Ride]"-style tag in its name."""
+    sport = race.get("type")
+    if sport and (valid_types is None or sport in valid_types):
+        return sport
+    m = re.search(r"\[(\w+)\]", race.get("name") or "")
+    if m and (valid_types is None or m.group(1) in valid_types):
+        return m.group(1)
+    return None

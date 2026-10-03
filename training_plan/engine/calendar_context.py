@@ -163,12 +163,18 @@ def strength_sessions(week: dict, tss_per_hour: float) -> int | None:
 
 
 def sport_group(sport_type: str | None) -> str:
-    """Planner sport group for an intervals.icu activity type: all bike types are 'cycling'."""
+    """Planner sport group for an intervals.icu activity type.
+
+    All bike types are 'cycling'; skiing on snow and roller skiing are one group, 'ski',
+    since they train the same thing and access decides which one is possible.
+    """
     t = sport_type or ""
     if "Ride" in t:
         return "cycling"
     if "Run" in t:
         return "Run"
+    if t in ("NordicSki", "RollerSki"):
+        return "ski"
     return t
 
 

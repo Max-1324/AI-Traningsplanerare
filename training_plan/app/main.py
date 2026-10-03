@@ -96,7 +96,7 @@ from training_plan.engine.pipeline import (
 )
 from training_plan.engine.planner import build_deterministic_plan
 from training_plan.engine.skeleton import build_week_skeleton
-from training_plan.engine.utils import race_priority, time_available_minutes
+from training_plan.engine.utils import race_priority, race_sport, time_available_minutes
 from training_plan.engine.validation import repair_postprocessed_plan, validate_postprocessed_plan
 from training_plan.integrations.services import (
     _stockholm_now_naive,
@@ -351,13 +351,8 @@ def main(argv=None):
         _rname = _r.get("name", "")
         if race_priority(_r) != "A":
             continue
-        # 1. Use type field from Intervals.icu
-        _race_sport = _r.get("type")
-        # 2. Fallback: manual tag [Sport] in name
-        if not _race_sport or _race_sport not in _valid_sport_types:
-            _m = re.search(r"\[(\w+)\]", _rname)
-            _race_sport = _m.group(1) if _m else None
-        if _race_sport and _race_sport in _valid_sport_types:
+        _race_sport = race_sport(_r, _valid_sport_types)
+        if _race_sport:
             dominant_sport = _race_sport
             log.info(f"🏁 Dominant sport set from A-race '{_rname}': {dominant_sport}")
             break
@@ -679,6 +674,7 @@ def main(argv=None):
                 phase=phase, races=races, wellness=wellness_clean,
                 time_available_text=morning.get("time_available", ""),
                 max_strength=det_result.max_strength_sessions,
+                max_rollski=det_result.max_rollski_per_week,
             ),
             athlete=athlete, base_tss_by_date=base_tss_by_date,
             validation_context=validation_context, validation_budget=validation_budget,

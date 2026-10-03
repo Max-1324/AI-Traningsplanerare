@@ -24,7 +24,7 @@ from datetime import date, timedelta
 from functools import lru_cache
 from itertools import combinations
 
-from training_plan.core.catalogs import MIN_DURATION_BY_SPORT, SPORTS
+from training_plan.core.catalogs import MIN_DURATION_BY_SPORT, ON_DEMAND_SPORTS, SPORTS, SUBSTITUTES
 from training_plan.core.models import AIPlan, PlanDay, StrengthStep, WorkoutStep
 from training_plan.engine.calendar_context import sport_group
 from training_plan.engine.intensity import key_session_types
@@ -42,6 +42,26 @@ STRENGTH_PER_WEEK = int(os.getenv("STRENGTH_PER_WEEK", "1"))
 MAX_STRENGTH_PER_PLAN = int(os.getenv("MAX_STRENGTH_PER_PLAN", "2"))
 MIN_STRENGTH_GAP_DAYS = int(os.getenv("MIN_STRENGTH_GAP_DAYS", "2"))
 MAX_ROLLSKI_PER_WEEK = int(os.getenv("MAX_ROLLSKI_PER_WEEK", "1"))
+# With skiing in the week's sport mix, roller skiing may carry more of it.
+MAX_SKI_SESSIONS_WITH_PLAN = int(os.getenv("MAX_SKI_SESSIONS_WITH_PLAN", "4"))
+# Months with snow for skiing (NordicSki); outside them skiing means roller skis.
+SNOW_MONTHS = {int(m) for m in os.getenv("SNOW_MONTHS", "12,1,2,3").split(",") if m.strip().isdigit()}
+
+
+def _parse_floors(text: str) -> dict[str, int]:
+    floors = {}
+    for part in (text or "").split(","):
+        name, _, value = part.partition(":")
+        if name.strip() and value.strip().isdigit():
+            floors[name.strip()] = int(value)
+    return floors
+
+
+# Minimum sessions per sport group and week while the sport is in the week's mix: enough to
+# keep it (endurance holds with about two sessions a week, Spiering et al. 2021).
+SPORT_MIN_SESSIONS = _parse_floors(os.getenv("SPORT_MIN_SESSIONS", "Run:2,cycling:2,ski:1"))
+_KEY_KIND = {"vo2max_intervals": "vo2", "vo2max_short": "vo2",
+             "threshold_intervals": "threshold", "tempo_sustained": "threshold"}
 SECONDARY_SESSIONS_PER_WEEK = int(os.getenv("SECONDARY_SESSIONS_PER_WEEK", "1"))
 LONG_SESSION_SHARE = float(os.getenv("LONG_SESSION_SHARE", "0.35"))
 # The rest of the current week may carry at most this much more than its pro-rata
@@ -260,6 +280,7 @@ class PlannerInputs:
     available_sports: list | None = None
     key_kinds_done_this_week: list = field(default_factory=list)   # "vo2"/"threshold" done since Monday
     strength_dates: list = field(default_factory=list)   # strength done in the last week or planned by you
+    sessions_done_this_week: dict = field(default_factory=dict)   # sport group → sessions since Monday
 
 
 @dataclass
@@ -273,6 +294,8 @@ class PlannerResult:
     notes: list[str] = field(default_factory=list)
     # Strength sessions the safety rules may allow in the plan (more with an annual-plan strength target).
     max_strength_sessions: int = MAX_STRENGTH_PER_PLAN
+    # Roller-ski sessions per week the safety rules may allow (more when skiing is in the mix).
+    max_rollski_per_week: int = MAX_ROLLSKI_PER_WEEK
 
 
 class _Planner:
@@ -307,10 +330,18 @@ class _Planner:
         self.split: dict[str, float] = {}   # sport group → share for the week being planned
         self._week_state: dict[str, tuple[str, dict]] = {}   # week_start → (primary, split)
         self._targets = {t.week_start: t for t in inp.week_targets}
+        self._week_start = monday_of(inp.today).isoformat()
+        self._high_risk = {s["intervals_type"] for s in self.catalog if s.get("injury_risk") == "high"}
 
     # ── sport helpers ─────────────────────────────────────────────────────────
     def allowed(self, sport: str, day: str) -> bool:
         if sport not in self.sports:
+            return False
+        if sport in ON_DEMAND_SPORTS and sport_group(sport) not in self.split:
+            return False   # e.g. swimming: only when the annual plan or a goal race asks for it
+        if sport == "NordicSki" and date.fromisoformat(day).month not in SNOW_MONTHS:
+            return False
+        if sport == "RollerSki" and not self.rollski_ok(day):
             return False
         for c in self.constraints.get(day, []):
             if c.get("allowed_types") and sport not in c["allowed_types"]:
@@ -344,6 +375,25 @@ class _Planner:
             return False
         frost = w.get("temp_min")
         return not (slot == "AM" and frost is not None and frost <= 0)  # icy roads after a frosty night
+
+    def rollski_ok(self, day: str) -> bool:
+        """Roller skis need a dry road above freezing: no snow or sleet, little rain, no frost."""
+        w = self._weather_for(day)
+        if not w:
+            return True
+        sky = f"{w.get('weathercode') or ''} {w.get('weathercode_morning') or ''}"
+        if "snow" in sky or "sleet" in sky:
+            return False
+        if (w.get("rain_afternoon_mm", w.get("rain_mm", 0)) or 0) >= _OUTDOOR_MAX_RAIN_MM:
+            return False
+        temp = w.get("temp_afternoon", w.get("temp_max"))
+        return temp is None or temp > 1
+
+    def rollski_cap(self, week_start: str | None) -> int:
+        target = self._targets.get(week_start) if week_start else None
+        if target is not None and "ski" in target.sport_split:
+            return max(MAX_ROLLSKI_PER_WEEK, MAX_SKI_SESSIONS_WITH_PLAN)
+        return MAX_ROLLSKI_PER_WEEK
 
     def outdoor_slot(self, day: str) -> str | None:
         if self.outdoor_ok(day, "MAIN"):
@@ -395,6 +445,13 @@ class _Planner:
             if sport not in _CYCLING and sport not in ("WeightTraining",) and all(sport != c[0] for c in candidates):
                 if self.allowed(sport, day):
                     candidates.append((sport, "MAIN"))
+        if not self.cycling_primary():
+            # Cycling takes whatever the other sports cannot (lowest injury risk).
+            slot = self.outdoor_slot(day)
+            if slot and self.allowed("Ride", day):
+                candidates.append(("Ride", slot))
+            if self.allowed("VirtualRide", day):
+                candidates.append(("VirtualRide", "MAIN"))
         if self.split:
             # The annual plan names the sports: use those, in order of their share.
             rank = {g: i for i, g in enumerate(sorted(self.split, key=lambda g: (g != sport_group(self.primary),
@@ -403,7 +460,7 @@ class _Planner:
             if in_plan:
                 candidates = sorted(in_plan, key=lambda c: rank[sport_group(c[0])])
         for sport, slot in candidates:
-            if sport == "RollerSki" and week_start and self.rollski_by_week.get(week_start, 0) >= MAX_ROLLSKI_PER_WEEK:
+            if sport == "RollerSki" and week_start and self.rollski_by_week.get(week_start, 0) >= self.rollski_cap(week_start):
                 continue
             lo = self.min_minutes(sport)
             hi = min(max_min, _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
@@ -428,7 +485,7 @@ class _Planner:
         for group in sorted(target.sport_split, key=lambda g: -target.sport_split[g]):
             if group == sport_group(self.base_primary):
                 return self.base_primary
-            options = ("VirtualRide", "Ride") if group == "cycling" else (group,)
+            options = {"cycling": ("VirtualRide", "Ride"), "ski": self._ski_order(target.week_start)}.get(group, (group,))
             sport = next((o for o in options if o in self.sports), None)
             if sport:
                 return sport
@@ -437,9 +494,17 @@ class _Planner:
     def _use_week(self, week_start: str) -> None:
         self.primary, self.split = self._week_state.get(week_start, (self.base_primary, {}))
         self.budget_used = self._used_by_week.setdefault(week_start, {})
+        self._week_start = week_start
         self._current_week = week_start == monday_of(self.inp.today).isoformat()
 
+    @staticmethod
+    def _ski_order(week_start: str) -> tuple[str, str]:
+        month = (date.fromisoformat(week_start) + timedelta(days=3)).month
+        return ("NordicSki", "RollerSki") if month in SNOW_MONTHS else ("RollerSki", "NordicSki")
+
     def _group_sports(self, group: str) -> list[str]:
+        if group == "ski":
+            return [s for s in self._ski_order(self._week_start) if s in self.sports]
         if group == "cycling":
             order = ([self.primary] if self.primary in _CYCLING else []) + ["VirtualRide", "Ride"]
             return [s for s in dict.fromkeys(order) if s in self.sports]
@@ -455,7 +520,7 @@ class _Planner:
                 slot = self.outdoor_slot(day)
                 if not slot:
                     continue
-            if sport == "RollerSki" and self.rollski_by_week.get(target.week_start, 0) >= MAX_ROLLSKI_PER_WEEK:
+            if sport == "RollerSki" and self.rollski_by_week.get(target.week_start, 0) >= self.rollski_cap(target.week_start):
                 continue
             lo = self.min_minutes(sport)
             hi = min(cap, _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
@@ -488,35 +553,93 @@ class _Planner:
             focus_areas=self.inp.focus_areas, done_kinds=self.inp.key_kinds_done_this_week if current else None,
         )
 
-    def make_key(self, day: str, wk_key: str, focus: str = "") -> PlanDay | None:
-        sport = self.key_sport(day, wk_key)
-        if not sport:
-            return None
+    def key_sport_options(self, day: str, wk_key: str | None, target: WeekTarget | None) -> list[str]:
+        """Sports to try for a key session, best first.
+
+        With a goal (the week's focus) the key sessions go to the focus sport. Without one, in a
+        multi-sport week, VO2max work stays on the bike (lowest injury risk) and the threshold
+        session rotates week by week between the sports in the mix. Cycling is the fallback.
+        """
+        def cycling_option() -> list[str]:
+            sport = None
+            allowed_by_lib = WORKOUT_LIBRARY.get(wk_key, {}).get("sport", list(_CYCLING)) if wk_key else list(_CYCLING)
+            for s in ("VirtualRide", "Ride"):
+                if s in allowed_by_lib and self.allowed(s, day) and (s != "Ride" or self.outdoor_slot(day)):
+                    sport = s
+                    break
+            return [sport] if sport else []
+
+        if target is None or not self.split or len(self.split) < 2:
+            sport = self.key_sport(day, wk_key)
+            return [sport] if sport else []
+        groups = []
+        if target.focus:
+            groups = [target.focus]
+        elif _KEY_KIND.get(wk_key) != "vo2":
+            rotation = sorted(g for g, share in self.split.items() if share >= 0.15)
+            if rotation:
+                week_no = date.fromisoformat(target.week_start).toordinal() // 7
+                groups = [rotation[week_no % len(rotation)]]
+        options: list[str] = []
+        for group in groups + ["cycling"]:
+            for sport in (cycling_option() if group == "cycling" else self._group_sports(group)):
+                if sport not in options and self.allowed(sport, day):
+                    options.append(sport)
+        return options
+
+    def make_key(self, day: str, wk_key: str, focus: str = "", target: WeekTarget | None = None,
+                 cap: int = 10_000) -> PlanDay | None:
+        for sport in self.key_sport_options(day, wk_key, target):
+            session = self._key_in(day, wk_key, sport, focus)
+            if session.duration_min <= cap and session.duration_min <= self.budget_left(sport):
+                return session
+        return None
+
+    def _key_in(self, day: str, wk_key: str, sport: str, focus: str = "") -> PlanDay:
         if sport in _CYCLING:
             level = int(self.inp.workout_levels.get(wk_key, 1))
             session = library_session(day, wk_key, level, sport, focus=focus)
         else:
-            session = generic_key_session(day, wk_key, sport, focus=focus)
+            session = generic_key_session(day, wk_key if wk_key in _GENERIC_KEY else "threshold_intervals",
+                                          sport, focus=focus)
         if sport == "Ride":
             session = session.model_copy(update={"slot": self.outdoor_slot(day) or "MAIN"})
         return session
 
-    def make_long(self, day: str, week_target: float, budget: float, cap: int | None = None) -> PlanDay | None:
+    def _long_candidates(self, day: str) -> list[tuple[str, str]]:
+        """(sport, slot) for the long session: the main sport first, then its substitutes."""
         if self.cycling_primary():
-            outdoor = self.outdoor_slot(day)
-            sport = "Ride" if outdoor and self.allowed("Ride", day) else (
-                "VirtualRide" if self.allowed("VirtualRide", day) else None)
-            slot = outdoor if sport == "Ride" else "MAIN"
+            order = ["Ride", "VirtualRide"]
         else:
-            sport, slot = (self.primary, "MAIN") if self.allowed(self.primary, day) else (None, "MAIN")
-        if not sport:
-            return None
-        hi = min(self._long_level_minutes(sport), _MAX_LONG_MIN.get(sport, 150), self.budget_left(sport), cap or 10_000)
-        if budget < 0.8 * _endurance_tss(sport, _MIN_LONG_MIN):
-            return None  # the week's load is already covered
-        share_tss = min(LONG_SESSION_SHARE * week_target, budget)
-        minutes = minutes_for_tss(sport, share_tss, _MIN_LONG_MIN, hi)
-        if minutes < max(_MIN_LONG_MIN, self.min_minutes(sport)) or hi < _MIN_LONG_MIN:
+            # A long session never moves to a high-injury-risk sport (running) unless that is
+            # the main sport: the long session is the biggest single dose of the week.
+            order = [self.primary] + [s for s in SUBSTITUTES.get(self.primary, [])
+                                      if s not in self._high_risk]
+        result = []
+        for sport in dict.fromkeys(order):
+            if not self.allowed(sport, day):
+                continue
+            if sport == "Ride":
+                slot = self.outdoor_slot(day)
+                if slot:
+                    result.append((sport, slot))
+            else:
+                result.append((sport, "MAIN"))
+        return result
+
+    def make_long(self, day: str, week_target: float, budget: float, cap: int | None = None) -> PlanDay | None:
+        for sport, slot in self._long_candidates(day):
+            hi = min(self._long_level_minutes(sport), _MAX_LONG_MIN.get(sport, 150), self.budget_left(sport),
+                     cap or 10_000)
+            if budget < 0.8 * _endurance_tss(sport, _MIN_LONG_MIN):
+                return None  # the week's load is already covered
+            if hi < max(_MIN_LONG_MIN, self.min_minutes(sport)):
+                continue   # this sport cannot take a long session now (budget, cap): try the next
+            share_tss = min(LONG_SESSION_SHARE * week_target, budget)
+            minutes = minutes_for_tss(sport, share_tss, _MIN_LONG_MIN, hi)
+            if minutes >= max(_MIN_LONG_MIN, self.min_minutes(sport)):
+                break
+        else:
             return None
         hours, mins = divmod(minutes, 60)
         length = f"{hours}h{mins:02d}" if mins else f"{hours}h"
@@ -593,7 +716,7 @@ class _Planner:
                     continue  # keep to the annual plan's sports
                 if sport == "Ride" and not self.outdoor_ok(chosen.date, chosen.slot):
                     continue
-                if sport == "RollerSki" and self.rollski_by_week.get(week_start, 0) >= MAX_ROLLSKI_PER_WEEK:
+                if sport == "RollerSki" and self.rollski_by_week.get(week_start, 0) >= self.rollski_cap(week_start):
                     continue
                 lo = self.min_minutes(sport)
                 hi = min(_MAX_LONG_MIN.get(sport, 120) if role == "long" else _MAX_FILL_MIN.get(sport, 90),
@@ -698,7 +821,7 @@ class _Planner:
             if session is None:
                 wk_key = sequence[key_count % len(sequence)] if sequence else None
                 focus = next((a for a in inp.focus_areas if wk_key in _FOCUS_TO_KEY.get(a, ())), "")
-                session = self.make_key(d, wk_key, focus=focus) if wk_key else None
+                session = self.make_key(d, wk_key, focus=focus, target=target, cap=cap_for(d, 10_000)) if wk_key else None
             if (session is None or tss_of(session) > budget * 1.25 or session.duration_min > cap_for(d, 10_000)
                     or session.duration_min > self.budget_left(session.intervals_type)):
                 role_of[d] = "easy"   # no suitable key session: treat as an easy day
@@ -758,7 +881,8 @@ class _Planner:
             default_cap["long_endurance"] = 120
         caps = {d: cap_for(d, default_cap.get(role_of[d], 10_000)) for d in fill_days}
         split_need = self._split_need(planned, week_budget)
-        budget = self._fill(fill_days, caps, budget, add, target, role_of, split_need)
+        floor_missing = self._floor_missing(planned, target)
+        budget = self._fill(fill_days, caps, budget, add, target, role_of, split_need, floor_missing)
         self._extend_long(planned, budget)
 
         # 6) Whatever is still empty becomes a rest day (a strength-only day stays as it is).
@@ -796,8 +920,23 @@ class _Planner:
                                                   title=f"Long endurance – {length}",
                                                   description=day.description), role)
 
+    def _floor_missing(self, planned: dict, target: WeekTarget) -> dict[str, int]:
+        """Sessions each sport group in the week's mix still needs to reach its minimum."""
+        if not self.split or target.kind == "race":
+            return {}
+        have: dict[str, int] = {}
+        for items in planned.values():
+            for day, _ in items:
+                if day.intervals_type not in ("Rest", "WeightTraining") and day.duration_min > 0:
+                    have[sport_group(day.intervals_type)] = have.get(sport_group(day.intervals_type), 0) + 1
+        if target.week_start == monday_of(self.inp.today).isoformat():
+            for group, n in self.inp.sessions_done_this_week.items():
+                have[group] = have.get(group, 0) + n
+        return {g: n - have.get(g, 0) for g, n in SPORT_MIN_SESSIONS.items()
+                if g in self.split and n - have.get(g, 0) > 0}
+
     def _fill(self, fill_days: list[str], caps: dict, budget: float, add, target: WeekTarget,
-              role_of: dict, split_need: dict | None = None) -> float:
+              role_of: dict, split_need: dict | None = None, floor_missing: dict | None = None) -> float:
         """Spread the remaining weekly TSS over the fill days. Returns the TSS left over.
 
         With an annual-plan split, the other sports first get sessions sized to their share
@@ -830,22 +969,30 @@ class _Planner:
         need = dict(split_need or {})
         per_day = budget / len(chosen_days)
         if self.split:
-            for group in sorted(need, key=lambda g: -need[g]):
+            floors = dict(floor_missing or {})
+            groups = set(need) | set(floors)
+            for group in sorted(groups, key=lambda g: (-floors.get(g, 0), -need.get(g, 0.0))):
                 sports = self._group_sports(group)
                 if not sports:
                     continue
                 smallest = 0.5 * _endurance_tss(sports[0], self.min_minutes(sports[0]))
-                sessions = max(1, round(need[group] / max(per_day, 1)))
+                g_need = max(need.get(group, 0.0), 0.0)
+                by_share = max(1, round(g_need / max(per_day, 1))) if g_need >= smallest else 0
+                sessions = max(by_share, floors.get(group, 0))
                 for d in easy_first:
-                    if need[group] < smallest or sessions <= 0:
+                    if sessions <= 0:
                         break
                     if d in plan:
                         continue
-                    choice = self._group_choice(group, d, caps[d], need[group] / sessions, target)
+                    # Minimum sessions keep the sport alive even when its share is small.
+                    tss = max(g_need / sessions, 0.0)
+                    choice = self._group_choice(group, d, caps[d], tss, target)
                     if choice:
                         plan[d] = choice
                         reserve(choice[0], choice[1])
-                        need[group] -= _endurance_tss(choice[0], choice[1])
+                        done = _endurance_tss(choice[0], choice[1])
+                        g_need -= done
+                        need[group] = need.get(group, 0.0) - done
                         sessions -= 1
         elif target.kind != "race" and SECONDARY_SESSIONS_PER_WEEK > 0:
             secondary_left = SECONDARY_SESSIONS_PER_WEEK
@@ -878,6 +1025,15 @@ class _Planner:
             group = sport_group(sport)
             return not self.split or group == primary_group or need.get(group, 0) > 0
 
+        def may_grow_sink(sport: str) -> bool:
+            # Whatever the other sports cannot take goes to cycling: no load is lost.
+            return may_grow(sport) or sport_group(sport) == "cycling"
+
+        for grow in (may_grow, may_grow_sink) if self.split else (may_grow,):
+            self._grow(plan, caps, budget, total, reserve, need, grow)
+        return self._finish_fill(plan, add, budget, total)
+
+    def _grow(self, plan, caps, budget, total, reserve, need, may_grow) -> None:
         for _ in range(40):
             leftover = budget - total()
             if leftover < _endurance_tss("VirtualRide", 30) - _endurance_tss("VirtualRide", 15):
@@ -896,6 +1052,9 @@ class _Planner:
                     break
             if not grown:
                 break
+
+    @staticmethod
+    def _finish_fill(plan, add, budget, total) -> float:
         for d, (sport, minutes, slot) in plan.items():
             add(endurance_session(d, sport, minutes, slot=slot), "fill", reserved=True)
         return budget - total()
@@ -907,7 +1066,7 @@ class _Planner:
                 continue
             if s.get("injury_risk") == "high" or not self.allowed(sport, d):
                 continue
-            if sport == "RollerSki" and self.rollski_by_week.get(target.week_start, 0) >= MAX_ROLLSKI_PER_WEEK:
+            if sport == "RollerSki" and self.rollski_by_week.get(target.week_start, 0) >= self.rollski_cap(target.week_start):
                 continue
             lo = self.min_minutes(sport)
             hi = min(cap, _MAX_FILL_MIN.get(sport, 90), self.budget_left(sport))
@@ -998,6 +1157,7 @@ class _Planner:
             notes=self.notes,
             max_strength_sessions=max(MAX_STRENGTH_PER_PLAN,
                                       sum(1 for d in days if d.intervals_type == "WeightTraining")),
+            max_rollski_per_week=max([self.rollski_cap(t.week_start) for t in inp.week_targets] or [MAX_ROLLSKI_PER_WEEK]),
         )
 
     def _add_rehab(self, days: list[PlanDay]) -> list[PlanDay]:

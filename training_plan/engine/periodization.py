@@ -59,6 +59,7 @@ class WeekTarget:
     # Share of the load per sport group ("cycling", "Run", …) from the annual plan; {} = planner decides.
     sport_split: dict = field(default_factory=dict)
     strength_sessions: int | None = None   # from the annual plan's strength target; None = default
+    focus: str = ""            # sport group the week builds towards (goal race), "" = no goal
 
     @property
     def remaining_tss(self) -> int:
@@ -84,6 +85,8 @@ class WeekTarget:
         if self.sport_split:
             text += " | split " + ", ".join(f"{g} {share:.0%}" for g, share in
                                              sorted(self.sport_split.items(), key=lambda kv: -kv[1]))
+        if self.focus:
+            text += f" | focus {self.focus}"
         if self.strength_sessions is not None:
             text += f" | strength {self.strength_sessions}"
         if self.note:

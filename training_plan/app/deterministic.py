@@ -12,6 +12,7 @@ from functools import partial
 
 from training_plan.core.models import AIPlan, PlanDecisionTrace
 from training_plan.engine.calendar_context import (
+    sport_group,
     atp_weeks,
     availability_by_date,
     injuries_by_date,
@@ -31,6 +32,8 @@ from training_plan.engine.periodization import (
     format_week_targets,
     monday_of,
 )
+from training_plan.engine.sport_mix import available_groups, week_sport_split
+from training_plan.core.catalogs import SPORTS
 from training_plan.engine.pipeline.enrich import COACH_LANGUAGE, enrich_and_validate, request_enrichment
 from training_plan.engine.planner import PlannerInputs, PlannerResult
 from training_plan.engine.planning import classify_session_category
@@ -50,6 +53,17 @@ def _strength_dates(activities: list, manual_workouts: list, today: date) -> lis
             and (a.get("type") == "WeightTraining" or classify_session_category(a) == "strength")}
     planned = {_day(w) for w in manual_workouts or [] if w.get("type") == "WeightTraining"}
     return sorted(d for d in done | planned if d)
+
+
+def _sessions_by_group(activities: list) -> dict[str, int]:
+    """Endurance sessions per sport group (days with a session), e.g. since Monday."""
+    days: dict[str, set] = {}
+    for a in activities:
+        sport = a.get("type") or ""
+        if sport in ("WeightTraining", "Rest", "Note", ""):
+            continue
+        days.setdefault(sport_group(sport), set()).add(_day(a))
+    return {g: len(d) for g, d in days.items()}
 
 
 def _recently_sick(events: list, today: date, days: int = 7) -> bool:
@@ -79,6 +93,25 @@ def _adapt_week_targets(targets: list, *, today: date, signals: IntensitySignals
                                    race_phase=race_phase, has_race=has_race)
         adapted.append(replace(target, max_key_sessions=count, note=note, emphasis=emphasis))
     return adapted
+
+
+def _apply_sport_mix(targets: list, races: list) -> list:
+    """Share per sport for weeks where the annual plan gives none (only total time, or no plan).
+
+    Per-sport targets in the annual plan win. A week whose largest share is at least half the
+    load counts as focused on that sport (key sessions go there).
+    """
+    groups = available_groups(SPORTS)
+    result = []
+    for target in targets:
+        if target.sport_split:
+            top = max(target.sport_split, key=target.sport_split.get)
+            focus = top if target.sport_split[top] >= 0.5 and len(target.sport_split) > 1 else ""
+            result.append(replace(target, focus=focus))
+            continue
+        split, focus = week_sport_split(target.week_start, races, groups)
+        result.append(replace(target, sport_split=split if len(split) > 1 else {}, focus=focus))
+    return result
 
 
 def _latest_sleep_hours(wellness: list, today: date) -> float | None:
@@ -190,6 +223,7 @@ def build_planner_inputs(
     atp = atp_weeks(calendar_events)
     if atp:
         targets = apply_calendar_targets(targets, atp, tph)
+    targets = _apply_sport_mix(targets, races)
     # How many hard sessions each week gets follows the athlete's own recovery and history.
     compliance = compliance or {}
     signals = IntensitySignals(
@@ -232,6 +266,7 @@ def build_planner_inputs(
         intensity_done_this_week=intensity_done,
         key_kinds_done_this_week=[k for k in kinds_done if k in HARD_CATEGORIES],
         strength_dates=_strength_dates(activities, manual_workouts, today),
+        sessions_done_this_week=_sessions_by_group(this_week),
         yesterday_was_hard=yesterday_hard,
         injury=injury,
         injury_note=injury_note,
