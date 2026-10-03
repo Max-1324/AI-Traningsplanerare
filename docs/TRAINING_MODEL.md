@@ -84,6 +84,12 @@ Gör det enligt etablerad metodik:
 
 `calculate_hrv` gör nu så (LOW under −2·SWC för 7-dagarssnittet). Tidigare användes råa %-trösklar mot en baslinje som innehöll de senaste dagarna, och de används fortfarande som reserv när historiken är kortare än 14 dagar.
 
+**Saknade mätningar.** 7-dagarssnittet räknas på kalenderdagar och kräver minst 3 mätningar den senaste veckan.
+Saknas de (ingen eller trasig klocka) antas HRV vara normal (`measured: False`) i stället för att gamla värden
+används. Två veckor eller mer utan mätningar startar en ny baslinje, eftersom en ny klocka sällan mäter på samma
+nivå. Readiness gör likadant: sömn räknas bara från senaste natten, vilopuls från senaste veckan, och det som inte
+mäts räknas som normalt (70/100) och listas inte som begränsning.
+
 ### Intensitetsfördelning
 Pyramidal fördelning (mest Z1–Z2, en del Z3, lite Z4+) eller polariserad (cirka 80/20) är väl underbyggd för
 uthållighetsidrottare. Den bör vara en **begränsning i veckoskelettet** (antal nyckelpass och tid i zon), inte

@@ -22,6 +22,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from functools import lru_cache
+from itertools import combinations
 
 from training_plan.core.catalogs import MIN_DURATION_BY_SPORT, SPORTS
 from training_plan.core.models import AIPlan, PlanDay, StrengthStep, WorkoutStep
@@ -48,6 +49,10 @@ LONG_SESSION_SHARE = float(os.getenv("LONG_SESSION_SHARE", "0.35"))
 CATCH_UP_CAP = float(os.getenv("CATCH_UP_CAP", "1.15"))
 # Longest aerobic session on a weekday (Mon-Fri); weekends allow longer sessions.
 WEEKDAY_MAX_MIN = int(os.getenv("WEEKDAY_MAX_MIN", "120"))
+# Ride outdoors only when it is at least this warm during the session (°C). Morning
+# sessions also need a frost-free day (icy roads), and snow or sleet means indoors.
+OUTDOOR_MIN_TEMP_C = float(os.getenv("OUTDOOR_MIN_TEMP_C", "5"))
+_OUTDOOR_MAX_RAIN_MM = 5
 
 _CYCLING = ("Ride", "VirtualRide")
 _MAX_FILL_MIN = {"Ride": 150, "VirtualRide": 120, "Run": 75, "RollerSki": 90, "NordicSki": 120, "Swim": 60}
@@ -254,6 +259,7 @@ class PlannerInputs:
     injury_note: str = ""
     available_sports: list | None = None
     key_kinds_done_this_week: list = field(default_factory=list)   # "vo2"/"threshold" done since Monday
+    strength_dates: list = field(default_factory=list)   # strength done in the last week or planned by you
 
 
 @dataclass
@@ -265,6 +271,8 @@ class PlannerResult:
     max_hard_days: int
     week_targets: list[WeekTarget]
     notes: list[str] = field(default_factory=list)
+    # Strength sessions the safety rules may allow in the plan (more with an annual-plan strength target).
+    max_strength_sessions: int = MAX_STRENGTH_PER_PLAN
 
 
 class _Planner:
@@ -283,6 +291,10 @@ class _Planner:
         self._current_week = True
         self.rollski_by_week: dict[str, int] = {}
         self.strength_in_horizon = 0
+        # Strength you did lately or planned yourself: counts towards each week and keeps the gap.
+        self._known_strength = sorted({date.fromisoformat(d[:10]) for d in inp.strength_dates})
+        self._strength_dates: list[date] = list(self._known_strength)
+        self._strength_from_plan = any(t.strength_sessions is not None for t in inp.week_targets)
         self.notes: list[str] = []
         self.roles: dict[str, str] = {}
         self.options: dict[str, list[PlanDay]] = {}
@@ -307,15 +319,31 @@ class _Planner:
                 return False
         return True
 
-    def outdoor_ok(self, day: str, slot: str = "MAIN") -> bool:
+    def _weather_for(self, day: str) -> dict | None:
+        """The day's forecast. Past the end of the forecast, its last day stands in."""
         w = self.weather.get(day)
+        if w is None and self.weather:
+            last = max(self.weather)
+            if day > last:
+                w = self.weather[last]
+        return w
+
+    def outdoor_ok(self, day: str, slot: str = "MAIN") -> bool:
+        w = self._weather_for(day)
         if not w:
             return True
         if slot == "AM":
             rain, temp = w.get("rain_morning_mm", 0), w.get("temp_morning", w.get("temp_min"))
+            sky = w.get("weathercode_morning") or ""
         else:
             rain, temp = w.get("rain_afternoon_mm", w.get("rain_mm", 0)), w.get("temp_afternoon", w.get("temp_max"))
-        return (rain or 0) < 5 and (temp is None or temp >= 2)
+            sky = w.get("weathercode") or ""
+        if (rain or 0) >= _OUTDOOR_MAX_RAIN_MM or "snow" in sky or "sleet" in sky:
+            return False
+        if temp is not None and temp < OUTDOOR_MIN_TEMP_C:
+            return False
+        frost = w.get("temp_min")
+        return not (slot == "AM" and frost is not None and frost <= 0)  # icy roads after a frosty night
 
     def outdoor_slot(self, day: str) -> str | None:
         if self.outdoor_ok(day, "MAIN"):
@@ -498,6 +526,47 @@ class _Planner:
                          "(60-90 g carbohydrate per hour) and stay relaxed on the climbs."),
         )
 
+    def _strength_days(self, n: int, free: list[str], planned: dict, role_of: dict) -> list[str]:
+        """The best days for up to `n` strength sessions, at least MIN_STRENGTH_GAP_DAYS apart.
+
+        Easy and open days come first, but not the day before a key or long session (sore legs).
+        When more sessions are wanted than such days allow, strength goes after the key session
+        on a key-session day (that keeps the easy days easy), and last on the day before the
+        long session.
+        """
+        inp = self.inp
+        heavy = {day.date: role for items in planned.values() for day, role in items if role in ("key", "long")}
+
+        def usable(d: str) -> bool:
+            return (d not in inp.restricted_dates and self.allowed("WeightTraining", d)
+                    and not (d == inp.today.isoformat() and inp.time_available_today is not None))
+
+        preference = {"easy": 0, "open": 1, "rest_or_easy": 2}
+        cost: dict[str, int] = {}
+        for d in free:
+            if role_of[d] in preference and usable(d):
+                next_day = heavy.get((date.fromisoformat(d) + timedelta(days=1)).isoformat())
+                if next_day is None:
+                    cost[d] = preference[role_of[d]]
+                elif next_day == "long":
+                    cost[d] = 4
+        for d, role in heavy.items():
+            if role == "key" and usable(d):
+                cost[d] = 3
+
+        def apart(combo: tuple[str, ...]) -> bool:
+            dates = [date.fromisoformat(d) for d in combo]
+            if any(abs((d - k).days) < MIN_STRENGTH_GAP_DAYS for d in dates for k in self._strength_dates):
+                return False
+            return all((b - a).days >= MIN_STRENGTH_GAP_DAYS for a, b in zip(dates, dates[1:]))
+
+        days = sorted(cost)
+        for size in range(min(n, len(days)), 0, -1):
+            fitting = [combo for combo in combinations(days, size) if apart(combo)]
+            if fitting:
+                return list(min(fitting, key=lambda combo: (sum(cost[d] for d in combo), combo)))
+        return []
+
     def strength_program(self, week_target: WeekTarget) -> dict:
         meso = {"week_in_block": week_target.week_in_block, "is_deload": week_target.is_deload,
                 "phase_name": "Taper" if week_target.kind in ("taper", "race") else self.inp.phase}
@@ -654,31 +723,28 @@ class _Planner:
                 cap_for(d, 10_000),
             )
 
-        # 4) Strength (AM, on easy days that are not right before a key or long day).
-        n_strength = 0 if target.kind == "race" else (min(1, STRENGTH_PER_WEEK) if target.is_deload else STRENGTH_PER_WEEK)
+        # 4) Strength (AM, on easy days that are not right before a key or long day). The annual
+        #    plan's strength target sets the count when there is one; sessions you already did or
+        #    planned yourself that week count towards it.
+        wanted = STRENGTH_PER_WEEK if target.strength_sessions is None else target.strength_sessions
+        wanted = 0 if target.kind == "race" else (min(1, wanted) if target.is_deload else wanted)
+        monday = date.fromisoformat(target.week_start)
+        known = sum(1 for d in self._known_strength if monday <= d < monday + timedelta(days=7))
+        n_strength = max(wanted - known, 0)
+        horizon_cap = None if self._strength_from_plan else MAX_STRENGTH_PER_PLAN
+        if horizon_cap is not None:
+            n_strength = min(n_strength, max(horizon_cap - self.strength_in_horizon, 0))
         if "WeightTraining" in self.sports and n_strength > 0:
             program = self.strength_program(target)
-            heavy = {day.date for items in planned.values() for day, role in items if role in ("key", "long")}
-            strength_dates: list[date] = []
-            preference = {"easy": 0, "open": 1, "rest_or_easy": 2}
-            candidates = sorted(
-                (d for d in free if role_of[d] in preference and d not in inp.restricted_dates
-                 and (date.fromisoformat(d) + timedelta(days=1)).isoformat() not in heavy
-                 and self.allowed("WeightTraining", d)
-                 and not (d == inp.today.isoformat() and inp.time_available_today is not None)),
-                key=lambda d: (preference[role_of[d]], d),
-            )
-            for d in candidates:
-                if n_strength <= 0 or self.strength_in_horizon >= MAX_STRENGTH_PER_PLAN:
-                    break
-                dd = date.fromisoformat(d)
-                if any(abs((dd - other).days) < MIN_STRENGTH_GAP_DAYS for other in strength_dates):
-                    continue
-                session = strength_session(d, program)
+            for d in self._strength_days(n_strength, free, planned, role_of):
+                # On a key-session day the intervals come first and strength later, so the
+                # intervals are done on fresh legs.
+                slot = "PM" if any(role == "key" or day.slot == "AM" for day, role in planned[d]) else "AM"
+                session = strength_session(d, program, slot=slot)
                 add(session, "strength")
                 budget -= tss_of(session)
-                strength_dates.append(dd)
-                n_strength -= 1
+                # Across weeks too: a Sunday session and a Monday session are only one day apart.
+                self._strength_dates.append(date.fromisoformat(d))
 
         # 5) One full rest day (the first rest_or_easy day), then aerobic fill.
         rest_dates = set()
@@ -930,6 +996,8 @@ class _Planner:
             max_hard_days=hard_days,
             week_targets=inp.week_targets,
             notes=self.notes,
+            max_strength_sessions=max(MAX_STRENGTH_PER_PLAN,
+                                      sum(1 for d in days if d.intervals_type == "WeightTraining")),
         )
 
     def _add_rehab(self, days: list[PlanDay]) -> list[PlanDay]:

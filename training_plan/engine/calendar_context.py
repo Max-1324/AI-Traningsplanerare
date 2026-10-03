@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from training_plan.core.catalogs import CONSTRAINT_PREFIXES
 from training_plan.core.config import AI_TAG
 
 AVAILABILITY_CATEGORIES = {"HOLIDAY", "SICK", "INJURED"}
@@ -24,6 +25,11 @@ CONTEXT_CATEGORIES = {"PLAN", "TARGET", "NOTE"} | AVAILABILITY_CATEGORIES
 # Used when an availability event has no explicit training_availability. An injury
 # without one only blocks the sports it affects (see injuries_by_date).
 _DEFAULT_AVAILABILITY = {"SICK": "UNAVAILABLE", "INJURED": "NORMAL", "HOLIDAY": "NORMAL"}
+# Plan-builder types planned as strength sessions rather than endurance load ("Other" is
+# what the plan builder offers when strength training is not in its list).
+STRENGTH_TYPES = {"WeightTraining", "Other"}
+STRENGTH_SESSION_MIN = 30
+MAX_STRENGTH_PER_WEEK = 3
 _RECOVERY_WORDS = ("recovery", "rest week", "deload", "återhämtning", "vila", "erholung", "récupération")
 
 
@@ -43,7 +49,14 @@ def is_own_event(event: dict) -> bool:
     return AI_TAG in (event.get("description") or "")
 
 
+def is_constraint_event(event: dict) -> bool:
+    """A "Bara: …" / "Ej: …" (Only/Not) event that limits sports over its dates."""
+    return (event.get("name") or "").strip().lower().startswith(CONSTRAINT_PREFIXES)
+
+
 def is_context_event(event: dict) -> bool:
+    if is_constraint_event(event):
+        return True
     category = (event.get("category") or "").upper()
     if category == "NOTE":
         return bool(event.get("plan_applied"))
@@ -112,13 +125,41 @@ def _entry_tss(entry: dict | None, tss_per_hour: float) -> float | None:
     return None  # distance-only target
 
 
+def _strength_entries(week: dict) -> list[dict]:
+    return [e for sport, e in (week.get("sports") or {}).items() if sport in STRENGTH_TYPES]
+
+
 def week_tss(week: dict, tss_per_hour: float) -> float | None:
-    """The week's load target: the all-activities target if set, otherwise the sum per sport."""
+    """The week's endurance load target: the all-activities target if set, otherwise the sum per sport.
+
+    Strength targets are planned as strength sessions (see strength_sessions), not as
+    endurance load, so they are left out (and taken off an all-activities target).
+    """
+    strength = sum(t for t in (_entry_tss(e, tss_per_hour) for e in _strength_entries(week)) if t)
     total = _entry_tss(week.get("total"), tss_per_hour)
     if total is not None:
-        return total
-    parts = [t for t in (_entry_tss(e, tss_per_hour) for e in week.get("sports", {}).values()) if t is not None]
+        return max(total - strength, 0.0)
+    parts = [t for sport, e in week.get("sports", {}).items()
+             if sport not in STRENGTH_TYPES and (t := _entry_tss(e, tss_per_hour)) is not None]
     return sum(parts) if parts else None
+
+
+def strength_sessions(week: dict, tss_per_hour: float) -> int | None:
+    """Strength sessions for the week from its strength target (None when the plan has none).
+
+    Time targets are used directly; a load-only target is turned back into time with the
+    athlete's typical load per hour, as the plan builder turned hours into load.
+    """
+    entries = _strength_entries(week)
+    if not entries:
+        return None
+    minutes = 0.0
+    for entry in entries:
+        if entry.get("time"):
+            minutes += float(entry["time"]) / 60
+        elif entry.get("load"):
+            minutes += float(entry["load"]) / tss_per_hour * 60
+    return max(0, min(round(minutes / STRENGTH_SESSION_MIN), MAX_STRENGTH_PER_WEEK))
 
 
 def sport_group(sport_type: str | None) -> str:
@@ -140,7 +181,7 @@ def sport_split(week: dict, tss_per_hour: float) -> dict[str, float]:
     for sport, entry in (week.get("sports") or {}).items():
         tss = _entry_tss(entry, tss_per_hour)
         group = sport_group(sport)
-        if tss and group and group != "WeightTraining":
+        if tss and group and sport not in STRENGTH_TYPES:
             loads[group] = loads.get(group, 0.0) + tss
     total = sum(loads.values())
     return {g: round(v / total, 3) for g, v in loads.items()} if total > 0 else {}

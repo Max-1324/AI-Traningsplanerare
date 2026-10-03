@@ -103,7 +103,8 @@ def hard_sessions_for_week(target, signals: IntensitySignals, *, trainable_days:
     recent = signals.hard_by_week[-4:]
     handled_two = len(recent) == 4 and sum(1 for n in recent if n >= 2) >= 3   # one recovery week allowed
     roomy = trainable_days >= _THREE_MIN_DAYS and (hours or 0) >= _THREE_MIN_HOURS
-    recovering_well = (signals.hrv_state in (None, "NORMAL", "HIGH")
+    # Unmeasured HRV (no watch) counts as normal; only a measured drop holds the count back.
+    recovering_well = (signals.hrv_state not in ("LOW", "SLIGHTLY_LOW")
                        and (form is None or form >= _FORM_OK_FOR_MORE))
     if handled_two and roomy and recovering_well and KEY_SESSIONS_CAP >= 3:
         return 3, "3 hard sessions: two a week have gone well for four weeks and the week has room"

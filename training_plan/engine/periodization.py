@@ -14,11 +14,11 @@ today/tomorrow in the planner. That keeps the week stable and the day flexible.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 
 from training_plan.core.config import TARGET_CTL
-from training_plan.engine.calendar_context import sport_split, week_tss
+from training_plan.engine.calendar_context import sport_split, strength_sessions, week_tss
 from training_plan.engine.intensity import DEFAULT_HARD_SESSIONS
 from training_plan.engine.utils import race_priority
 
@@ -58,6 +58,7 @@ class WeekTarget:
     emphasis: str = ""         # "base" or "build": session formats (engine/intensity.py)
     # Share of the load per sport group ("cycling", "Run", …) from the annual plan; {} = planner decides.
     sport_split: dict = field(default_factory=dict)
+    strength_sessions: int | None = None   # from the annual plan's strength target; None = default
 
     @property
     def remaining_tss(self) -> int:
@@ -83,6 +84,8 @@ class WeekTarget:
         if self.sport_split:
             text += " | split " + ", ".join(f"{g} {share:.0%}" for g, share in
                                              sorted(self.sport_split.items(), key=lambda kv: -kv[1]))
+        if self.strength_sessions is not None:
+            text += f" | strength {self.strength_sessions}"
         if self.note:
             text += f" | {self.note}"
         if self.source != "planner":
@@ -233,8 +236,10 @@ def apply_calendar_targets(targets: list[WeekTarget], atp: dict[str, dict], tss_
     for target in targets:
         week = atp.get(target.week_start)
         weekly = week_tss(week, tss_per_hour) if week else None
+        strength = strength_sessions(week, tss_per_hour) if week else None
         if weekly is None:
-            result.append(target)  # no ATP week, or distance-only targets: keep our own load target
+            # No ATP week, or only distance/strength targets: keep our own load target.
+            result.append(replace(target, strength_sessions=strength) if strength is not None else target)
             ctl = _advance_ctl(ctl, target.tss_target)
             continue
         previous = atp.get((date.fromisoformat(target.week_start) - timedelta(days=7)).isoformat())
@@ -267,6 +272,7 @@ def apply_calendar_targets(targets: list[WeekTarget], atp: dict[str, dict], tss_
             source="intervals.icu",
             phase=week.get("phase") or "",
             sport_split=sport_split(week, tss_per_hour),
+            strength_sessions=strength,
         ))
         ctl = _advance_ctl(ctl, tss)
     return result

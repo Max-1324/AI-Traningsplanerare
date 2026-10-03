@@ -392,6 +392,9 @@ def coach_confidence_analysis(data_quality: dict, activities: list, wellness: li
     if hrv.get("state") == "INSUFFICIENT_DATA":
         score -= 10
         reasons.append("insufficient HRV data")
+    elif hrv.get("measured") is False:
+        score -= 10
+        reasons.append("no HRV in the last 7 days (assumed normal)")
     warnings = len((data_quality or {}).get("warnings", []))
     if warnings >= 5:
         score -= 20

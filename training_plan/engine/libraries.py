@@ -254,6 +254,8 @@ def parse_constraints_from_events(events: list) -> list[dict]:
         if end_date < start_date:
             end_date = start_date
             
+        span = start_date.isoformat() if end_date == start_date else f"{start_date.isoformat()}–{end_date.isoformat()}"
+        log.info(f"📅 Constraint: {span} → {mode.upper()} {', '.join(sport_types)} ({reason})")
         current_date = start_date
         while current_date <= end_date:
             constraint = {
@@ -266,7 +268,6 @@ def parse_constraints_from_events(events: list) -> list[dict]:
                 constraint["blocked_types"] = sport_types
 
             constraints.append(constraint)
-            log.info(f"📅 Constraint: {current_date.isoformat()} → {mode.upper()} {', '.join(sport_types)} ({reason})")
             current_date += timedelta(days=1)
 
     return constraints
